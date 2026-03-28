@@ -23,5 +23,39 @@ app.post('/', (req, res) => {
   res.status(200).send('OK');
 });
 
+app.get('/sneakers', async (req, res) => {
+  const query = req.query.q;
+  const size = req.query.size;
+  if (!query) return res.status(400).json({ error: 'Missing query param q' });
+  try {
+    const searchRes = await fetch(
+      `https://api.kicks.dev/v1/products/search?query=${encodeURIComponent(query)}&limit=1`,
+      { headers: { 'x-api-key': process.env.KICKSDB_API_KEY } }
+    );
+    const searchData = await searchRes.json();
+    const product = searchData?.data?.[0];
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const priceRes = await fetch(
+      `https://api.kicks.dev/v1/products/${product.id}/prices${size ? `?size=${size}` : ''}`,
+      { headers: { 'x-api-key': process.env.KICKSDB_API_KEY } }
+    );
+    const priceData = await priceRes.json();
+
+    return res.json({
+      name: product.title,
+      brand: product.brand,
+      thumbnail: product.image,
+      sku: product.sku,
+      stockxPrice: priceData?.data?.stockx?.price || null,
+      goatPrice: priceData?.data?.goat?.price || null,
+      requestedSize: size || null,
+      source: 'kicksdb'
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`eBay endpoint listening on port ${PORT}`));
