@@ -69,52 +69,66 @@ app.get('/sneakers', async (req, res) => {
   }
 });
 
-// ─── StockX price via Algolia (server-side, no CORS issues) ──────────────────
-const SX_ALGOLIA_APP = 'XW7SBCT9AD';
-const SX_ALGOLIA_KEY = '6b5e76b49705eb9f51a06d3c82f7acee';
-
+// ─── Market price: StockX Algolia → GOAT Algolia fallback ────────────────────
 app.get('/stockx', async (req, res) => {
   const query = req.query.q;
   const slug  = req.query.slug;
   if (!query && !slug) return res.status(400).json({ error: 'Missing q or slug param' });
 
-  const searchQuery = query || (slug ? slug.replace(/-/g, ' ') : '');
-  try {
-    const algoliaRes = await fetch(
-      `https://${SX_ALGOLIA_APP}-dsn.algolia.net/1/indexes/products/query`,
-      {
+  const searchQuery = query || slug.replace(/-/g, ' ');
+
+  // Method 1: StockX via Algolia (try DSN then main cluster)
+  for (const host of ['xw7sbct9ad-dsn.algolia.net', 'xw7sbct9ad.algolia.net']) {
+    try {
+      const r = await fetch(`https://${host}/1/indexes/products/query`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Algolia-Application-Id': SX_ALGOLIA_APP,
-          'X-Algolia-API-Key': SX_ALGOLIA_KEY,
+          'X-Algolia-Application-Id': 'XW7SBCT9AD',
+          'X-Algolia-API-Key': '6b5e76b49705eb9f51a06d3c82f7acee',
         },
-        body: JSON.stringify({ params: `query=${encodeURIComponent(searchQuery)}&hitsPerPage=1&getRankingInfo=false` }),
+        body: JSON.stringify({ params: `query=${encodeURIComponent(searchQuery)}&hitsPerPage=1` }),
+        signal: AbortSignal.timeout(5000),
+      });
+      console.log('[/stockx] StockX Algolia', host, '→', r.status);
+      if (r.ok) {
+        const d = await r.json();
+        const hit = d?.hits?.[0];
+        const lowestAsk = hit?.market?.lowestAsk ?? hit?.lowest_ask ?? null;
+        const lastSale  = hit?.market?.lastSale  ?? hit?.last_sale  ?? null;
+        if (lowestAsk != null || lastSale != null) {
+          return res.json({ lowestAsk, lastSale, name: hit.name ?? hit.title ?? null, source: 'stockx' });
+        }
       }
-    );
-    console.log('[StockX] Algolia status:', algoliaRes.status, '| query:', searchQuery);
-    if (!algoliaRes.ok) {
-      const txt = await algoliaRes.text();
-      return res.status(502).json({ error: `Algolia ${algoliaRes.status}: ${txt.slice(0, 200)}` });
-    }
-    const ad = await algoliaRes.json();
-    const hit = ad?.hits?.[0];
-    if (!hit) return res.status(404).json({ error: 'No StockX result found' });
-
-    const lowestAsk = hit.market?.lowestAsk ?? hit.lowest_ask ?? null;
-    const lastSale  = hit.market?.lastSale  ?? hit.last_sale  ?? null;
-    console.log('[StockX] hit:', hit.name ?? hit.title, '| ask:', lowestAsk, '| last:', lastSale);
-
-    return res.json({
-      name:       hit.name ?? hit.title ?? null,
-      lowestAsk:  lowestAsk,
-      lastSale:   lastSale,
-      url:        hit.url ? `https://stockx.com/${hit.url}` : (slug ? `https://stockx.com/${slug}` : null),
-      source:     'stockx_algolia',
-    });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
+    } catch (e) { console.warn('[/stockx] StockX Algolia', host, 'failed:', e.message); }
   }
+
+  // Method 2: GOAT via Algolia (similar market data, different source)
+  try {
+    const r = await fetch('https://2fwotdvm2o-dsn.algolia.net/1/indexes/product_variants_v2/query', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Algolia-Application-Id': '2FWOTDVM2O',
+        'X-Algolia-API-Key': 'ac96de6a3afb9236e994f9c3c9a5ab9d',
+      },
+      body: JSON.stringify({ params: `query=${encodeURIComponent(searchQuery)}&hitsPerPage=1` }),
+      signal: AbortSignal.timeout(5000),
+    });
+    console.log('[/stockx] GOAT Algolia →', r.status);
+    if (r.ok) {
+      const d = await r.json();
+      const hit = d?.hits?.[0];
+      const lowestAsk = hit?.lowest_listing_price_cents != null ? hit.lowest_listing_price_cents / 100 : null;
+      const lastSale  = hit?.last_sold_price_cents      != null ? hit.last_sold_price_cents / 100      : null;
+      console.log('[/stockx] GOAT hit:', hit?.name, '| ask:', lowestAsk, '| last:', lastSale);
+      if (lowestAsk != null || lastSale != null) {
+        return res.json({ lowestAsk, lastSale, name: hit.name ?? null, source: 'goat' });
+      }
+    }
+  } catch (e) { console.warn('[/stockx] GOAT Algolia failed:', e.message); }
+
+  return res.status(404).json({ error: 'Market price not found' });
 });
 
 const PORT = process.env.PORT || 3000;
