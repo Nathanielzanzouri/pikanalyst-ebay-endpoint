@@ -28,12 +28,24 @@ app.get('/sneakers', async (req, res) => {
   const size = req.query.size;
   if (!query) return res.status(400).json({ error: 'Missing query param q' });
   try {
-    const searchRes = await fetch(
-      `https://api.kicks.dev/v1/products/search?query=${encodeURIComponent(query)}&limit=1`,
-      { headers: { 'x-api-key': process.env.KICKSDB_API_KEY } }
-    );
-    const searchData = await searchRes.json();
-    const product = searchData?.data?.[0];
+    // Try multiple query variants — kicks.dev indexes "Air Jordan", not "Nike Air Jordan"
+    const variants = [
+      query,
+      query.replace(/^Nike\s+/i, ''),
+      query.replace(/^Adidas\s+/i, ''),
+      query.replace(/^(Nike|Adidas|Jordan|New Balance|Asics|Puma|Reebok|Converse|Vans)\s+/i, ''),
+    ].filter((q, i, arr) => q && arr.indexOf(q) === i);
+
+    let product = null;
+    for (const q of variants) {
+      const searchRes = await fetch(
+        `https://api.kicks.dev/v1/products/search?query=${encodeURIComponent(q)}&limit=1`,
+        { headers: { 'x-api-key': process.env.KICKSDB_API_KEY } }
+      );
+      const searchData = await searchRes.json();
+      product = searchData?.data?.[0];
+      if (product) break;
+    }
     if (!product) return res.status(404).json({ error: 'Product not found' });
 
     const priceRes = await fetch(
