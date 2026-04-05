@@ -9,6 +9,60 @@ const crypto  = require('crypto');
 const app = express();
 app.use(express.json());
 
+const { createClient } = require('@supabase/supabase-js');
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// Plan daily limits
+const PLAN_LIMITS = { free: 10, pro: 100 };
+
+// Validate token, check + increment scan count.
+// Returns { user } on success, calls res.status(4xx).json() and returns null on failure.
+async function validateAndCount(token, res) {
+  if (!token) {
+    res.status(401).json({ error: 'missing_token' });
+    return null;
+  }
+
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, plan, scan_count, scan_reset_at, scan_limit_override')
+    .eq('token', token)
+    .single();
+
+  if (error || !user) {
+    res.status(401).json({ error: 'invalid_token' });
+    return null;
+  }
+
+  // Reset daily count if it's a new day
+  const today = new Date().toISOString().slice(0, 10);
+  if (user.scan_reset_at !== today) {
+    await supabase
+      .from('users')
+      .update({ scan_count: 0, scan_reset_at: today })
+      .eq('id', user.id);
+    user.scan_count = 0;
+  }
+
+  // Check limit
+  const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+  if (user.scan_count >= limit) {
+    res.status(402).json({ error: 'limit_reached', plan: user.plan, limit, count: user.scan_count });
+    return null;
+  }
+
+  // Increment
+  await supabase
+    .from('users')
+    .update({ scan_count: user.scan_count + 1 })
+    .eq('id', user.id);
+
+  return user;
+}
+
 app.get('/', (req, res) => {
   const { challenge_code } = req.query;
 
