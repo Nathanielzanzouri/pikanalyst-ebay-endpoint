@@ -1351,10 +1351,23 @@ app.get('/me', async (req, res) => {
 app.post('/scan', async (req, res) => {
   const { token, type, ...params } = req.body;
 
-  // Token validation (skip if REQUIRE_AUTH=false)
+  // Token validation + quota info (always fetch when token provided)
+  let quota = null;
   if (process.env.REQUIRE_AUTH !== 'false') {
     const user = await validateAndCount(token, res);
-    if (!user) return; // validateAndCount already sent the error response
+    if (!user) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const scanCount = user.scan_reset_at < today ? 0 : user.scan_count;
+    const limit = user.scan_limit_override ?? (user.plan === 'pro' ? 100 : 10);
+    quota = { email: user.email, remaining: Math.max(0, limit - scanCount), limit };
+  } else if (token) {
+    const { data: user } = await supabase.from('users').select('email, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
+    if (user) {
+      const today = new Date().toISOString().slice(0, 10);
+      const scanCount = user.scan_reset_at < today ? 0 : user.scan_count;
+      const limit = user.scan_limit_override ?? (user.plan === 'pro' ? 100 : 10);
+      quota = { email: user.email, remaining: Math.max(0, limit - scanCount), limit };
+    }
   }
 
   try {
@@ -1366,7 +1379,7 @@ app.post('/scan', async (req, res) => {
     } else {
       return res.status(400).json({ error: 'unknown_type', type });
     }
-    return res.json(result);
+    return res.json({ ...result, quota });
   } catch (err) {
     console.error('[Yamo] /scan error:', err.message);
     return res.status(500).json({ error: 'scan_failed', message: err.message });
