@@ -392,6 +392,12 @@ function isFakeTitle(title) {
   return FAKE_TITLES.some(fake => lower.includes(fake));
 }
 
+const SHOE_KEYWORDS = ['nike','adidas','jordan','air max','dunk','yeezy','new balance','asics','puma','reebok','converse','vans','saucony','salomon','on running','nb ','af1','force 1','blazer','cortez','pegasus','ultraboost','stan smith','superstar','gazelle','990','991','992','993','2002','990v'];
+function isShoeTitle(title) {
+  const lower = title.toLowerCase();
+  return SHOE_KEYWORDS.some(k => lower.includes(k));
+}
+
 // ─── Helper: recursive key search in deep object ──────────────────────────────
 function findDeep(obj, key, depth = 0) {
   if (depth > 10 || obj === null || typeof obj !== 'object') return undefined;
@@ -1217,7 +1223,9 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     try {
       if (mode === 'shoes') {
         // Always use vision for shoes — title alone has no colorway info
-        item = await identifySneaker(imageBase64, hasTitle ? rawTitle : null, sellerPrice);
+        // Only pass title if it actually looks like a shoe name (not auction placeholders like "PDD 1 PAS D'ANNULATION")
+        const shoeTitle = hasTitle && isShoeTitle(rawTitle) ? rawTitle : null;
+        item = await identifySneaker(imageBase64, shoeTitle, sellerPrice);
         if (item) item.title_source = 'vision';
       } else if (mode === 'cards') {
         const card = await identifyCard(imageBase64, null, sellerPrice);
