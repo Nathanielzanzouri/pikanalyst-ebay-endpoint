@@ -24,7 +24,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(
