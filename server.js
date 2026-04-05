@@ -94,7 +94,7 @@ app.post('/auth/signup', async (req, res) => {
     }
 
     // Send token email via Resend
-    await resend.emails.send({
+    const { error: sendError } = await resend.emails.send({
       from: 'Yamo <noreply@yamo.app>',
       to: email,
       subject: 'Your Yamo access token',
@@ -106,6 +106,7 @@ app.post('/auth/signup', async (req, res) => {
         <p>Free plan: 10 scans/day. Upgrade to Pro at <a href="https://yamo.app">yamo.app</a>.</p>
       `,
     });
+    if (sendError) throw new Error(`Resend error: ${sendError.message ?? JSON.stringify(sendError)}`);
 
     return res.json({ success: true });
   } catch (err) {
