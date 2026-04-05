@@ -397,6 +397,16 @@ function isShoeTitle(title) {
   const lower = title.toLowerCase();
   return SHOE_KEYWORDS.some(k => lower.includes(k));
 }
+// Strip EU size info ("taille 37,5", "taille 42", "T42", "sz 42" etc.) from shoe titles
+function stripShoeSizeFromTitle(title) {
+  return title
+    .replace(/\btaille\s*[\d,\.]+/gi, '')
+    .replace(/\bT\s*[\d,\.]+(?=\s|$)/gi, '')
+    .replace(/\bsz\.?\s*[\d,\.]+/gi, '')
+    .replace(/\bsize\s*[\d,\.]+/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 // ─── Helper: recursive key search in deep object ──────────────────────────────
 function findDeep(obj, key, depth = 0) {
@@ -1066,10 +1076,11 @@ RULES:
 - Do NOT confuse Jordan 1 Mid with Jordan 1 High/Retro High OG — different shoes.
 
 Reply ONLY with JSON (no markdown):
-{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Mid","colorway":"Grey Fog","sku":"554724-059","size_eu":"45","size_us":"11","condition":"New","seller_asking_price":null,"stockx_slug":"air-jordan-1-mid-grey-fog","ebay_search":"Air Jordan 1 Mid Grey Fog size 11","confidence":90}
+{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Mid","colorway":"Grey Fog","sku":"554724-059","size_eu":"45","size_us":"11","condition":"New","seller_asking_price":null,"stockx_slug":"air-jordan-1-mid-grey-fog","ebay_search":"Air Jordan 1 Mid Grey Fog","confidence":90}
 
 If no sneaker identifiable: {"item_type":"unknown"}
-stockx_slug = exact slug from stockx.com. confidence is 0-100.`;
+stockx_slug = exact slug from stockx.com. confidence is 0-100.
+ebay_search = brand + model + colorway ONLY — never include size.`;
 
   const data = await claudeFetch({
     model: 'claude-haiku-4-5-20251001',
@@ -1168,7 +1179,8 @@ ${hasTitleAuto ? `- Extract brand/model/colorway FROM THE TITLE first. Use image
 - Do NOT confuse Jordan 1 Mid with Jordan 1 High/Retro High OG — different shoes.
 
 If SNEAKER, reply ONLY with JSON (no markdown):
-{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Mid","colorway":"Grey Fog","sku":"554724-059","size_eu":"45","size_us":"11","condition":"New","seller_asking_price":null,"stockx_slug":"air-jordan-1-mid-grey-fog","ebay_search":"Air Jordan 1 Mid Grey Fog size 11","confidence":90}
+{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Mid","colorway":"Grey Fog","sku":"554724-059","size_eu":"45","size_us":"11","condition":"New","seller_asking_price":null,"stockx_slug":"air-jordan-1-mid-grey-fog","ebay_search":"Air Jordan 1 Mid Grey Fog","confidence":90}
+ebay_search = brand + model + colorway ONLY — never include size.
 
 If POKEMON CARD, reply ONLY with JSON (no markdown):
 {"item_type":"card","card_name":"Squirtle","card_number":"170","set_name":"Scarlet & Violet 151","condition":"Near Mint","condition_score":85,"seller_asking_price":null,"ebay_search":"Squirtle 170 151 NM","confidence":95}
@@ -1224,7 +1236,7 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
       if (mode === 'shoes') {
         // Always use vision for shoes — title alone has no colorway info
         // Only pass title if it actually looks like a shoe name (not auction placeholders like "PDD 1 PAS D'ANNULATION")
-        const shoeTitle = hasTitle && isShoeTitle(rawTitle) ? rawTitle : null;
+        const shoeTitle = hasTitle && isShoeTitle(rawTitle) ? stripShoeSizeFromTitle(rawTitle) : null;
         item = await identifySneaker(imageBase64, shoeTitle, sellerPrice);
         if (item) item.title_source = 'vision';
       } else if (mode === 'cards') {
