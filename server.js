@@ -1316,7 +1316,7 @@ app.post('/auth/signup', async (req, res) => {
         <p>Free plan: 10 scans/day. Upgrade to Pro at <a href="https://yamo.app">yamo.app</a>.</p>
       `,
     });
-    if (sendError) throw new Error(`Resend error: ${sendError.message ?? JSON.stringify(sendError)}`);
+    if (sendError) console.warn('[Yamo] /auth/signup email not sent (Resend sandbox limit):', sendError.message ?? JSON.stringify(sendError));
 
     return res.json({ success: true });
   } catch (err) {
