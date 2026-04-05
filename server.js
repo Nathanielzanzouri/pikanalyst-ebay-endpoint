@@ -1205,22 +1205,19 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
 
   let item;
 
-  if (hasTitle && (mode === 'cards' || mode === 'shoes')) {
+  if (hasTitle && mode === 'cards') {
     const ebayQuery = buildEbayQuery(rawTitle);
-    if (mode === 'cards') {
-      const numMatch = ebayQuery.match(/\b(\d+\/\d+)\b/);
-      const cardNumber = numMatch?.[1] ?? '';
-      const cardName = cardNumber
-        ? ebayQuery.replace(numMatch[0], '').replace(/[#\s]+$/, '').trim() || ebayQuery
-        : ebayQuery;
-      item = { item_type: 'card', card_name: cardName, card_number: cardNumber, set_name: '', condition: 'Near Mint', condition_score: 85, confidence: 100, seller_asking_price: sellerPrice ?? null, ebay_search: ebayQuery, title_source: 'dom' };
-    } else {
-      item = { item_type: 'sneaker', brand: '', model: ebayQuery, colorway: '', size_us: null, condition: 'New', seller_asking_price: sellerPrice ?? null, stockx_slug: '', ebay_search: ebayQuery, confidence: 100, title_source: 'dom' };
-    }
+    const numMatch = ebayQuery.match(/\b(\d+\/\d+)\b/);
+    const cardNumber = numMatch?.[1] ?? '';
+    const cardName = cardNumber
+      ? ebayQuery.replace(numMatch[0], '').replace(/[#\s]+$/, '').trim() || ebayQuery
+      : ebayQuery;
+    item = { item_type: 'card', card_name: cardName, card_number: cardNumber, set_name: '', condition: 'Near Mint', condition_score: 85, confidence: 100, seller_asking_price: sellerPrice ?? null, ebay_search: ebayQuery, title_source: 'dom' };
   } else {
     try {
       if (mode === 'shoes') {
-        item = await identifySneaker(imageBase64, null, sellerPrice);
+        // Always use vision for shoes — title alone has no colorway info
+        item = await identifySneaker(imageBase64, hasTitle ? rawTitle : null, sellerPrice);
         if (item) item.title_source = 'vision';
       } else if (mode === 'cards') {
         const card = await identifyCard(imageBase64, null, sellerPrice);
