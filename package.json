@@ -5,6 +5,11 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "@supabase/supabase-js": "^2.101.1",
+    "express": "^4.18.2",
+    "resend": "^6.10.0"
+  },
+  "devDependencies": {
+    "dotenv": "^17.4.0"
   }
 }

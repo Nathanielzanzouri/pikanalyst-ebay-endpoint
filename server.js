@@ -1,3 +1,8 @@
+// Load .env in development (Render injects env vars directly in production)
+if (process.env.NODE_ENV !== 'production') {
+  try { require('dotenv').config(); } catch {}
+}
+
 const express = require('express');
 const crypto  = require('crypto');
 
