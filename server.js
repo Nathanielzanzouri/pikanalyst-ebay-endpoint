@@ -1308,6 +1308,31 @@ app.post('/auth/signup', async (req, res) => {
   }
 });
 
+app.post('/scan', async (req, res) => {
+  const { token, type, ...params } = req.body;
+
+  // Token validation (skip if REQUIRE_AUTH=false)
+  if (process.env.REQUIRE_AUTH !== 'false') {
+    const user = await validateAndCount(token, res);
+    if (!user) return; // validateAndCount already sent the error response
+  }
+
+  try {
+    let result;
+    if (type === 'analyze') {
+      result = await handleAnalyze(params);
+    } else if (type === 'manual') {
+      result = await handleManualLookup(params.cardName, params.language);
+    } else {
+      return res.status(400).json({ error: 'unknown_type', type });
+    }
+    return res.json(result);
+  } catch (err) {
+    console.error('[Yamo] /scan error:', err.message);
+    return res.status(500).json({ error: 'scan_failed', message: err.message });
+  }
+});
+
 app.get('/', (req, res) => {
   const { challenge_code } = req.query;
 
