@@ -1325,6 +1325,29 @@ app.post('/auth/signup', async (req, res) => {
   }
 });
 
+app.get('/me', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).json({ error: 'missing_token' });
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('email, plan, scan_count, scan_reset_at, scan_limit_override')
+    .eq('token', token)
+    .single();
+
+  if (!user) return res.status(401).json({ error: 'invalid_token' });
+
+  // Reset count if it's a new day
+  const today = new Date().toISOString().slice(0, 10);
+  let scanCount = user.scan_count;
+  if (user.scan_reset_at < today) scanCount = 0;
+
+  const limit = user.scan_limit_override ?? (user.plan === 'pro' ? 100 : 10);
+  const remaining = Math.max(0, limit - scanCount);
+
+  return res.json({ email: user.email, plan: user.plan, scan_count: scanCount, limit, remaining });
+});
+
 app.post('/scan', async (req, res) => {
   const { token, type, ...params } = req.body;
 
