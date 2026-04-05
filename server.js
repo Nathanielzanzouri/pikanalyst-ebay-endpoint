@@ -1305,7 +1305,7 @@ app.post('/auth/signup', async (req, res) => {
 
     // Send token email via Resend
     const { error: sendError } = await resend.emails.send({
-      from: 'Yamo <noreply@yamo.app>',
+      from: 'Yamo <onboarding@resend.dev>',
       to: email,
       subject: 'Your Yamo access token',
       html: `
