@@ -63,6 +63,57 @@ async function validateAndCount(token, res) {
   return user;
 }
 
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+app.post('/auth/signup', async (req, res) => {
+  const { email } = req.body;
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ error: 'invalid_email' });
+  }
+
+  try {
+    // Check if user already exists — re-send their token if so (idempotent)
+    const { data: existing } = await supabase
+      .from('users')
+      .select('token')
+      .eq('email', email)
+      .single();
+
+    let token = existing?.token ?? null;
+
+    if (!existing) {
+      // Create new user
+      const { data: newUser, error: insertError } = await supabase
+        .from('users')
+        .insert({ email })
+        .select('token')
+        .single();
+      if (insertError) throw insertError;
+      token = newUser.token;
+    }
+
+    // Send token email via Resend
+    await resend.emails.send({
+      from: 'Yamo <noreply@yamo.app>',
+      to: email,
+      subject: 'Your Yamo access token',
+      html: `
+        <p>Welcome to Yamo!</p>
+        <p>Your access token is:</p>
+        <p style="font-size:18px;font-weight:bold;letter-spacing:2px;">${token}</p>
+        <p>Paste this token into the Yamo extension popup to activate it.</p>
+        <p>Free plan: 10 scans/day. Upgrade to Pro at <a href="https://yamo.app">yamo.app</a>.</p>
+      `,
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[Yamo] /auth/signup error:', err.message);
+    return res.status(500).json({ error: 'signup_failed' });
+  }
+});
+
 app.get('/', (req, res) => {
   const { challenge_code } = req.query;
 
