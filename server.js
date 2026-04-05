@@ -7,6 +7,23 @@ const express = require('express');
 const crypto  = require('crypto');
 
 const app = express();
+
+// CORS — allow Lovable preview/prod domains and the Chrome extension
+const ALLOWED_ORIGINS = [
+  'https://yamoapp.lovable.app',
+  'https://yamo.app',
+];
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!origin || ALLOWED_ORIGINS.includes(origin) || /^https:\/\/[a-z0-9-]+\.lovableproject\.com$/.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json());
 
 const { createClient } = require('@supabase/supabase-js');
