@@ -1021,7 +1021,13 @@ async function handleSneaker(item, sellerPrice) {
 const VISION_PROMPT_CARDS = `You are an expert in collectible trading cards.
 Look at this image from a live auction stream.
 Return ONLY a search string optimized for eBay, nothing else.
-Include: card name in English + card number (e.g. 4/102) + set name + edition + language if not English + grade if visible.
+Include: card name (as printed) + card number + set name + edition + language if not English + grade if visible.
+
+CRITICAL — card number:
+- It is printed in small text at the BOTTOM-LEFT corner of the card (format: NNN/NNN e.g. 215/182)
+- Read it pixel by pixel from the image — do NOT guess or infer from the set name
+- If you cannot read it clearly, omit it entirely — a missing number is better than a wrong one
+
 Examples:
 "Charizard 4/102 Base Set 1st Edition Holo PSA 9"
 "Spiritomb 244/217 Scarlet Violet Twilight Masquerade Alt Art"
@@ -1145,10 +1151,13 @@ async function identifyCard(imageBase64, streamTitle, sellerPrice) {
 STREAM TITLE: ${streamTitle}
 DISPLAYED PRICE: ${priceText}
 Identify the Pokemon card. If the image is blurry or no card is visible, return card_name: 'Non identifiable'.
-IMPORTANT: Return card_name EXACTLY as printed on the card — do NOT translate. If the card says "Vibraninf", return "Vibraninf". If it says "Dracaufeu", return "Dracaufeu". set_name should be in English.
+IMPORTANT:
+- card_name: EXACTLY as printed on the card — do NOT translate
+- card_number: READ from bottom-left corner of the card (format NNN/NNN). If not clearly legible, return ""  — do NOT guess
+- set_name: in English
 Reply ONLY with JSON, no markdown:
-{ "card_name": "name exactly as on card e.g. Vibraninf", "card_number": "", "set_name": "English set name e.g. Scarlet & Violet 151", "condition": "Near Mint|Lightly Played|Moderately Played|Heavily Played|Damaged", "condition_score": 0, "seller_asking_price": null, "ebay_search": "optimized eBay search e.g. Vibraninf 203/198 SV", "confidence": 95 }
-Note: confidence is an integer 0-100.`;
+{ "card_name": "name exactly as on card e.g. Vibraninf", "card_number": "215/182", "set_name": "English set name e.g. Scarlet & Violet 151", "condition": "Near Mint|Lightly Played|Moderately Played|Heavily Played|Damaged", "condition_score": 0, "seller_asking_price": null, "ebay_search": "optimized eBay search e.g. Vibraninf 215/182 SV", "confidence": 95 }
+Note: confidence is an integer 0-100. card_number must be read from the image, never inferred.`;
 
   const data = await claudeFetch({
     model: 'claude-sonnet-4-20250514',
@@ -1192,10 +1201,11 @@ If SNEAKER, reply ONLY with JSON (no markdown):
 ebay_search = brand + model + colorway ONLY — never include size.
 
 If POKEMON CARD, reply ONLY with JSON (no markdown):
-{"item_type":"card","card_name":"Squirtle","card_number":"170","set_name":"Scarlet & Violet 151","condition":"Near Mint","condition_score":85,"seller_asking_price":null,"ebay_search":"Squirtle 170 151 NM","confidence":95}
+{"item_type":"card","card_name":"Squirtle","card_number":"170/165","set_name":"Scarlet & Violet 151","condition":"Near Mint","condition_score":85,"seller_asking_price":null,"ebay_search":"Squirtle 170/165 151 NM","confidence":95}
 
 If unidentifiable: {"item_type":"unknown"}
-card_name EXACTLY as printed on the card — do NOT translate. set_name in English. stockx_slug = exact slug from stockx.com. confidence is 0-100.`;
+card_name EXACTLY as printed on the card — do NOT translate. set_name in English. stockx_slug = exact slug from stockx.com. confidence is 0-100.
+card_number: READ from bottom-left corner of the card — do NOT guess. If not clearly legible, return "".`;
 
   const data = await claudeFetch({
     model: 'claude-sonnet-4-20250514',
