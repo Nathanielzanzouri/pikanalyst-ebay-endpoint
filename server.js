@@ -1145,9 +1145,9 @@ async function identifyCard(imageBase64, streamTitle, sellerPrice) {
 STREAM TITLE: ${streamTitle}
 DISPLAYED PRICE: ${priceText}
 Identify the Pokemon card. If the image is blurry or no card is visible, return card_name: 'Non identifiable'.
-IMPORTANT: Always return card_name and set_name in ENGLISH, regardless of the language on the card.
+IMPORTANT: Return card_name EXACTLY as printed on the card — do NOT translate. If the card says "Vibraninf", return "Vibraninf". If it says "Dracaufeu", return "Dracaufeu". set_name should be in English.
 Reply ONLY with JSON, no markdown:
-{ "card_name": "English name e.g. Squirtle", "card_number": "", "set_name": "English set name e.g. Scarlet & Violet 151", "condition": "Near Mint|Lightly Played|Moderately Played|Heavily Played|Damaged", "condition_score": 0, "seller_asking_price": null, "ebay_search": "optimized eBay search e.g. Squirtle 170 scarlet violet 151 NM", "confidence": 95 }
+{ "card_name": "name exactly as on card e.g. Vibraninf", "card_number": "", "set_name": "English set name e.g. Scarlet & Violet 151", "condition": "Near Mint|Lightly Played|Moderately Played|Heavily Played|Damaged", "condition_score": 0, "seller_asking_price": null, "ebay_search": "optimized eBay search e.g. Vibraninf 203/198 SV", "confidence": 95 }
 Note: confidence is an integer 0-100.`;
 
   const data = await claudeFetch({
@@ -1195,7 +1195,7 @@ If POKEMON CARD, reply ONLY with JSON (no markdown):
 {"item_type":"card","card_name":"Squirtle","card_number":"170","set_name":"Scarlet & Violet 151","condition":"Near Mint","condition_score":85,"seller_asking_price":null,"ebay_search":"Squirtle 170 151 NM","confidence":95}
 
 If unidentifiable: {"item_type":"unknown"}
-card_name and set_name always in ENGLISH. stockx_slug = exact slug from stockx.com. confidence is 0-100.`;
+card_name EXACTLY as printed on the card — do NOT translate. set_name in English. stockx_slug = exact slug from stockx.com. confidence is 0-100.`;
 
   const data = await claudeFetch({
     model: 'claude-sonnet-4-20250514',
