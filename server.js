@@ -381,7 +381,12 @@ function titleMatchesCard(query, resultTitle) {
 // ─── Fake Whatnot placeholder titles ─────────────────────────────────────────
 const FAKE_TITLES = [
   'carte vue en live',
+  'carte vue a l\'écran',
+  'carte vue à l\'écran',
+  'carte vue a l\'ecran',
+  'carte vue à l\'ecran',
   'card shown in live',
+  'card on screen',
   'article en live',
   'live item',
   'en live',
