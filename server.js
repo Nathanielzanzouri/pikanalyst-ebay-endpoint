@@ -1124,8 +1124,12 @@ async function identifyCard(imageBase64, streamTitle, sellerPrice) {
       return { card_name: 'UNCLEAR' };
     }
     const cardNumMatch = result.match(/\b(\d+\/\d+)\b/);
+    // Extract name = everything before the card number, or full result if no number
+    const cardName = cardNumMatch
+      ? result.slice(0, result.indexOf(cardNumMatch[1])).replace(/[#\s]+$/, '').trim()
+      : result.replace(/\b\d+\/\d+\b.*/, '').trim();
     return {
-      card_name: result.split(/\s+/)[0] ?? result,
+      card_name: cardName || result,
       card_number: cardNumMatch?.[1] ?? '',
       set_name: '',
       condition: 'Near Mint',
