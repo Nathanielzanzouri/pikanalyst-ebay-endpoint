@@ -444,8 +444,20 @@ function buildEbayQuery(domTitle) {
     .replace(/^\s*\d+\s*\[\s*/, '')
     .replace(/\s*#\d+\s*$/, '')
     .replace(/[^\u0000-\u024F]/g, '')
+    .replace(/[()]/g, '')          // strip parentheses (eBay treats them as grouping operators)
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// ─── Parse Whatnot-style "(SETCODE NUMBER)" titles ────────────────────────────
+// e.g. "Charizard (CLL 003)" → { cardName: "Charizard", setCode: "CLL", cardNum: "003" }
+function parseWhatnotTitle(ebayQuery) {
+  const m = ebayQuery.match(/^(.+?)\s+([A-Za-z]{2,5})\s+(\d{2,4}(?:\/\d{2,4})?)\s*$/);
+  if (!m) return null;
+  // The middle token must look like a set abbreviation (all uppercase after trim)
+  const setCode = m[2];
+  if (!/^[A-Z]{2,5}$/.test(setCode)) return null;
+  return { cardName: m[1].trim(), setCode, cardNum: m[3] };
 }
 
 // ─── Query builder ────────────────────────────────────────────────────────────
@@ -1269,13 +1281,26 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     const numMatch    = ebayQuery.match(/\b(\d+\/\d+)\b/);
     // Detect non-standard card numbers: TG01-TG30 (Trainer Gallery), PROMO, S-prefix, etc.
     const altNumMatch = !numMatch && ebayQuery.match(/\b(tg\d{1,3}|s\d{1,3}|promo\d*)\b/i);
-    const cardNumber = numMatch?.[1] ?? (altNumMatch ? altNumMatch[1].toUpperCase() : '');
-    const cardName = numMatch
-      ? ebayQuery.replace(numMatch[0], '').replace(/[#\s]+$/, '').trim() || ebayQuery
-      : altNumMatch
-      ? ebayQuery.replace(new RegExp(`\\b${altNumMatch[1]}\\b`, 'i'), '').replace(/[#\s]+$/, '').trim() || ebayQuery
-      : ebayQuery;
-    item = { item_type: 'card', card_name: cardName, card_number: cardNumber, set_name: '', condition: 'Near Mint', condition_score: 85, confidence: 100, seller_asking_price: sellerPrice ?? null, ebay_search: ebayQuery, title_source: 'dom' };
+    // Detect Whatnot-style "Name SETCODE NUMBER" format (after paren stripping): "Charizard CLL 003"
+    const whatnotParsed = (!numMatch && !altNumMatch) ? parseWhatnotTitle(ebayQuery) : null;
+
+    let cardName, cardNumber, setName = '';
+    if (numMatch) {
+      cardNumber = numMatch[1];
+      cardName   = ebayQuery.replace(numMatch[0], '').replace(/[#\s]+$/, '').trim() || ebayQuery;
+    } else if (altNumMatch) {
+      cardNumber = altNumMatch[1].toUpperCase();
+      cardName   = ebayQuery.replace(new RegExp(`\\b${altNumMatch[1]}\\b`, 'i'), '').replace(/[#\s]+$/, '').trim() || ebayQuery;
+    } else if (whatnotParsed) {
+      cardName   = whatnotParsed.cardName;
+      cardNumber = whatnotParsed.cardNum;
+      setName    = whatnotParsed.setCode;
+    } else {
+      cardName   = ebayQuery;
+      cardNumber = '';
+    }
+
+    item = { item_type: 'card', card_name: cardName, card_number: cardNumber, set_name: setName, condition: 'Near Mint', condition_score: 85, confidence: 100, seller_asking_price: sellerPrice ?? null, ebay_search: ebayQuery, title_source: 'dom' };
   } else {
     try {
       if (mode === 'shoes') {
