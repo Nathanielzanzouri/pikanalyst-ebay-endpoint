@@ -380,6 +380,7 @@ function titleMatchesCard(query, resultTitle) {
 
 // ─── Fake Whatnot placeholder titles ─────────────────────────────────────────
 const FAKE_TITLES = [
+  // Generic "card on screen" placeholders
   'carte vue en live',
   'carte vue a l\'écran',
   'carte vue à l\'écran',
@@ -391,6 +392,19 @@ const FAKE_TITLES = [
   'live item',
   'en live',
   'vue en live',
+  // Auction house filler: "Pas d'annulation 1€ #25", "No cancellation 1€ #3", etc.
+  'pas d\'annulation',
+  'pas d\'annulation',
+  'no cancellation',
+  'pdd ',           // "PDD 1 PAS D'ANNULATION", "PDD #25" etc.
+  // Generic numbered lot placeholders
+  'lot #',
+  'item #',
+  'article #',
+  'surprise ',
+  'mystère',
+  'mystere',
+  'blind box',
 ];
 function isFakeTitle(title) {
   const lower = title.toLowerCase().trim();
@@ -711,7 +725,9 @@ const CONDITION_MULTIPLIERS = {
 async function fetchPokemonTCG(card) {
   const NULL_PRICES = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'pokemontcg', ebay_sales_count: 0, ebay_url: null };
   const rawName    = card.card_name.replace(/"/g, '').trim();
-  const numberPart = card.card_number ? card.card_number.split('/')[0].replace(/\D/g, '') : null;
+  // Preserve non-standard numbers like "TG04"; only strip non-digits for plain NNN/NNN format
+  const rawNum     = card.card_number ? card.card_number.split('/')[0].trim() : '';
+  const numberPart = rawNum ? (/^[a-zA-Z]+\d+$/.test(rawNum) ? rawNum : rawNum.replace(/\D/g, '') || null) : null;
   const setName    = (card.set_name || '').replace(/"/g, '').trim();
   const setKeyword = setName.split(/\s+/).filter(Boolean).pop() || '';
 
@@ -1244,10 +1260,14 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
 
   if (hasTitle && mode === 'cards') {
     const ebayQuery = buildEbayQuery(rawTitle);
-    const numMatch = ebayQuery.match(/\b(\d+\/\d+)\b/);
-    const cardNumber = numMatch?.[1] ?? '';
-    const cardName = cardNumber
+    const numMatch    = ebayQuery.match(/\b(\d+\/\d+)\b/);
+    // Detect non-standard card numbers: TG01-TG30 (Trainer Gallery), PROMO, S-prefix, etc.
+    const altNumMatch = !numMatch && ebayQuery.match(/\b(tg\d{1,3}|s\d{1,3}|promo\d*)\b/i);
+    const cardNumber = numMatch?.[1] ?? (altNumMatch ? altNumMatch[1].toUpperCase() : '');
+    const cardName = numMatch
       ? ebayQuery.replace(numMatch[0], '').replace(/[#\s]+$/, '').trim() || ebayQuery
+      : altNumMatch
+      ? ebayQuery.replace(new RegExp(`\\b${altNumMatch[1]}\\b`, 'i'), '').replace(/[#\s]+$/, '').trim() || ebayQuery
       : ebayQuery;
     item = { item_type: 'card', card_name: cardName, card_number: cardNumber, set_name: '', condition: 'Near Mint', condition_score: 85, confidence: 100, seller_asking_price: sellerPrice ?? null, ebay_search: ebayQuery, title_source: 'dom' };
   } else {
