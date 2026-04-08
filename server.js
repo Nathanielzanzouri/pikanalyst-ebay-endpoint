@@ -525,24 +525,30 @@ async function fetchEbayFinding(card, language = 'WORLD') {
       'paginationInput.entriesPerPage=20',
       'sortOrder=EndTimeSoonest',
     ].join('&');
-    const res = await fetch(`https://svcs.ebay.com/services/search/FindingService/v1?${qs}`);
-    if (!res.ok) {
-      const b = await res.text().catch(() => '');
-      throw new Error(`Finding HTTP ${res.status}: ${b.slice(0, 200)}`);
+    try {
+      const res = await fetch(`https://svcs.ebay.com/services/search/FindingService/v1?${qs}`);
+      if (!res.ok) {
+        const b = await res.text().catch(() => '');
+        console.warn(`[Yamo] Finding ${globalId} HTTP ${res.status}: ${b.slice(0, 100)}`);
+        continue;
+      }
+      const data = await res.json();
+      const root = data?.findCompletedItemsResponse?.[0];
+      const ack  = root?.ack?.[0];
+      if (ack === 'Failure' || ack === 'PartialFailure') {
+        const err    = root?.errorMessage?.[0]?.error?.[0];
+        const errId  = err?.errorId?.[0] ?? '';
+        const errMsg = err?.message?.[0] ?? 'unknown';
+        if (errId === '10001') { lastFindingCallTime = Date.now() + 60_000; }
+        console.warn(`[Yamo] Finding ${globalId} API error ${errId}: ${errMsg}`);
+        continue;
+      }
+      const items = root?.searchResult?.[0]?.item ?? [];
+      console.log(`[Yamo] Finding ${globalId}: ${items.length} results`);
+      allItems = allItems.concat(items);
+    } catch (e) {
+      console.warn(`[Yamo] Finding ${globalId} exception: ${e.message}`);
     }
-    const data = await res.json();
-    const root = data?.findCompletedItemsResponse?.[0];
-    const ack  = root?.ack?.[0];
-    if (ack === 'Failure' || ack === 'PartialFailure') {
-      const err    = root?.errorMessage?.[0]?.error?.[0];
-      const errId  = err?.errorId?.[0] ?? '';
-      const errMsg = err?.message?.[0] ?? 'unknown';
-      if (errId === '10001') { lastFindingCallTime = Date.now() + 60_000; }
-      throw new Error(`Finding API error ${errId}: ${errMsg}`);
-    }
-    const items = root?.searchResult?.[0]?.item ?? [];
-    console.log(`[Yamo] Finding ${globalId}: ${items.length} results`);
-    allItems = allItems.concat(items);
   }
 
   if (allItems.length === 0) throw new Error('Finding: 0 results across all markets');
