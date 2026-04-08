@@ -142,10 +142,10 @@ function applyLanguageToQuery(baseQuery, language) {
 
 function getMarketsForLanguage(language) {
   switch (language) {
-    case 'JP':    return ['EBAY_FR', 'EBAY_US', 'EBAY_DE'];
-    case 'FR':    return ['EBAY_FR', 'EBAY_DE'];
-    case 'EN':    return ['EBAY_US', 'EBAY_FR'];
-    case 'WORLD': default: return ['EBAY_FR', 'EBAY_US', 'EBAY_DE'];
+    case 'JP':    return ['EBAY_FR', 'EBAY_US', 'EBAY_DE', 'EBAY_GB'];
+    case 'FR':    return ['EBAY_FR', 'EBAY_GB', 'EBAY_DE'];
+    case 'EN':    return ['EBAY_US', 'EBAY_GB', 'EBAY_FR'];
+    case 'WORLD': default: return ['EBAY_FR', 'EBAY_GB', 'EBAY_US', 'EBAY_DE'];
   }
 }
 
@@ -602,7 +602,7 @@ async function fetchEbayFinding(card, language = 'WORLD') {
 }
 
 // ─── eBay Browse API (OAuth, active listings) ─────────────────────────────────
-const BROWSE_SITE_MAP = { EBAY_FR: 'www.ebay.fr', EBAY_US: 'www.ebay.com', EBAY_DE: 'www.ebay.de' };
+const BROWSE_SITE_MAP = { EBAY_FR: 'www.ebay.fr', EBAY_US: 'www.ebay.com', EBAY_DE: 'www.ebay.de', EBAY_GB: 'www.ebay.co.uk' };
 
 async function fetchEbayBrowse(card, token, language = 'WORLD') {
   const baseQueries = buildBrowseQueries(card);
