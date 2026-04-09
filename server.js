@@ -833,16 +833,16 @@ async function fetchEbayAny(card, language = 'WORLD') {
 }
 
 async function fetchPrices(card, language = 'WORLD') {
+  const fetchTCG = language === 'EN';
   const [ebaySettled, tcgSettled] = await Promise.allSettled([
     fetchEbayAny(card, language),
-    fetchPokemonTCG(card),
+    fetchTCG ? fetchPokemonTCG(card) : Promise.resolve(null),
   ]);
   const ebay = ebaySettled.status === 'fulfilled' ? ebaySettled.value : null;
-  const tcg  = tcgSettled.status  === 'fulfilled' ? tcgSettled.value  : null;
+  const tcg  = fetchTCG && tcgSettled.status === 'fulfilled' ? tcgSettled.value : null;
   if (ebay) console.log('[Yamo] eBay OK:', ebay.ebay_sales_count, 'items, €' + ebay.market_price_usd);
   else      console.warn('[Yamo] eBay failed:', ebaySettled.reason?.message);
-  if (tcg)  console.log('[Yamo] TCG OK: $' + tcg.market_price_usd);
-  else      console.warn('[Yamo] TCG failed:', tcgSettled.reason?.message);
+  if (fetchTCG && tcg)  console.log('[Yamo] TCG OK: $' + tcg.market_price_usd);
   return {
     market_price_usd:  ebay?.market_price_usd ?? tcg?.market_price_usd ?? null,
     price_low_usd:     ebay?.price_low_usd    ?? tcg?.price_low_usd    ?? null,
