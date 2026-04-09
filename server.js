@@ -93,7 +93,7 @@ function cacheSet(key, data) { _cache.set(key, { data, ts: Date.now() }); }
 
 // ─── eBay rate limits ──────────────────────────────────────────────────────────
 let lastFindingCallTime = 0;
-const FINDING_MIN_INTERVAL = 10_000;
+const FINDING_MIN_INTERVAL = 1_000; // eBay allows 18 calls/sec; 1s is safely conservative
 
 // ─── eBay OAuth token cache ────────────────────────────────────────────────────
 let ebayOAuthToken  = null;
