@@ -608,6 +608,20 @@ async function fetchEbayFinding(card, language = 'WORLD') {
   const avg = cleanPrices.reduce((s, v) => s + v, 0) / cleanPrices.length;
   console.log('[Yamo] Finding (ungraded)', cleanPrices.length, 'sales:', cleanPrices.map(p => '€' + p.toFixed(2)).join(', '), '→ avg €' + avg.toFixed(2));
 
+  const listings = identity.slice(0, 10).map(i => {
+    const cur  = i?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] ?? 'EUR';
+    const val  = parseFloat(i?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__);
+    const priceEur = isNaN(val) || val <= 0 ? null : toEur(val, cur);
+    return {
+      title:    i?.title?.[0] ?? '',
+      price:    priceEur != null ? Math.round(priceEur * 100) / 100 : null,
+      soldDate: i?.listingInfo?.[0]?.endTime?.[0] ?? null,
+      imageUrl: (i?.galleryURL?.[0] ?? '').replace('http://', 'https://') || null,
+      itemUrl:  i?.viewItemURL?.[0] ?? null,
+      country:  i?.country?.[0] ?? null,
+    };
+  }).filter(l => l.price != null);
+
   return {
     market_price_usd: Math.round(avg * 100) / 100,
     price_low_usd:    Math.round(Math.min(...cleanPrices) * 100) / 100,
@@ -616,6 +630,7 @@ async function fetchEbayFinding(card, language = 'WORLD') {
     gradedOut,
     price_source:     'ebay',
     ebay_url:         `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
+    listings,
   };
 }
 
@@ -719,6 +734,20 @@ async function fetchEbayBrowse(card, token, language = 'WORLD') {
     const primarySite = frCount > 0 ? 'www.ebay.fr' : 'www.ebay.com';
     const markets = Object.entries(counts).filter(([, n]) => n > 0).map(([id]) => id);
 
+    const listings = identityItems.slice(0, 10).map(i => {
+      const val  = parseFloat(i.price?.value);
+      const cur  = i.price?.currency ?? 'EUR';
+      const priceEur = isNaN(val) || val <= 0 ? null : toEur(val, cur);
+      return {
+        title:    i.title ?? '',
+        price:    priceEur != null ? Math.round(priceEur * 100) / 100 : null,
+        soldDate: i.lastSoldDate ?? null,
+        imageUrl: i.image?.imageUrl ?? null,
+        itemUrl:  i.itemWebUrl ?? null,
+        country:  i.itemLocation?.country ?? null,
+      };
+    }).filter(l => l.price != null);
+
     return {
       market_price_usd: Math.round(median * 100) / 100,
       price_low_usd:    Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
@@ -728,6 +757,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD') {
       markets,
       price_source:     'ebay',
       ebay_url:         `https://${primarySite}/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
+      listings,
     };
   }
 
@@ -853,6 +883,7 @@ async function fetchPrices(card, language = 'WORLD') {
     ebay_url:          ebay?.ebay_url           ?? null,
     tcg_market_price:  tcg?.market_price_usd  ?? null,
     tcg_url:           tcg?.ebay_url           ?? null,
+    listings:          ebay?.listings          ?? [],
   };
 }
 
@@ -1019,7 +1050,7 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
       priceData = await fetchPrices(item, language);
     } catch (err) {
       console.error('[Yamo] Card price error:', err.message);
-      priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, tcg_market_price: null, tcg_url: null };
+      priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, tcg_market_price: null, tcg_url: null, listings: [] };
     }
     cacheSet(cacheKey, priceData);
   }
@@ -1354,7 +1385,7 @@ async function handleManualLookup(cardName, language = 'WORLD') {
   let priceData = cached;
   if (!priceData) {
     try { priceData = await fetchPrices(card, language); }
-    catch (err) { priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, tcg_market_price: null, tcg_url: null }; }
+    catch (err) { priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, tcg_market_price: null, tcg_url: null, listings: [] }; }
     cacheSet(cacheKey, priceData);
   }
   return { ...card, ...priceData };
@@ -1435,8 +1466,81 @@ app.get('/me', async (req, res) => {
   return res.json({ email: user.email, plan: user.plan, scan_count: scanCount, limit, remaining });
 });
 
+async function handleMatchListings({ imageBase64, listings }) {
+  if (!imageBase64 || !Array.isArray(listings) || listings.length === 0) {
+    return { matchIndices: [] };
+  }
+
+  // Fetch up to 10 listing thumbnails server-side
+  const validThumbnails = [];
+  for (let i = 0; i < Math.min(listings.length, 10); i++) {
+    const imageUrl = listings[i]?.imageUrl;
+    if (!imageUrl) continue;
+    try {
+      const r = await fetch(imageUrl, {
+        signal: AbortSignal.timeout(5000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Yamo/1.0)' },
+      });
+      if (!r.ok) continue;
+      const buf = await r.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      for (let j = 0; j < bytes.byteLength; j += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(j, Math.min(j + 8192, bytes.byteLength)));
+      }
+      validThumbnails.push({ originalIndex: i, base64: btoa(binary) });
+    } catch { /* skip failed thumbnails */ }
+  }
+
+  if (validThumbnails.length === 0) return { matchIndices: [] };
+
+  const content = [
+    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
+    ...validThumbnails.map(t => ({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/jpeg', data: t.base64 },
+    })),
+    {
+      type: 'text',
+      text: `The first image is a Pokemon card from a live auction.\nThe other images are eBay sold listing thumbnails.\nWhich eBay images show the exact same card (same Pokemon, same artwork, same card type)?\nReturn a JSON array of matching indices only (0-indexed, relative to the eBay images, not counting the first card image).\nExample: [0, 2, 4]\nReturn [] if none match. Return ONLY the JSON array, nothing else.`,
+    },
+  ];
+
+  const data = await claudeFetch({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 100,
+    messages: [{ role: 'user', content }],
+  });
+
+  const raw = (data.content?.[0]?.text ?? '[]').trim();
+  let parsed = [];
+  try {
+    const match = raw.match(/\[[\d,\s]*\]/);
+    parsed = match ? JSON.parse(match[0]) : [];
+    if (!Array.isArray(parsed)) parsed = [];
+  } catch { parsed = []; }
+
+  const matchIndices = parsed
+    .filter(j => Number.isInteger(j) && j >= 0 && j < validThumbnails.length)
+    .map(j => validThumbnails[j].originalIndex);
+
+  console.log(`[Yamo] match_listings: ${validThumbnails.length} thumbnails → ${matchIndices.length} matches:`, matchIndices);
+  return { matchIndices };
+}
+
 app.post('/scan', async (req, res) => {
   const { token, type, ...params } = req.body;
+
+  // match_listings: vision matching — does not consume quota
+  if (type === 'match_listings') {
+    try {
+      const result = await handleMatchListings(params);
+      return res.json(result);
+    } catch (err) {
+      console.error('[Yamo] match_listings error:', err.message);
+      return res.json({ matchIndices: [] });
+    }
+  }
 
   // Token validation + quota info (always fetch when token provided)
   let quota = null;
