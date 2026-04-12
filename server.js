@@ -1590,9 +1590,10 @@ async function handleMatchListings({ imageBase64, listings }) {
   return { matchIndices };
 }
 
-// Product-like object labels to look for in localization results
-const PRODUCT_LABELS = ['footwear', 'shoe', 'sneaker', 'boot', 'clothing', 'jacket', 'dress',
-  'watch', 'bag', 'handbag', 'backpack', 'hat', 'cap', 'shirt', 'pants', 'jeans'];
+// Labels to skip — these are people/scene elements, not products
+const SKIP_LABELS = ['person', 'man', 'woman', 'girl', 'boy', 'human face', 'human body',
+  'face', 'head', 'arm', 'hand', 'finger', 'room', 'building', 'floor', 'wall', 'ceiling',
+  'shelf', 'furniture', 'sky', 'tree', 'plant', 'land vehicle', 'car', 'wheel'];
 
 async function cropToObject(imageBase64, normalizedVertices) {
   try {
@@ -1656,9 +1657,20 @@ async function handleWebVision({ imageBase64 }) {
   // Pass 2: if no page matches, crop to product and retry WEB_DETECTION
   if (pages1 === 0 && pass1.localizedObjectAnnotations?.length > 0) {
     const objects = pass1.localizedObjectAnnotations;
-    // Prefer product-like objects, fall back to the largest one
-    const productObj = objects.find(o => PRODUCT_LABELS.some(l => o.name.toLowerCase().includes(l)))
-      ?? objects[0];
+    // Filter out people/scene elements, pick the largest remaining object by bounding box area
+    const productCandidates = objects.filter(o =>
+      !SKIP_LABELS.some(l => o.name.toLowerCase().includes(l))
+    );
+    const pool = productCandidates.length > 0 ? productCandidates : objects;
+    const productObj = pool.reduce((best, o) => {
+      const verts = o.boundingPoly?.normalizedVertices ?? [];
+      const xs = verts.map(v => v.x ?? 0), ys = verts.map(v => v.y ?? 0);
+      const area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+      const bestVerts = best.boundingPoly?.normalizedVertices ?? [];
+      const bxs = bestVerts.map(v => v.x ?? 0), bys = bestVerts.map(v => v.y ?? 0);
+      const bestArea = (Math.max(...bxs) - Math.min(...bxs)) * (Math.max(...bys) - Math.min(...bys));
+      return area > bestArea ? o : best;
+    }, pool[0]);
 
     const vertices = productObj?.boundingPoly?.normalizedVertices ?? [];
     if (vertices.length >= 2) {
