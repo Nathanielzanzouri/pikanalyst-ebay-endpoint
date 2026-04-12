@@ -405,6 +405,17 @@ const FAKE_TITLES = [
   'mystère',
   'mystere',
   'blind box',
+  // "Sold by the unit" placeholders — no card name, just a category label
+  'carte à l\'unit',
+  'carte a l\'unit',
+  'carte a l\'unité',
+  'carte à l\'unité',
+  'cartes à l\'unit',
+  'cartes a l\'unit',
+  'vendu à l\'unit',
+  'vendu a l\'unit',
+  'à l\'unité',
+  'a l\'unite',
 ];
 function isFakeTitle(title) {
   const lower = title.toLowerCase().trim();
