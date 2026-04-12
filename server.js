@@ -1119,11 +1119,12 @@ If unclear reply exactly: UNCLEAR`;
 const VISION_PROMPT_SHOES = `You are an expert in sneaker resale markets.
 Look at this image from a live auction stream.
 Reply ONLY with JSON (no markdown):
-{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Retro High OG","colorway":"Bred Toe","sku":"555088-610","stockx_slug":"air-jordan-1-retro-high-og-bred-toe-2019","ebay_search":"Air Jordan 1 Retro High OG Bred Toe","confidence":85}
+{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Retro High OG","colorway":"Bred Toe","sku":"555088-610","stockx_slug":"air-jordan-1-retro-high-og-bred-toe-2019","ebay_search":"Air Jordan 1 Retro High OG Bred Toe","confidence":85,"low_confidence":false}
 
 Rules:
 - stockx_slug: exact slug from stockx.com/sneakers/<slug>
 - ebay_search: brand + model + colorway only, never include size or year
+- low_confidence: set true if colorway is a generic single color only (White, Black, Grey, Blue, Red) AND you are under 80% confident on the exact model
 - If no sneaker visible: {"item_type":"unknown"}`;
 
 // ─── Identification Claude (sneaker seul, mode Shoes) ────────────────────────
@@ -1186,11 +1187,12 @@ RULES:
 - Do NOT confuse Jordan 1 Mid with Jordan 1 High/Retro High OG — different shoes.
 
 Reply ONLY with JSON (no markdown):
-{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Mid","colorway":"Grey Fog","sku":"554724-059","size_eu":"45","size_us":"11","condition":"New","seller_asking_price":null,"stockx_slug":"air-jordan-1-mid-grey-fog","ebay_search":"Air Jordan 1 Mid Grey Fog","confidence":90}
+{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Mid","colorway":"Grey Fog","sku":"554724-059","size_eu":"45","size_us":"11","condition":"New","seller_asking_price":null,"stockx_slug":"air-jordan-1-mid-grey-fog","ebay_search":"Air Jordan 1 Mid Grey Fog","confidence":90,"low_confidence":false}
 
 If no sneaker identifiable: {"item_type":"unknown"}
 stockx_slug = exact slug from stockx.com. confidence is 0-100.
-ebay_search = brand + model + colorway ONLY — never include size.`;
+ebay_search = brand + model + colorway ONLY — never include size.
+low_confidence: set true if colorway is a generic single color only (White, Black, Grey, Blue, Red) AND confidence < 80.`;
 
   const data = await claudeFetch({
     model: 'claude-haiku-4-5-20251001',
@@ -1388,7 +1390,21 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
   }
 
   if (!item || item.item_type === 'unknown') return { item_type: 'unknown' };
-  if (item.item_type === 'sneaker') return handleSneaker(item, sellerPrice);
+  if (item.item_type === 'sneaker') {
+    if ((item.confidence ?? 100) < 75 || item.low_confidence === true) {
+      console.log(`[Yamo] Sneaker confidence too low (${item.confidence}) — skipping price fetch`);
+      return {
+        item_type:           'uncertain_sneaker',
+        brand:               item.brand    ?? '',
+        model:               item.model    ?? '',
+        colorway:            item.colorway ?? '',
+        confidence:          item.confidence ?? 0,
+        ebay_search:         item.ebay_search ?? `${item.brand ?? ''} ${item.model ?? ''}`.trim(),
+        seller_asking_price: sellerPrice ?? null,
+      };
+    }
+    return handleSneaker(item, sellerPrice);
+  }
   if (item.card_name === 'UNCLEAR') return { card_name: 'UNCLEAR' };
   if (!item.card_name || item.card_name === 'Non identifiable') return { card_name: 'Non identifiable' };
 
