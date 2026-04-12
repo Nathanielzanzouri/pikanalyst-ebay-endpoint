@@ -1589,6 +1589,33 @@ async function handleMatchListings({ imageBase64, listings }) {
   return { matchIndices };
 }
 
+async function handleWebVision({ imageBase64 }) {
+  const apiKey = process.env.GOOGLE_VISION_KEY;
+  if (!apiKey) {
+    console.error('[Yamo] web_vision: GOOGLE_VISION_KEY env var not set');
+    return { webDetection: null };
+  }
+  const body = {
+    requests: [{
+      image: { content: imageBase64 },
+      features: [{ type: 'WEB_DETECTION', maxResults: 10 }],
+    }],
+  };
+  const resp = await fetch(
+    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+  );
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    console.error('[Yamo] web_vision: Vision API error:', resp.status, errText.slice(0, 200));
+    return { webDetection: null };
+  }
+  const data = await resp.json();
+  const webDetection = data.responses?.[0]?.webDetection ?? null;
+  console.log(`[Yamo] web_vision OK — entities:${webDetection?.webEntities?.length ?? 0} pages:${webDetection?.pagesWithMatchingImages?.length ?? 0}`);
+  return { webDetection };
+}
+
 app.post('/scan', async (req, res) => {
   const { token, type, ...params } = req.body;
 
@@ -1600,6 +1627,17 @@ app.post('/scan', async (req, res) => {
     } catch (err) {
       console.error('[Yamo] match_listings error:', err.message);
       return res.json({ matchIndices: [] });
+    }
+  }
+
+  // web_vision: Google Vision WEB_DETECTION proxy — does not consume quota
+  if (type === 'web_vision') {
+    try {
+      const result = await handleWebVision({ imageBase64: params.imageBase64 });
+      return res.json(result);
+    } catch (err) {
+      console.error('[Yamo] web_vision error:', err.message);
+      return res.json({ webDetection: null });
     }
   }
 
