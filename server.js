@@ -941,10 +941,16 @@ async function fetchKicksDBServerPrice(item) {
       });
       if (r.ok) {
         const d = await r.json();
-        const hit = d?.hits?.[0];
+        const hit       = d?.hits?.[0];
+        const lastSale  = hit?.market?.lastSale  ?? hit?.last_sale  ?? null;
         const lowestAsk = hit?.market?.lowestAsk ?? hit?.lowest_ask ?? null;
-        if (lowestAsk != null) {
-          return { stockx_lowest_ask: Math.round(lowestAsk * 100) / 100, goat_price: null, market_source: 'stockx' };
+        if (lastSale != null || lowestAsk != null) {
+          return {
+            stockx_last_sale:  lastSale  != null ? Math.round(lastSale  * 100) / 100 : null,
+            stockx_lowest_ask: lowestAsk != null ? Math.round(lowestAsk * 100) / 100 : null,
+            goat_price: null,
+            market_source: 'stockx',
+          };
         }
       }
     } catch (e) { console.warn('[Yamo] StockX Algolia', host, 'failed:', e.message); }
@@ -952,6 +958,9 @@ async function fetchKicksDBServerPrice(item) {
 
   return null;
 }
+
+const SHOE_BUNDLE_RE = /\b(lot|bundle|pack|paires?|x[2-9]|\d+x|pour pi[eè]ces?|d[eé]faut)\b/i;
+function isShoeBundleTitle(title) { return SHOE_BUNDLE_RE.test(title); }
 
 // ─── Prix sneaker via eBay (sold avg + lowest active ask) ────────────────────
 async function fetchSneakerPrices(item) {
@@ -981,20 +990,24 @@ async function fetchSneakerPrices(item) {
           const data = await res.json();
           const root  = data?.findCompletedItemsResponse?.[0];
           const items = root?.searchResult?.[0]?.item ?? [];
-          const prices = items
+          const rawPrices = items
             .filter(i => i?.sellingStatus?.[0]?.sellingState?.[0] === 'EndedWithSales')
+            .filter(i => !isShoeBundleTitle(i?.title?.[0] ?? ''))
             .map(i => parseFloat(i?.sellingStatus?.[0]?.convertedCurrentPrice?.[0]?.__value__))
-            .filter(v => !isNaN(v) && v > 0)
-            .sort((a, b) => a - b);
-          if (prices.length > 0) {
+            .filter(v => !isNaN(v) && v > 0);
+          if (rawPrices.length > 0) {
+            const prices = removeOutliers(rawPrices).sort((a, b) => a - b);
             const median = prices[Math.floor(prices.length / 2)];
+            const min = prices[0];
+            const max = prices[prices.length - 1];
             soldData = {
-              market_price_usd: Math.round(median * 100) / 100,
-              price_low_usd:    Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
-              price_high_usd:   Math.round(prices[Math.floor(prices.length * 0.90)] * 100) / 100,
+              market_price_usd:  Math.round(median * 100) / 100,
+              price_low_usd:     Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
+              price_high_usd:    Math.round(prices[Math.floor(prices.length * 0.90)] * 100) / 100,
               ebay_market_price: Math.round(median * 100) / 100,
               ebay_sales_count:  prices.length,
-              ebay_url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
+              ebay_url:          `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
+              bimodal_warning:   (max - median) > 2 * (median - min),
             };
           }
         }
@@ -1004,29 +1017,33 @@ async function fetchSneakerPrices(item) {
     }
   }
 
-  // 2. Browse API — fallback when Finding didn't run
+  // 2. Browse API — fallback when Finding didn't run (sold listings only)
   if (!soldData && ebayAppId && certId) {
     try {
       const token = await getEbayOAuthToken();
-      const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&limit=50&sort=LOWEST_PRICE`;
+      const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&limit=50&filter=soldItems:true&sort=endDateDesc`;
       const res = await fetch(url, {
         headers: { 'Authorization': `Bearer ${token}`, 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' },
       });
       if (res.ok) {
         const data = await res.json();
-        const prices = (data.itemSummaries ?? [])
+        const rawPrices = (data.itemSummaries ?? [])
+          .filter(i => !isShoeBundleTitle(i.title ?? ''))
           .map(i => parseFloat(i.price?.value))
-          .filter(v => !isNaN(v) && v > 0)
-          .sort((a, b) => a - b);
-        if (prices.length > 0) {
+          .filter(v => !isNaN(v) && v > 0);
+        if (rawPrices.length > 0) {
+          const prices = removeOutliers(rawPrices).sort((a, b) => a - b);
           const median = prices[Math.floor(prices.length / 2)];
+          const min = prices[0];
+          const max = prices[prices.length - 1];
           soldData = {
             market_price_usd:  Math.round(median * 100) / 100,
             price_low_usd:     Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
             price_high_usd:    Math.round(prices[Math.floor(prices.length * 0.90)] * 100) / 100,
             ebay_market_price: Math.round(median * 100) / 100,
             ebay_sales_count:  prices.length,
-            ebay_url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1`,
+            ebay_url:          `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1`,
+            bimodal_warning:   (max - median) > 2 * (median - min),
           };
         }
       }
@@ -1035,7 +1052,7 @@ async function fetchSneakerPrices(item) {
     }
   }
 
-  if (!soldData) return { market_price_usd: null, price_low_usd: null, price_high_usd: null, ebay_market_price: null, ebay_sales_count: 0, ebay_url: null };
+  if (!soldData) return { market_price_usd: null, price_low_usd: null, price_high_usd: null, ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, bimodal_warning: false };
   return soldData;
 }
 
@@ -1101,12 +1118,13 @@ If unclear reply exactly: UNCLEAR`;
 
 const VISION_PROMPT_SHOES = `You are an expert in sneaker resale markets.
 Look at this image from a live auction stream.
-Return ONLY a search string optimized for eBay, nothing else.
-Include: brand + full model name + colorway + year if visible + style code if visible.
-Examples:
-"Air Jordan 1 Retro High OG Bred Toe 2019 555088-610"
-"Nike Dunk Low Retro Panda 2021 DD1391-100"
-If unclear reply exactly: UNCLEAR`;
+Reply ONLY with JSON (no markdown):
+{"item_type":"sneaker","brand":"Nike","model":"Air Jordan 1 Retro High OG","colorway":"Bred Toe","sku":"555088-610","stockx_slug":"air-jordan-1-retro-high-og-bred-toe-2019","ebay_search":"Air Jordan 1 Retro High OG Bred Toe","confidence":85}
+
+Rules:
+- stockx_slug: exact slug from stockx.com/sneakers/<slug>
+- ebay_search: brand + model + colorway only, never include size or year
+- If no sneaker visible: {"item_type":"unknown"}`;
 
 // ─── Identification Claude (sneaker seul, mode Shoes) ────────────────────────
 async function identifySneaker(imageBase64, streamTitle, sellerPrice) {
@@ -1115,30 +1133,46 @@ async function identifySneaker(imageBase64, streamTitle, sellerPrice) {
   if (!hasTitle) {
     const data = await claudeFetch({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 100,
+      max_tokens: 200,
       messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
         { type: 'text', text: VISION_PROMPT_SHOES },
       ]}],
     });
-    const result = (data.content?.[0]?.text ?? '').trim().replace(/^["']|["']$/g, '');
-    console.log('[Yamo] Shoe plain-string result:', result);
-    if (!result || result.toUpperCase() === 'UNCLEAR' || result.length < 5) {
-      return { item_type: 'unknown' };
+    const raw = (data.content?.[0]?.text ?? '').trim();
+    const cleaned = raw.replace(/```(?:json)?/g, '').replace(/```/g, '').trim();
+    console.log('[Yamo] Shoe vision result:', cleaned.slice(0, 200));
+    try {
+      const parsed = JSON.parse(cleaned);
+      if (!parsed || parsed.item_type === 'unknown' || (!parsed.brand && !parsed.model)) {
+        return { item_type: 'unknown' };
+      }
+      return {
+        item_type:           'sneaker',
+        brand:               parsed.brand      ?? '',
+        model:               parsed.model      ?? '',
+        colorway:            parsed.colorway   ?? '',
+        sku:                 parsed.sku        ?? '',
+        size_us:             null,
+        size_eu:             null,
+        condition:           'New',
+        seller_asking_price: sellerPrice ?? null,
+        stockx_slug:         parsed.stockx_slug ?? '',
+        ebay_search:         parsed.ebay_search ?? `${parsed.brand ?? ''} ${parsed.model ?? ''} ${parsed.colorway ?? ''}`.trim(),
+        confidence:          parsed.confidence ?? 80,
+      };
+    } catch {
+      // Fallback: treat raw text as plain eBay search string
+      if (!cleaned || cleaned.toUpperCase() === 'UNCLEAR' || cleaned.length < 5) {
+        return { item_type: 'unknown' };
+      }
+      const brandMatch = cleaned.match(/^(Nike|Adidas|Jordan|New Balance|Asics|Puma|Reebok|Converse|Vans|Saucony|On Running|Salomon)\b/i);
+      return {
+        item_type: 'sneaker', brand: brandMatch?.[1] ?? '', model: cleaned, colorway: '',
+        size_us: null, size_eu: null, condition: 'New', seller_asking_price: sellerPrice ?? null,
+        stockx_slug: '', ebay_search: cleaned, confidence: 75,
+      };
     }
-    const brandMatch = result.match(/^(Nike|Adidas|Jordan|New Balance|Asics|Puma|Reebok|Converse|Vans|Saucony|On Running|Salomon)\b/i);
-    return {
-      item_type: 'sneaker',
-      brand: brandMatch?.[1] ?? '',
-      model: result,
-      colorway: '',
-      size_us: null,
-      condition: 'New',
-      seller_asking_price: sellerPrice ?? null,
-      stockx_slug: '',
-      ebay_search: result,
-      confidence: 80,
-    };
   }
 
   const prompt = `You are a sneaker expert analyzing an image.
