@@ -5,6 +5,7 @@ if (process.env.NODE_ENV !== 'production') {
 
 const express = require('express');
 const crypto  = require('crypto');
+const sharp   = require('sharp');
 
 const app = express();
 
@@ -1589,30 +1590,95 @@ async function handleMatchListings({ imageBase64, listings }) {
   return { matchIndices };
 }
 
+// Product-like object labels to look for in localization results
+const PRODUCT_LABELS = ['footwear', 'shoe', 'sneaker', 'boot', 'clothing', 'jacket', 'dress',
+  'watch', 'bag', 'handbag', 'backpack', 'hat', 'cap', 'shirt', 'pants', 'jeans'];
+
+async function cropToObject(imageBase64, normalizedVertices) {
+  try {
+    const buf = Buffer.from(imageBase64, 'base64');
+    const meta = await sharp(buf).metadata();
+    const { width, height } = meta;
+    const xs = normalizedVertices.map(v => (v.x ?? 0) * width);
+    const ys = normalizedVertices.map(v => (v.y ?? 0) * height);
+    // Add 5% padding around the object
+    const padX = (Math.max(...xs) - Math.min(...xs)) * 0.05;
+    const padY = (Math.max(...ys) - Math.min(...ys)) * 0.05;
+    const left   = Math.max(0, Math.floor(Math.min(...xs) - padX));
+    const top    = Math.max(0, Math.floor(Math.min(...ys) - padY));
+    const right  = Math.min(width,  Math.ceil(Math.max(...xs) + padX));
+    const bottom = Math.min(height, Math.ceil(Math.max(...ys) + padY));
+    if (right - left < 20 || bottom - top < 20) return null;
+    const cropped = await sharp(buf)
+      .extract({ left, top, width: right - left, height: bottom - top })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    return cropped.toString('base64');
+  } catch (err) {
+    console.error('[Yamo] cropToObject error:', err.message);
+    return null;
+  }
+}
+
+async function callVisionAPI(apiKey, imageBase64, features) {
+  const resp = await fetch(
+    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: [{ image: { content: imageBase64 }, features }] }),
+    },
+  );
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '');
+    throw new Error(`Vision API ${resp.status}: ${err.slice(0, 200)}`);
+  }
+  return (await resp.json()).responses?.[0] ?? {};
+}
+
 async function handleWebVision({ imageBase64 }) {
   const apiKey = process.env.GOOGLE_VISION_KEY;
   if (!apiKey) {
     console.error('[Yamo] web_vision: GOOGLE_VISION_KEY env var not set');
     return { webDetection: null };
   }
-  const body = {
-    requests: [{
-      image: { content: imageBase64 },
-      features: [{ type: 'WEB_DETECTION', maxResults: 10 }],
-    }],
-  };
-  const resp = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-  );
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => '');
-    console.error('[Yamo] web_vision: Vision API error:', resp.status, errText.slice(0, 200));
-    return { webDetection: null };
+
+  // Pass 1: detect objects + web (full scene)
+  const pass1 = await callVisionAPI(apiKey, imageBase64, [
+    { type: 'OBJECT_LOCALIZATION', maxResults: 10 },
+    { type: 'WEB_DETECTION', maxResults: 10 },
+  ]);
+
+  let webDetection = pass1.webDetection ?? null;
+  const pages1 = webDetection?.pagesWithMatchingImages?.length ?? 0;
+  console.log(`[Yamo] web_vision pass1 — pages:${pages1} objects:${pass1.localizedObjectAnnotations?.length ?? 0}`);
+
+  // Pass 2: if no page matches, crop to product and retry WEB_DETECTION
+  if (pages1 === 0 && pass1.localizedObjectAnnotations?.length > 0) {
+    const objects = pass1.localizedObjectAnnotations;
+    // Prefer product-like objects, fall back to the largest one
+    const productObj = objects.find(o => PRODUCT_LABELS.some(l => o.name.toLowerCase().includes(l)))
+      ?? objects[0];
+
+    const vertices = productObj?.boundingPoly?.normalizedVertices ?? [];
+    if (vertices.length >= 2) {
+      console.log(`[Yamo] web_vision cropping to: ${productObj.name} (score ${productObj.score?.toFixed(2)})`);
+      const croppedBase64 = await cropToObject(imageBase64, vertices);
+      if (croppedBase64) {
+        const pass2 = await callVisionAPI(apiKey, croppedBase64, [
+          { type: 'WEB_DETECTION', maxResults: 10 },
+        ]);
+        const wd2 = pass2.webDetection ?? null;
+        const pages2 = wd2?.pagesWithMatchingImages?.length ?? 0;
+        console.log(`[Yamo] web_vision pass2 (cropped) — pages:${pages2}`);
+        if (pages2 > 0 || (wd2?.webEntities?.length ?? 0) > (webDetection?.webEntities?.length ?? 0)) {
+          webDetection = wd2;
+        }
+      }
+    }
   }
-  const data = await resp.json();
-  const webDetection = data.responses?.[0]?.webDetection ?? null;
-  console.log(`[Yamo] web_vision OK — entities:${webDetection?.webEntities?.length ?? 0} pages:${webDetection?.pagesWithMatchingImages?.length ?? 0}`);
+
+  console.log(`[Yamo] web_vision final — pages:${webDetection?.pagesWithMatchingImages?.length ?? 0} entities:${webDetection?.webEntities?.length ?? 0}`);
   return { webDetection };
 }
 
