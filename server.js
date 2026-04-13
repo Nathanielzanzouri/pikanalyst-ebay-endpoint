@@ -1775,11 +1775,14 @@ async function handleGoogleLens(imageBase64) {
 
   const medianPrice = prices.length > 0 ? prices[Math.floor(prices.length / 2)] : null;
 
+  // Only return cards with a confirmed price
+  const pricedCards = cards.filter(c => c.hasPrice);
+
   return {
     productName,
-    cards,
+    cards: pricedCards,
     medianPrice,
-    sourcesCount: cards.length,
+    sourcesCount: pricedCards.length,
     pricesCount: prices.length,
   };
 }
