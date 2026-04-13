@@ -1654,6 +1654,28 @@ async function handleGoogleLens(imageBase64) {
   // STEP C: Extract visual_matches
   const visualMatches = serpData.visual_matches ?? [];
   console.log(`[Yamo] google_lens: ${visualMatches.length} visual matches`);
+  console.log('SerpApi visual_matches sample:', JSON.stringify(visualMatches?.slice(0, 3), null, 2));
+
+  // Price extraction helpers
+  function extractPriceFromString(str) {
+    if (!str) return null;
+    const m = str.match(/[€$£₪¥]\s?(\d+(?:[.,]\d{1,2})?)|(\d+(?:[.,]\d{1,2})?)\s?[€$£₪¥]/);
+    if (!m) return null;
+    return {
+      price: parseFloat((m[1] ?? m[2]).replace(',', '.')),
+      currency: str.includes('₪') ? '₪' : str.includes('$') ? '$' : str.includes('£') ? '£' : '€',
+    };
+  }
+
+  function extractCardPrice(match) {
+    if (match.price?.extracted_value != null)
+      return { price: match.price.extracted_value, currency: match.price.currency ?? '€' };
+    const fromTitle = extractPriceFromString(match.title ?? '');
+    if (fromTitle) return fromTitle;
+    const fromSnippet = extractPriceFromString(match.snippet ?? '');
+    if (fromSnippet) return fromSnippet;
+    return { price: null, currency: null };
+  }
 
   // STEP D: Build cards
   const OFFICIAL_DOMAINS = [
@@ -1670,19 +1692,50 @@ async function handleGoogleLens(imageBase64) {
       const domain = (() => {
         try { return new URL(m.link).hostname.replace('www.', ''); } catch { return m.source ?? ''; }
       })();
+      const { price, currency } = extractCardPrice(m);
       return {
         title: m.title ?? null,
         retailer: m.source ?? domain,
         domain,
         url: m.link,
         imageUrl: m.thumbnail,
-        price: m.price?.extracted_value ?? null,
-        currency: m.price?.currency ?? null,
-        hasPrice: m.price?.extracted_value != null,
+        price,
+        currency,
+        hasPrice: price !== null,
         sourceIcon: m.source_icon ?? null,
         isOfficial: OFFICIAL_DOMAINS.some(d => domain.includes(d)),
       };
     });
+
+  // Merge inline_shopping_results (often has better price data)
+  const shoppingResults = serpData.inline_shopping_results ?? [];
+  console.log(`[Yamo] google_lens: ${shoppingResults.length} inline_shopping_results`);
+  shoppingResults.forEach(item => {
+    const existing = cards.find(c => c.url === item.link || c.retailer === item.source);
+    if (existing) {
+      if (item.price?.extracted_value != null && !existing.hasPrice) {
+        existing.price = item.price.extracted_value;
+        existing.currency = item.price.currency ?? '€';
+        existing.hasPrice = true;
+      }
+    } else if (item.thumbnail && item.link) {
+      const domain = (() => {
+        try { return new URL(item.link).hostname.replace('www.', ''); } catch { return item.source ?? ''; }
+      })();
+      cards.push({
+        title: item.title ?? null,
+        retailer: item.source ?? domain,
+        domain,
+        url: item.link,
+        imageUrl: item.thumbnail,
+        price: item.price?.extracted_value ?? null,
+        currency: item.price?.currency ?? '€',
+        hasPrice: item.price?.extracted_value != null,
+        sourceIcon: null,
+        isOfficial: OFFICIAL_DOMAINS.some(d => domain.includes(d)),
+      });
+    }
+  });
 
   // Sort: results with price first
   cards.sort((a, b) => {
