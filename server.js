@@ -1621,77 +1621,97 @@ async function cropToObject(imageBase64, normalizedVertices) {
   }
 }
 
-async function callVisionAPI(apiKey, imageBase64, features) {
-  const resp = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests: [{ image: { content: imageBase64 }, features }] }),
-    },
-  );
-  if (!resp.ok) {
-    const err = await resp.text().catch(() => '');
-    throw new Error(`Vision API ${resp.status}: ${err.slice(0, 200)}`);
-  }
-  return (await resp.json()).responses?.[0] ?? {};
-}
+async function handleGoogleLens(imageBase64) {
+  // STEP A: Upload image to imgbb to get a public URL
+  const formData = new URLSearchParams({
+    key: process.env.IMGBB_KEY,
+    image: imageBase64,
+    expiration: '600',
+  });
 
-async function handleWebVision({ imageBase64 }) {
-  const apiKey = process.env.GOOGLE_VISION_KEY;
-  if (!apiKey) {
-    console.error('[Yamo] web_vision: GOOGLE_VISION_KEY env var not set');
-    return { webDetection: null };
+  const imgbbRes = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: formData });
+  const imgbbData = await imgbbRes.json();
+
+  if (!imgbbData.success) {
+    throw new Error('imgbb upload failed: ' + JSON.stringify(imgbbData));
   }
 
-  // Pass 1: detect objects + web (full scene)
-  const pass1 = await callVisionAPI(apiKey, imageBase64, [
-    { type: 'OBJECT_LOCALIZATION', maxResults: 10 },
-    { type: 'WEB_DETECTION', maxResults: 10 },
-  ]);
+  const imageUrl = imgbbData.data.url;
+  console.log('[Yamo] google_lens: imgbb upload OK —', imageUrl);
 
-  let webDetection = pass1.webDetection ?? null;
-  const pages1 = webDetection?.pagesWithMatchingImages?.length ?? 0;
-  console.log(`[Yamo] web_vision pass1 — pages:${pages1} objects:${pass1.localizedObjectAnnotations?.length ?? 0}`);
+  // STEP B: Call SerpApi Google Lens
+  const params = new URLSearchParams({
+    engine: 'google_lens',
+    url: imageUrl,
+    api_key: process.env.SERPAPI_KEY,
+    hl: 'fr',
+    country: 'fr',
+  });
 
-  // Pass 2: if no page matches, crop to product and retry WEB_DETECTION
-  if (pages1 === 0 && pass1.localizedObjectAnnotations?.length > 0) {
-    const objects = pass1.localizedObjectAnnotations;
-    // Filter out people/scene elements, pick the largest remaining object by bounding box area
-    const productCandidates = objects.filter(o =>
-      !SKIP_LABELS.some(l => o.name.toLowerCase().includes(l))
-    );
-    const pool = productCandidates.length > 0 ? productCandidates : objects;
-    const productObj = pool.reduce((best, o) => {
-      const verts = o.boundingPoly?.normalizedVertices ?? [];
-      const xs = verts.map(v => v.x ?? 0), ys = verts.map(v => v.y ?? 0);
-      const area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
-      const bestVerts = best.boundingPoly?.normalizedVertices ?? [];
-      const bxs = bestVerts.map(v => v.x ?? 0), bys = bestVerts.map(v => v.y ?? 0);
-      const bestArea = (Math.max(...bxs) - Math.min(...bxs)) * (Math.max(...bys) - Math.min(...bys));
-      return area > bestArea ? o : best;
-    }, pool[0]);
+  const serpRes = await fetch('https://serpapi.com/search.json?' + params);
+  const serpData = await serpRes.json();
 
-    const vertices = productObj?.boundingPoly?.normalizedVertices ?? [];
-    if (vertices.length >= 2) {
-      console.log(`[Yamo] web_vision cropping to: ${productObj.name} (score ${productObj.score?.toFixed(2)})`);
-      const croppedBase64 = await cropToObject(imageBase64, vertices);
-      if (croppedBase64) {
-        const pass2 = await callVisionAPI(apiKey, croppedBase64, [
-          { type: 'WEB_DETECTION', maxResults: 10 },
-        ]);
-        const wd2 = pass2.webDetection ?? null;
-        const pages2 = wd2?.pagesWithMatchingImages?.length ?? 0;
-        console.log(`[Yamo] web_vision pass2 (cropped) — pages:${pages2}`);
-        if (pages2 > 0 || (wd2?.webEntities?.length ?? 0) > (webDetection?.webEntities?.length ?? 0)) {
-          webDetection = wd2;
-        }
-      }
-    }
-  }
+  // STEP C: Extract visual_matches
+  const visualMatches = serpData.visual_matches ?? [];
+  console.log(`[Yamo] google_lens: ${visualMatches.length} visual matches`);
 
-  console.log(`[Yamo] web_vision final — pages:${webDetection?.pagesWithMatchingImages?.length ?? 0} entities:${webDetection?.webEntities?.length ?? 0}`);
-  return { webDetection };
+  // STEP D: Build cards
+  const OFFICIAL_DOMAINS = [
+    'nike.com', 'adidas.com', 'newbalance.com', 'jordan.com', 'puma.com',
+    'reebok.com', 'fearofgod.com', 'vans.com', 'converse.com',
+    'timberland.com', 'ugg.com', 'birkenstock.com',
+    'essentials.com', 'supremenewyork.com',
+  ];
+
+  const cards = visualMatches
+    .filter(m => m.thumbnail && m.link)
+    .slice(0, 8)
+    .map(m => {
+      const domain = (() => {
+        try { return new URL(m.link).hostname.replace('www.', ''); } catch { return m.source ?? ''; }
+      })();
+      return {
+        title: m.title ?? null,
+        retailer: m.source ?? domain,
+        domain,
+        url: m.link,
+        imageUrl: m.thumbnail,
+        price: m.price?.extracted_value ?? null,
+        currency: m.price?.currency ?? null,
+        hasPrice: m.price?.extracted_value != null,
+        sourceIcon: m.source_icon ?? null,
+        isOfficial: OFFICIAL_DOMAINS.some(d => domain.includes(d)),
+      };
+    });
+
+  // Sort: results with price first
+  cards.sort((a, b) => {
+    if (a.hasPrice && !b.hasPrice) return -1;
+    if (!a.hasPrice && b.hasPrice) return 1;
+    return 0;
+  });
+
+  // STEP E: Product name
+  const productName =
+    serpData.knowledge_graph?.title ??
+    serpData.visual_matches?.[0]?.title ??
+    null;
+
+  // STEP F: Median price calculation
+  const prices = cards
+    .filter(c => c.price !== null)
+    .map(c => c.price)
+    .sort((a, b) => a - b);
+
+  const medianPrice = prices.length > 0 ? prices[Math.floor(prices.length / 2)] : null;
+
+  return {
+    productName,
+    cards,
+    medianPrice,
+    sourcesCount: cards.length,
+    pricesCount: prices.length,
+  };
 }
 
 app.post('/scan', async (req, res) => {
@@ -1708,14 +1728,25 @@ app.post('/scan', async (req, res) => {
     }
   }
 
-  // web_vision: Google Vision WEB_DETECTION proxy — does not consume quota
-  if (type === 'web_vision') {
+  // google_lens: SerpApi Google Lens — does not consume quota
+  if (type === 'google_lens') {
     try {
-      const result = await handleWebVision({ imageBase64: params.imageBase64 });
-      return res.json(result);
+      const result = await handleGoogleLens(params.imageBase64);
+      const sellerPrice = params.sellerPrice ?? null;
+      const streamCurrency = params.streamCurrency ?? 'EUR';
+      return res.json({
+        type: 'WEB_DONE',
+        productName: result.productName,
+        cards: result.cards,
+        medianPrice: result.medianPrice,
+        sourcesCount: result.sourcesCount,
+        pricesCount: result.pricesCount,
+        sellerPrice,
+        streamCurrency,
+      });
     } catch (err) {
-      console.error('[Yamo] web_vision error:', err.message);
-      return res.json({ webDetection: null });
+      console.error('[Yamo] google_lens error:', err.message);
+      return res.json({ type: 'WEB_DONE', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR' });
     }
   }
 
