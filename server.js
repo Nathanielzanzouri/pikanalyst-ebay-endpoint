@@ -1816,7 +1816,7 @@ app.post('/scan', async (req, res) => {
       });
     } catch (err) {
       console.error('[Yamo] google_lens error:', err.message);
-      return res.json({ type: 'WEB_DONE', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR' });
+      return res.json({ type: 'WEB_DONE', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', _error: err.message });
     }
   }
 
