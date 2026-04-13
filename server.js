@@ -1707,17 +1707,34 @@ async function handleGoogleLens(imageBase64) {
       };
     });
 
-  // Merge inline_shopping_results (often has better price data)
+  // Merge inline_shopping_results — prices live here, not in visual_matches
   const shoppingResults = serpData.inline_shopping_results ?? [];
-  console.log(`[Yamo] google_lens: ${shoppingResults.length} inline_shopping_results`);
+  console.log('inline_shopping_results count:', shoppingResults.length);
+  console.log('sample shopping result:', JSON.stringify(shoppingResults?.[0], null, 2));
+
   shoppingResults.forEach(item => {
-    const existing = cards.find(c => c.url === item.link || c.retailer === item.source);
+    if (!item.price || !item.link) return;
+
+    const priceVal = typeof item.price === 'string'
+      ? parseFloat(item.price.replace(/[^0-9.,]/g, '').replace(',', '.'))
+      : item.price?.extracted_value ?? null;
+
+    if (!priceVal) return;
+
+    const currency = typeof item.price === 'string'
+      ? (item.price.includes('₪') ? '₪' : item.price.includes('$') ? '$' : item.price.includes('£') ? '£' : '€')
+      : item.price?.currency ?? '€';
+
+    const existing = cards.find(c =>
+      c.url === item.link ||
+      (c.retailer && item.source &&
+        c.retailer.toLowerCase().includes(item.source.toLowerCase()))
+    );
+
     if (existing) {
-      if (item.price?.extracted_value != null && !existing.hasPrice) {
-        existing.price = item.price.extracted_value;
-        existing.currency = item.price.currency ?? '€';
-        existing.hasPrice = true;
-      }
+      existing.price = priceVal;
+      existing.currency = currency;
+      existing.hasPrice = true;
     } else if (item.thumbnail && item.link) {
       const domain = (() => {
         try { return new URL(item.link).hostname.replace('www.', ''); } catch { return item.source ?? ''; }
@@ -1728,9 +1745,9 @@ async function handleGoogleLens(imageBase64) {
         domain,
         url: item.link,
         imageUrl: item.thumbnail,
-        price: item.price?.extracted_value ?? null,
-        currency: item.price?.currency ?? '€',
-        hasPrice: item.price?.extracted_value != null,
+        price: priceVal,
+        currency,
+        hasPrice: true,
         sourceIcon: null,
         isOfficial: OFFICIAL_DOMAINS.some(d => domain.includes(d)),
       });
