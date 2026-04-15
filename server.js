@@ -1435,21 +1435,24 @@ app.post('/scan', async (req, res) => {
         }
       }
 
-      const usesShopping = shoppingResult.cards.length > 0;
-      const finalCards = usesShopping ? shoppingResult.cards : (lensResult?.cards ?? []);
-      const medianPrice = shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null;
+      // Prefer Lens visual matches (image-based, correct colorway/variant)
+      // Fall back to Shopping (text-based) only when Lens has no priced results
+      const lensCards = (lensResult?.cards ?? []).filter(c => c.price != null);
+      const usesLens = lensCards.length > 0;
+      const finalCards = usesLens ? lensCards : shoppingResult.cards;
+      const medianPrice = usesLens ? lensResult?.medianPrice : shoppingResult.medianPrice;
 
       return res.json({
         type: 'WEB_RESULT',
         productName,
         cards: finalCards,
-        medianPrice,
+        medianPrice: medianPrice ?? null,
         sourcesCount: finalCards.length,
         pricesCount: finalCards.filter(c => c.hasPrice).length,
         sellerPrice,
         streamCurrency,
-        priceSource: usesShopping ? 'shopping' : 'lens',
-        totalFound: usesShopping ? shoppingResult.totalFound : (lensResult?.sourcesCount ?? 0),
+        priceSource: usesLens ? 'lens' : 'shopping',
+        totalFound: usesLens ? lensCards.length : shoppingResult.totalFound,
       });
     } catch (err) {
       console.error('[Lakkot] Unified scan error:', err.message);
