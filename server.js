@@ -1330,9 +1330,26 @@ async function handleGoogleLens(imageBase64) {
     return 0;
   });
 
-  // STEP E: Product name
+  // STEP E: Product name — prefer titles with color keywords for specificity
+  const COLOR_KEYWORDS = [
+    'black', 'white', 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
+    'pink', 'grey', 'gray', 'brown', 'beige', 'cream', 'navy', 'teal',
+    'gold', 'silver', 'bronze', 'ivory', 'tan', 'khaki', 'olive',
+    'noir', 'blanc', 'rouge', 'bleu', 'vert', 'jaune', 'rose', 'gris', 'marron',
+    'bred', 'mocha', 'obsidian', 'sail', 'bone', 'cement', 'shadow',
+    'university', 'royal', 'chicago', 'panda', 'dunk', 'infrared',
+  ];
+  function titleHasColor(title) {
+    if (!title) return false;
+    const lower = title.toLowerCase();
+    return COLOR_KEYWORDS.some(c => lower.includes(c));
+  }
+
+  const kgTitle = serpData.knowledge_graph?.title ?? null;
+  const colorMatch = visualMatches.find(m => titleHasColor(m.title));
   const productName =
-    serpData.knowledge_graph?.title ??
+    kgTitle ??
+    (colorMatch?.title ?? null) ??
     serpData.visual_matches?.[0]?.title ??
     null;
 
