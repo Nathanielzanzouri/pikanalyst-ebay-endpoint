@@ -1905,6 +1905,81 @@ app.post('/scan', async (req, res) => {
     }
   }
 
+  // unified: auto-detect item type and route to correct pricing pipeline
+  if (type === 'unified') {
+    try {
+      const { imageBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR' } = params;
+      const rawTitle = (streamTitle ?? '').trim();
+      const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
+
+      // Check for unsupported items first
+      if (hasTitle) {
+        if (isGradedCard(rawTitle)) {
+          return res.json({ type: 'UNSUPPORTED', reason: 'graded', message: 'Graded card — pricing not supported yet', title: rawTitle });
+        }
+        if (isBooster(rawTitle)) {
+          return res.json({ type: 'UNSUPPORTED', reason: 'sealed', message: 'Sealed product — pricing not supported yet', title: rawTitle });
+        }
+        if (isLot(rawTitle)) {
+          return res.json({ type: 'UNSUPPORTED', reason: 'lot', message: 'Lot/bundle — pricing not supported yet', title: rawTitle });
+        }
+        if (isMultiChoice(rawTitle)) {
+          return res.json({ type: 'UNSUPPORTED', reason: 'multi', message: 'Multi-choice listing — pricing not supported yet', title: rawTitle });
+        }
+      }
+
+      // Route 1: DOM title looks like a card → eBay sold pipeline
+      if (hasTitle && isTCGCard(rawTitle)) {
+        console.log('[Lakkot] Unified: card detected from title →', rawTitle);
+        const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0 });
+      }
+
+      // Route 2: Not a card (or no title) → Google Lens → check if card → route
+      console.log('[Lakkot] Unified: non-card or no title, running Google Lens...');
+      const lensResult = await handleGoogleLens(imageBase64);
+      const productName = lensResult?.productName ?? null;
+
+      // Check if Lens identified a card
+      if (productName && isTCGCard(productName)) {
+        console.log('[Lakkot] Unified: Lens identified card →', productName);
+        const result = await handleAnalyze({ imageBase64, streamTitle: productName, sellerPrice, mode: 'cards', manualCardOverride: productName, language });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens' });
+      }
+
+      // Route 3: Non-card → Google Shopping for retail pricing
+      let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
+      if (productName) {
+        try {
+          shoppingResult = await handleGoogleShopping(productName);
+          console.log('[Lakkot] Unified: Google Shopping', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
+        } catch (err) {
+          console.error('[Lakkot] Unified: Google Shopping error:', err.message);
+        }
+      }
+
+      const usesShopping = shoppingResult.cards.length > 0;
+      const finalCards = usesShopping ? shoppingResult.cards : (lensResult?.cards ?? []);
+      const medianPrice = shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null;
+
+      return res.json({
+        type: 'WEB_RESULT',
+        productName,
+        cards: finalCards,
+        medianPrice,
+        sourcesCount: finalCards.length,
+        pricesCount: finalCards.filter(c => c.hasPrice).length,
+        sellerPrice,
+        streamCurrency,
+        priceSource: usesShopping ? 'shopping' : 'lens',
+        totalFound: usesShopping ? shoppingResult.totalFound : (lensResult?.sourcesCount ?? 0),
+      });
+    } catch (err) {
+      console.error('[Lakkot] Unified scan error:', err.message);
+      return res.json({ type: 'WEB_RESULT', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', priceSource: 'lens', _error: err.message });
+    }
+  }
+
   // google_lens: SerpApi Google Lens + Google Shopping — does not consume quota
   if (type === 'google_lens') {
     try {
