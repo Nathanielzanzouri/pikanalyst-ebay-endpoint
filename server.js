@@ -1393,9 +1393,11 @@ app.post('/scan', async (req, res) => {
         }
       }
 
-      // Route 1: DOM title looks like a card → eBay sold pipeline
-      if (hasTitle && isTCGCard(rawTitle)) {
-        console.log('[Lakkot] Unified: card detected from title →', rawTitle);
+      // Route 1: DOM title has a card number (NNN/NNN) → skip Lens, use title directly for eBay
+      // Card number in title = precise enough for eBay query without vision (saves Lens API cost)
+      // Titles without card number (e.g. "Ronflex holo jungle") fall through to Lens for accurate ID
+      if (hasTitle && CARD_NUMBER_RE.test(rawTitle)) {
+        console.log('[Lakkot] Unified: card number in title, fast path →', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0 });
       }
