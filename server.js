@@ -136,7 +136,7 @@ function toEur(price, currency) {
 // ─── Language helpers ─────────────────────────────────────────────────────────
 function applyLanguageToQuery(baseQuery, language) {
   switch (language) {
-    case 'JP': return baseQuery + ' Japanese';
+    case 'JP': return baseQuery;
     case 'FR': case 'EN': case 'WORLD': default: return baseQuery;
   }
 }
@@ -749,7 +749,18 @@ async function fetchEbayBrowse(card, token, language = 'WORLD') {
 
     console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | clean=${cleanItems.length} | query: "${query}"`);
 
-    const identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
+    let identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
+
+    // JP filter: if language is JP, only keep listings with Japanese keywords in title
+    if (language === 'JP') {
+      const jpKeywords = ['japan', 'japanese', 'jap', 'jp', 'japonais', 'japonaise'];
+      const beforeJp = identityItems.length;
+      identityItems = identityItems.filter(l => {
+        const titleLower = (l.title || '').toLowerCase();
+        return jpKeywords.some(kw => titleLower.includes(kw));
+      });
+      console.log(`[Lakkot] JP filter: ${beforeJp} → ${identityItems.length} listings`);
+    }
 
     console.log('CLEAN items used for median:');
     identityItems.forEach((item, idx) => {
