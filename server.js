@@ -1407,6 +1407,13 @@ app.post('/scan', async (req, res) => {
 
       // Check if Lens identified a card
       if (productName && isTCGCard(productName)) {
+        // Check for unsupported items in Lens result too (graded, sealed, lots)
+        if (isGradedCard(productName)) {
+          return res.json({ type: 'UNSUPPORTED', reason: 'graded', message: 'Graded card — pricing not supported yet', title: productName });
+        }
+        if (isBooster(productName)) {
+          return res.json({ type: 'UNSUPPORTED', reason: 'sealed', message: 'Sealed product — pricing not supported yet', title: productName });
+        }
         console.log('[Lakkot] Unified: Lens identified card →', productName);
         const result = await handleAnalyze({ imageBase64, streamTitle: productName, sellerPrice, mode: 'cards', manualCardOverride: productName, language });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens' });
