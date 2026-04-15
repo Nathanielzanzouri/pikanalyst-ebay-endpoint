@@ -908,26 +908,21 @@ async function fetchEbayAny(card, language = 'WORLD') {
 }
 
 async function fetchPrices(card, language = 'WORLD') {
-  const fetchTCG = language === 'EN';
-  const [ebaySettled, tcgSettled] = await Promise.allSettled([
-    fetchEbayAny(card, language),
-    fetchTCG ? fetchPokemonTCG(card) : Promise.resolve(null),
-  ]);
-  const ebay = ebaySettled.status === 'fulfilled' ? ebaySettled.value : null;
-  const tcg  = fetchTCG && tcgSettled.status === 'fulfilled' ? tcgSettled.value : null;
+  let ebay = null;
+  try {
+    ebay = await fetchEbayAny(card, language);
+  } catch (err) {
+    console.warn('[Yamo] eBay failed:', err.message);
+  }
   if (ebay) console.log('[Yamo] eBay OK:', ebay.ebay_sales_count, 'items, €' + ebay.market_price_usd);
-  else      console.warn('[Yamo] eBay failed:', ebaySettled.reason?.message);
-  if (fetchTCG && tcg)  console.log('[Yamo] TCG OK: $' + tcg.market_price_usd);
   return {
-    market_price_usd:  ebay?.market_price_usd ?? tcg?.market_price_usd ?? null,
-    price_low_usd:     ebay?.price_low_usd    ?? tcg?.price_low_usd    ?? null,
-    price_high_usd:    ebay?.price_high_usd   ?? tcg?.price_high_usd   ?? null,
-    price_source:      ebay ? 'ebay' : (tcg ? 'pokemontcg' : 'none'),
+    market_price_usd:  ebay?.market_price_usd ?? null,
+    price_low_usd:     ebay?.price_low_usd    ?? null,
+    price_high_usd:    ebay?.price_high_usd   ?? null,
+    price_source:      ebay ? 'ebay' : 'none',
     ebay_market_price: ebay?.market_price_usd ?? null,
     ebay_sales_count:  ebay?.ebay_sales_count  ?? 0,
     ebay_url:          ebay?.ebay_url           ?? null,
-    tcg_market_price:  tcg?.market_price_usd  ?? null,
-    tcg_url:           tcg?.ebay_url           ?? null,
     listings:          ebay?.listings          ?? [],
   };
 }
