@@ -212,6 +212,39 @@ function isSpecialEdition(title) {
   ].some(kw => lower.includes(kw));
 }
 
+// ─── TCG card detection (unified scan router) ────────────────────────────────
+const TCG_BRAND_KEYWORDS = [
+  'pokemon', 'pokémon', 'pikachu', 'charizard', 'dracaufeu',
+  'yugioh', 'yu-gi-oh', 'yu gi oh',
+  'one piece card', 'one piece tcg',
+  'magic the gathering', 'mtg',
+  'digimon card', 'dragon ball super card',
+];
+const TCG_MECHANIC_KEYWORDS = [
+  'holo', 'reverse holo', 'vstar', 'vmax', 'ex', 'gx',
+  'full art', 'alt art', 'trainer gallery', 'radiant',
+  'illustration rare', 'special art rare', 'art rare',
+  'spell card', 'trap card', 'synchro', 'xyz', 'link', 'pendulum',
+  'manga rare', 'leader card', 'don card',
+  'ultra rare', 'secret rare', 'starlight rare',
+  'near mint', 'lightly played', 'moderately played',
+  'common', 'uncommon', 'rare holo',
+];
+const CARD_NUMBER_RE = /\b\d{1,3}\s*\/\s*\d{1,3}\b/;
+
+function isTCGCard(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  // Card number pattern is a strong signal
+  if (CARD_NUMBER_RE.test(text)) return true;
+  // Brand keywords
+  if (TCG_BRAND_KEYWORDS.some(kw => lower.includes(kw))) return true;
+  // Mechanic keywords (require at least 2 to avoid false positives on generic terms)
+  const mechanicHits = TCG_MECHANIC_KEYWORDS.filter(kw => lower.includes(kw));
+  if (mechanicHits.length >= 2) return true;
+  return false;
+}
+
 // ─── Card identity filter ─────────────────────────────────────────────────────
 function filterByCardIdentity(query, items, getTitleFn, language = 'WORLD') {
   if (language === 'JP') {
