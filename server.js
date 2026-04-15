@@ -1420,6 +1420,18 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
   if (item.card_name === 'UNCLEAR') return { card_name: 'UNCLEAR' };
   if (!item.card_name || item.card_name === 'Non identifiable') return { card_name: 'Non identifiable' };
 
+  // Safeguard: ensure ebay_search always includes card_name
+  // Claude sometimes drops the Pokemon name from the search query
+  if (item.ebay_search && item.card_name) {
+    const nameWords = item.card_name.replace(/[/\\]/g, ' ').trim().split(/\s+/);
+    const searchLower = item.ebay_search.toLowerCase();
+    const firstWord = nameWords[0]?.toLowerCase();
+    if (firstWord && firstWord.length >= 3 && !searchLower.includes(firstWord)) {
+      item.ebay_search = `${item.card_name} ${item.ebay_search}`.trim();
+      console.log('[Lakkot] Fixed ebay_search — card name was missing:', item.ebay_search);
+    }
+  }
+
   if (manualCardOverride && manualCardOverride.trim()) {
     const overrideStr = manualCardOverride.trim();
     const numMatch = overrideStr.match(/^(\d+(?:\/\d+)?)/);
@@ -1621,6 +1633,70 @@ async function cropToObject(imageBase64, normalizedVertices) {
   }
 }
 
+// ─── Google Shopping pricing engine (used after Lens identifies the product) ──
+function detectCurrency(priceStr) {
+  if (!priceStr) return '$';
+  if (priceStr.includes('₪')) return '₪';
+  if (priceStr.includes('£')) return '£';
+  if (priceStr.includes('€')) return '€';
+  return '$';
+}
+
+async function handleGoogleShopping(productName) {
+  const params = new URLSearchParams({
+    engine: 'google_shopping',
+    q: productName,
+    api_key: process.env.SERPAPI_KEY,
+    num: '40',
+  });
+
+  const res = await fetch('https://serpapi.com/search.json?' + params);
+  const data = await res.json();
+
+  const raw = data.shopping_results ?? [];
+  console.log(`[Lakkot] google_shopping: ${raw.length} results for "${productName}"`);
+
+  const cards = raw
+    .filter(item => item.extracted_price && item.extracted_price > 0 && item.thumbnail && item.product_link)
+    .map(item => ({
+      title: item.title,
+      retailer: item.source,
+      sourceIcon: item.source_icon ?? null,
+      url: item.product_link,
+      imageUrl: item.thumbnail,
+      price: item.extracted_price,
+      currency: detectCurrency(item.price ?? ''),
+      hasPrice: true,
+      isSecondHand: item.second_hand_condition === 'pre-owned',
+      tag: item.tag ?? null,
+    }));
+
+  if (cards.length < 2) {
+    return { cards, medianPrice: cards[0]?.price ?? null, totalFound: cards.length };
+  }
+
+  // Remove price outliers: keep Q1*0.5 to Q3*2
+  const prices = cards.map(c => c.price).sort((a, b) => a - b);
+  const q1 = prices[Math.floor(prices.length * 0.25)];
+  const q3 = prices[Math.floor(prices.length * 0.75)];
+  const filtered = cards.filter(c => c.price >= q1 * 0.5 && c.price <= q3 * 2);
+
+  // Sort by price ascending
+  filtered.sort((a, b) => a.price - b.price);
+
+  // Median from filtered prices
+  const filteredPrices = filtered.map(c => c.price);
+  const median = filteredPrices.length > 0
+    ? filteredPrices[Math.floor(filteredPrices.length / 2)]
+    : null;
+
+  return {
+    cards: filtered.slice(0, 8),
+    medianPrice: median,
+    totalFound: filtered.length,
+  };
+}
+
 async function handleGoogleLens(imageBase64) {
   // STEP A: Upload image to imgbb to get a public URL
   const formData = new URLSearchParams({
@@ -1801,25 +1877,46 @@ app.post('/scan', async (req, res) => {
     }
   }
 
-  // google_lens: SerpApi Google Lens — does not consume quota
+  // google_lens: SerpApi Google Lens + Google Shopping — does not consume quota
   if (type === 'google_lens') {
     try {
-      const result = await handleGoogleLens(params.imageBase64);
       const sellerPrice = params.sellerPrice ?? null;
       const streamCurrency = params.streamCurrency ?? 'EUR';
+      // Step 1: Google Lens identifies the product visually
+      const lensResult = await handleGoogleLens(params.imageBase64);
+      const productName = lensResult.productName ?? null;
+
+      // Step 2: Google Shopping searches by product name for confirmed prices
+      let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
+      if (productName) {
+        try {
+          shoppingResult = await handleGoogleShopping(productName);
+          console.log(`[Lakkot] google_shopping: ${shoppingResult.cards.length} priced cards, median=${shoppingResult.medianPrice}`);
+        } catch (shErr) {
+          console.error('[Lakkot] google_shopping error (falling back to lens):', shErr.message);
+        }
+      }
+
+      // Prefer shopping cards (all have confirmed prices), fall back to lens
+      const usesShopping = shoppingResult.cards.length > 0;
+      const finalCards = usesShopping ? shoppingResult.cards : lensResult.cards;
+      const medianPrice = shoppingResult.medianPrice ?? lensResult.medianPrice;
+
       return res.json({
         type: 'WEB_DONE',
-        productName: result.productName,
-        cards: result.cards,
-        medianPrice: result.medianPrice,
-        sourcesCount: result.sourcesCount,
-        pricesCount: result.pricesCount,
+        productName,
+        cards: finalCards,
+        medianPrice,
+        sourcesCount: finalCards.length,
+        pricesCount: finalCards.filter(c => c.hasPrice).length,
         sellerPrice,
         streamCurrency,
+        priceSource: usesShopping ? 'shopping' : 'lens',
+        totalFound: usesShopping ? shoppingResult.totalFound : lensResult.sourcesCount,
       });
     } catch (err) {
-      console.error('[Yamo] google_lens error:', err.message);
-      return res.json({ type: 'WEB_DONE', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', _error: err.message });
+      console.error('[Lakkot] google_lens error:', err.message);
+      return res.json({ type: 'WEB_DONE', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', priceSource: 'lens', _error: err.message });
     }
   }
 
