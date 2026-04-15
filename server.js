@@ -1407,15 +1407,15 @@ app.post('/scan', async (req, res) => {
 
       // Check if Lens identified a card
       if (productName && isTCGCard(productName)) {
-        // Check for unsupported items in Lens result too (graded, sealed, lots)
-        if (isGradedCard(productName)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'graded', message: 'Graded card — pricing not supported yet', title: productName });
-        }
-        if (isBooster(productName)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'sealed', message: 'Sealed product — pricing not supported yet', title: productName });
-        }
-        console.log('[Lakkot] Unified: Lens identified card →', productName);
-        const result = await handleAnalyze({ imageBase64, streamTitle: productName, sellerPrice, mode: 'cards', manualCardOverride: productName, language });
+        // Strip grading keywords from Lens product name — Lens often finds graded listings
+        // but the card on stream is typically raw
+        const cleanedName = productName
+          .replace(/\b(psa|cgc|bgs|sgc|beckett|pca|hga|collectaura|collect aura)\s*\d*\b/gi, '')
+          .replace(/\b(graded|slab|slabbed|gem mint|gem mt)\b/gi, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
+        const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens' });
       }
 
