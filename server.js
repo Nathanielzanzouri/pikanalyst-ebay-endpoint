@@ -1187,8 +1187,14 @@ async function handleGoogleShopping(productName) {
     return !COUNTERFEIT_DOMAINS.some(r => domain.includes(r));
   });
 
-  // From legitimate results, prefer retail over secondhand
-  const retailOnly = legitimate.filter(c => !c.isSecondHand);
+  // Trusted marketplaces — never filter these even if flagged as secondhand
+  const TRUSTED_MARKETPLACES = ['stockx', 'goat', 'klekt'];
+  // From legitimate results, prefer retail + trusted marketplaces over secondhand
+  const retailOnly = legitimate.filter(c => {
+    const domain = (c.retailer || c.domain || '').toLowerCase();
+    if (TRUSTED_MARKETPLACES.some(t => domain.includes(t))) return true;
+    return !c.isSecondHand;
+  });
   const displaySource = retailOnly.length > 0 ? retailOnly : legitimate;
 
   // Use retail results if available, otherwise fall back to all results
