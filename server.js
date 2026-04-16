@@ -1182,6 +1182,7 @@ async function handleGoogleShopping(productName) {
     'vestiaire', 'vinted', 'depop', 'grailed', 'poshmark',
     'mercari', 'ebay', 'bonanza', 'etsy', 'leboncoin',
     'stockx', 'goat', 'klekt', 'restocks',
+    'aliexpress', 'temu', 'dhgate', 'wish',
   ];
   const retailOnly = filtered.filter(c => {
     if (c.isSecondHand) return false;
