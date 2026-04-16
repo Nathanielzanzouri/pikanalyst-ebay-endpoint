@@ -1178,17 +1178,18 @@ async function handleGoogleShopping(productName) {
   filtered.sort((a, b) => a.price - b.price);
 
   // Filter out secondhand/resale sources — retail price is the anchor for non-card items
-  const RESALE_DOMAINS = [
-    'vestiaire', 'vinted', 'depop', 'grailed', 'poshmark',
-    'mercari', 'ebay', 'bonanza', 'etsy', 'leboncoin',
-    'stockx', 'goat', 'klekt', 'restocks',
+  // Remove counterfeit marketplaces (always)
+  const COUNTERFEIT_DOMAINS = [
     'aliexpress', 'temu', 'dhgate', 'wish',
   ];
-  const retailOnly = filtered.filter(c => {
-    if (c.isSecondHand) return false;
+  const legitimate = filtered.filter(c => {
     const domain = (c.retailer || c.domain || '').toLowerCase();
-    return !RESALE_DOMAINS.some(r => domain.includes(r));
+    return !COUNTERFEIT_DOMAINS.some(r => domain.includes(r));
   });
+
+  // From legitimate results, prefer retail over secondhand
+  const retailOnly = legitimate.filter(c => !c.isSecondHand);
+  const displaySource = retailOnly.length > 0 ? retailOnly : legitimate;
 
   // Use retail results if available, otherwise fall back to all results
   const displaySource = retailOnly.length > 0 ? retailOnly : filtered;
