@@ -1177,16 +1177,32 @@ async function handleGoogleShopping(productName) {
   // Sort by price ascending
   filtered.sort((a, b) => a.price - b.price);
 
-  // Median from filtered prices
-  const filteredPrices = filtered.map(c => c.price);
-  const median = filteredPrices.length > 0
-    ? filteredPrices[Math.floor(filteredPrices.length / 2)]
+  // Filter out secondhand/resale sources — retail price is the anchor for non-card items
+  const RESALE_DOMAINS = [
+    'vestiaire', 'vinted', 'depop', 'grailed', 'poshmark',
+    'mercari', 'ebay', 'bonanza', 'etsy', 'leboncoin',
+    'stockx', 'goat', 'klekt', 'restocks',
+  ];
+  const retailOnly = filtered.filter(c => {
+    if (c.isSecondHand) return false;
+    const domain = (c.retailer || c.domain || '').toLowerCase();
+    return !RESALE_DOMAINS.some(r => domain.includes(r));
+  });
+
+  // Use retail results if available, otherwise fall back to all results
+  const displaySource = retailOnly.length > 0 ? retailOnly : filtered;
+  const displayCards = displaySource.slice(0, 8);
+
+  // Median from displayed results — so the number matches what the user sees
+  const displayPrices = displayCards.map(c => c.price);
+  const median = displayPrices.length > 0
+    ? displayPrices[Math.floor(displayPrices.length / 2)]
     : null;
 
   return {
-    cards: filtered.slice(0, 8),
+    cards: displayCards,
     medianPrice: median,
-    totalFound: filtered.length,
+    totalFound: displaySource.length,
   };
 }
 
