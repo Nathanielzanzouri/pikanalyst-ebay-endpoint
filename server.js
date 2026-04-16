@@ -1196,9 +1196,6 @@ async function handleGoogleShopping(productName) {
     return !c.isSecondHand;
   });
   const displaySource = retailOnly.length > 0 ? retailOnly : legitimate;
-
-  // Use retail results if available, otherwise fall back to all results
-  const displaySource = retailOnly.length > 0 ? retailOnly : filtered;
   const displayCards = displaySource.slice(0, 8);
 
   // Median from displayed results — so the number matches what the user sees
