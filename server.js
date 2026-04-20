@@ -1543,6 +1543,28 @@ app.post('/scan', async (req, res) => {
 
   // unified: auto-detect item type and route to correct pricing pipeline
   if (type === 'unified') {
+    // Track quota — increment scan count and return remaining
+    let quota = null;
+    if (token) {
+      const { data: user } = await supabase.from('users').select('id, email, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
+      if (user) {
+        const today = new Date().toISOString().slice(0, 10);
+        if (user.scan_reset_at !== today) {
+          await supabase.from('users').update({ scan_count: 1, scan_reset_at: today }).eq('id', user.id);
+          user.scan_count = 1;
+        } else {
+          await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
+          user.scan_count += 1;
+        }
+        const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+        quota = { count: user.scan_count, remaining: Math.max(0, limit - user.scan_count), limit };
+
+        if (user.scan_count > limit) {
+          return res.json({ type: 'LIMIT_REACHED', quota });
+        }
+      }
+    }
+
     try {
       const { imageBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR' } = params;
       const rawTitle = (streamTitle ?? '').trim();
@@ -1551,16 +1573,16 @@ app.post('/scan', async (req, res) => {
       // Check for unsupported items first
       if (hasTitle) {
         if (isGradedCard(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'graded', message: 'Graded card — pricing not supported yet', title: rawTitle });
+          return res.json({ type: 'UNSUPPORTED', reason: 'graded', message: 'Graded card — pricing not supported yet', title: rawTitle, quota });
         }
         if (isBooster(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'sealed', message: 'Sealed product — pricing not supported yet', title: rawTitle });
+          return res.json({ type: 'UNSUPPORTED', reason: 'sealed', message: 'Sealed product — pricing not supported yet', title: rawTitle, quota });
         }
         if (isLot(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'lot', message: 'Lot/bundle — pricing not supported yet', title: rawTitle });
+          return res.json({ type: 'UNSUPPORTED', reason: 'lot', message: 'Lot/bundle — pricing not supported yet', title: rawTitle, quota });
         }
         if (isMultiChoice(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'multi', message: 'Multi-choice listing — pricing not supported yet', title: rawTitle });
+          return res.json({ type: 'UNSUPPORTED', reason: 'multi', message: 'Multi-choice listing — pricing not supported yet', title: rawTitle, quota });
         }
       }
 
@@ -1570,7 +1592,7 @@ app.post('/scan', async (req, res) => {
       if (hasTitle && CARD_NUMBER_RE.test(rawTitle)) {
         console.log('[Lakkot] Unified: card number in title, fast path →', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0 });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota });
       }
 
       // Route 2: Not a card (or no title) → Google Lens → check if card → route
@@ -1592,7 +1614,7 @@ app.post('/scan', async (req, res) => {
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
         const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language });
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens' });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota });
       }
 
       // Route 3: Non-card → Google Shopping for retail pricing
@@ -1622,10 +1644,11 @@ app.post('/scan', async (req, res) => {
         streamCurrency,
         priceSource: usesShopping ? 'shopping' : 'lens',
         totalFound: usesShopping ? shoppingResult.totalFound : (lensResult?.sourcesCount ?? 0),
+        quota,
       });
     } catch (err) {
       console.error('[Lakkot] Unified scan error:', err.message);
-      return res.json({ type: 'WEB_RESULT', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', priceSource: 'lens', _error: err.message });
+      return res.json({ type: 'WEB_RESULT', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', priceSource: 'lens', _error: err.message, quota });
     }
   }
 
