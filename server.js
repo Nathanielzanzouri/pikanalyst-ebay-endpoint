@@ -961,53 +961,91 @@ async function handleManualLookup(cardName, language = 'WORLD') {
 const { Resend } = require('resend');
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-app.post('/auth/signup', async (req, res) => {
-  const { email } = req.body;
-  if (!email || !email.includes('@')) {
-    return res.status(400).json({ error: 'invalid_email' });
+// ─── Google Auth ──────────────────────────────────────────────────────────────
+app.post('/auth/google', async (req, res) => {
+  const { googleToken } = req.body;
+  if (!googleToken) {
+    return res.status(400).json({ error: 'missing_token' });
   }
 
   try {
-    // Check if user already exists — re-send their token if so (idempotent)
+    // Verify Google token
+    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${googleToken}`);
+    if (!googleRes.ok) {
+      return res.status(401).json({ error: 'invalid_google_token' });
+    }
+    const googleUser = await googleRes.json();
+    const email = googleUser.email;
+    if (!email) {
+      return res.status(401).json({ error: 'no_email_in_token' });
+    }
+
+    // Get profile info from Google userinfo endpoint
+    const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { 'Authorization': `Bearer ${googleToken}` },
+    });
+    const profile = profileRes.ok ? await profileRes.json() : {};
+    const name = profile.name || email.split('@')[0];
+    const picture = profile.picture || null;
+
+    // Find or create user by email
     const { data: existing } = await supabase
       .from('users')
-      .select('token')
+      .select('id, token, plan, scan_count, scan_reset_at, scan_limit_override, name, picture')
       .eq('email', email)
       .single();
 
-    let token = existing?.token ?? null;
-
-    if (!existing) {
+    let user;
+    if (existing) {
+      // Update profile if changed
+      if (existing.name !== name || existing.picture !== picture) {
+        await supabase.from('users').update({ name, picture }).eq('id', existing.id);
+      }
+      user = existing;
+    } else {
       // Create new user
       const { data: newUser, error: insertError } = await supabase
         .from('users')
-        .insert({ email })
-        .select('token')
+        .insert({ email, name, picture })
+        .select('id, token, plan, scan_count, scan_reset_at, scan_limit_override')
         .single();
       if (insertError) throw insertError;
-      token = newUser.token;
+      user = newUser;
     }
 
-    // Send token email via Resend
-    const { error: sendError } = await resend.emails.send({
-      from: 'Yamo <onboarding@resend.dev>',
-      to: email,
-      subject: 'Your Yamo access token',
-      html: `
-        <p>Welcome to Yamo!</p>
-        <p>Your access token is:</p>
-        <p style="font-size:18px;font-weight:bold;letter-spacing:2px;">${token}</p>
-        <p>Paste this token into the Yamo extension popup to activate it.</p>
-        <p>Free plan: 10 scans/day. Upgrade to Pro at <a href="https://yamo.app">yamo.app</a>.</p>
-      `,
-    });
-    if (sendError) console.warn('[Yamo] /auth/signup email not sent (Resend sandbox limit):', sendError.message ?? JSON.stringify(sendError));
+    // Reset daily count if new day
+    const today = new Date().toISOString().slice(0, 10);
+    if (user.scan_reset_at !== today) {
+      await supabase.from('users').update({ scan_count: 0, scan_reset_at: today }).eq('id', user.id);
+      user.scan_count = 0;
+    }
 
-    return res.json({ success: true });
+    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+
+    console.log('[Lakkot] Google auth OK:', email, '| plan:', user.plan, '| scans:', user.scan_count + '/' + limit);
+
+    return res.json({
+      token: user.token,
+      email,
+      name,
+      picture,
+      plan: user.plan || 'free',
+      scanCount: user.scan_count,
+      scanLimit: limit,
+    });
   } catch (err) {
-    console.error('[Yamo] /auth/signup error:', err.message);
-    return res.status(500).json({ error: 'signup_failed' });
+    console.error('[Lakkot] /auth/google error:', err.message);
+    return res.status(500).json({ error: 'auth_failed' });
   }
+});
+
+// ─── Stripe webhook (placeholder — configure when Stripe is set up) ──────────
+app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  // TODO: Validate Stripe webhook signature
+  // TODO: Handle checkout.session.completed event
+  // TODO: Update user plan to 'pro' in Supabase
+  console.log('[Lakkot] Stripe webhook received (not yet configured)');
+  res.json({ received: true });
 });
 
 app.get('/me', async (req, res) => {
