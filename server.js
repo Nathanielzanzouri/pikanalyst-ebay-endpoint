@@ -39,8 +39,11 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Plan daily limits
-const PLAN_LIMITS = { free: 10, pro: 100 };
+// Plan monthly limits
+const PLAN_LIMITS = { free: 10, starter: 50, pro: 250 };
+
+// Get current month as YYYY-MM string
+function currentMonth() { return new Date().toISOString().slice(0, 7); }
 
 // Validate token, check + increment scan count.
 // Returns { user } on success, calls res.status(4xx).json() and returns null on failure.
@@ -61,12 +64,12 @@ async function validateAndCount(token, res) {
     return null;
   }
 
-  // Reset daily count if it's a new day
-  const today = new Date().toISOString().slice(0, 10);
-  if (user.scan_reset_at !== today) {
+  // Reset monthly count if it's a new month
+  const month = currentMonth();
+  if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
     await supabase
       .from('users')
-      .update({ scan_count: 0, scan_reset_at: today })
+      .update({ scan_count: 0, scan_reset_at: month })
       .eq('id', user.id);
     user.scan_count = 0;
   }
@@ -1019,10 +1022,10 @@ app.post('/auth/google', async (req, res) => {
       user = newUser;
     }
 
-    // Reset daily count if new day
-    const today = new Date().toISOString().slice(0, 10);
-    if (user.scan_reset_at !== today) {
-      await supabase.from('users').update({ scan_count: 0, scan_reset_at: today }).eq('id', user.id);
+    // Reset monthly count if new month
+    const month = currentMonth();
+    if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
+      await supabase.from('users').update({ scan_count: 0, scan_reset_at: month }).eq('id', user.id);
       user.scan_count = 0;
     }
 
@@ -1104,8 +1107,7 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (re
     const customerId = session.customer;
 
     if (email) {
-      const planLimits = { starter: 50, pro: 100 };
-      const newLimit = planLimits[plan] || 100;
+      const newLimit = PLAN_LIMITS[plan] || 250;
 
       const { error } = await supabase
         .from('users')
@@ -1548,9 +1550,9 @@ app.post('/scan', async (req, res) => {
     if (token) {
       const { data: user } = await supabase.from('users').select('id, email, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
       if (user) {
-        const today = new Date().toISOString().slice(0, 10);
-        if (user.scan_reset_at !== today) {
-          await supabase.from('users').update({ scan_count: 1, scan_reset_at: today }).eq('id', user.id);
+        const month = currentMonth();
+        if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
+          await supabase.from('users').update({ scan_count: 1, scan_reset_at: month }).eq('id', user.id);
           user.scan_count = 1;
         } else {
           await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
@@ -1700,16 +1702,16 @@ app.post('/scan', async (req, res) => {
   if (process.env.REQUIRE_AUTH !== 'false') {
     const user = await validateAndCount(token, res);
     if (!user) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const scanCount = user.scan_reset_at < today ? 0 : user.scan_count;
-    const limit = user.scan_limit_override ?? (user.plan === 'pro' ? 100 : 10);
+    const month = currentMonth();
+    const scanCount = (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) ? 0 : user.scan_count;
+    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
     quota = { email: user.email, remaining: Math.max(0, limit - scanCount), limit };
   } else if (token) {
     const { data: user } = await supabase.from('users').select('email, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
     if (user) {
-      const today = new Date().toISOString().slice(0, 10);
-      const scanCount = user.scan_reset_at < today ? 0 : user.scan_count;
-      const limit = user.scan_limit_override ?? (user.plan === 'pro' ? 100 : 10);
+      const month = currentMonth();
+      const scanCount = (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) ? 0 : user.scan_count;
+      const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
       quota = { email: user.email, remaining: Math.max(0, limit - scanCount), limit };
     }
   }
