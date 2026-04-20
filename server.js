@@ -6,6 +6,8 @@ if (process.env.NODE_ENV !== 'production') {
 const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
+const Stripe  = require('stripe');
+const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
@@ -25,7 +27,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '20mb' }));
+// JSON body parser — skip for Stripe webhook (needs raw body for signature validation)
+app.use((req, res, next) => {
+  if (req.originalUrl === '/stripe/webhook') return next();
+  express.json({ limit: '20mb' })(req, res, next);
+});
 
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(
@@ -1039,12 +1045,101 @@ app.post('/auth/google', async (req, res) => {
   }
 });
 
-// ─── Stripe webhook (placeholder — configure when Stripe is set up) ──────────
+// ─── Stripe: create checkout session ─────────────────────────────────────────
+app.post('/stripe/checkout', async (req, res) => {
+  const { email, plan } = req.body;
+  if (!email) return res.status(400).json({ error: 'missing_email' });
+
+  const priceMap = {
+    starter: process.env.STRIPE_STARTER_PRICE_ID,
+    pro:     process.env.STRIPE_PRO_PRICE_ID,
+    topup50: process.env.STRIPE_TOPUP_50_PRICE_ID,
+  };
+  const priceId = priceMap[plan] || priceMap.pro;
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer_email: email,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: 'https://lakkot.com/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: 'https://lakkot.com/pricing',
+      metadata: { email, plan: plan || 'pro' },
+    });
+    console.log('[Lakkot] Stripe checkout session created:', session.id, '| email:', email, '| plan:', plan);
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error('[Lakkot] Stripe checkout error:', err.message);
+    return res.status(500).json({ error: 'checkout_failed' });
+  }
+});
+
+// ─── Stripe: webhook ─────────────────────────────────────────────────────────
+// NOTE: This must be BEFORE express.json() middleware for raw body access
+// But since we already have express.json() at the top, we use express.raw() here
 app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  // TODO: Validate Stripe webhook signature
-  // TODO: Handle checkout.session.completed event
-  // TODO: Update user plan to 'pro' in Supabase
-  console.log('[Lakkot] Stripe webhook received (not yet configured)');
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  let event;
+  try {
+    if (webhookSecret && sig) {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } else {
+      // No webhook secret configured — parse directly (dev/test mode)
+      event = JSON.parse(req.body.toString());
+      console.warn('[Lakkot] Stripe webhook: no signature validation (STRIPE_WEBHOOK_SECRET not set)');
+    }
+  } catch (err) {
+    console.error('[Lakkot] Stripe webhook signature error:', err.message);
+    return res.status(400).json({ error: 'invalid_signature' });
+  }
+
+  console.log('[Lakkot] Stripe webhook event:', event.type);
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const email = session.customer_email || session.metadata?.email;
+    const plan = session.metadata?.plan || 'pro';
+    const customerId = session.customer;
+
+    if (email) {
+      const planLimits = { starter: 50, pro: 100 };
+      const newLimit = planLimits[plan] || 100;
+
+      const { error } = await supabase
+        .from('users')
+        .update({ plan, scan_limit_override: newLimit, stripe_customer_id: customerId })
+        .eq('email', email);
+
+      if (error) {
+        console.error('[Lakkot] Stripe webhook: Supabase update failed:', error.message);
+      } else {
+        console.log('[Lakkot] Stripe webhook: upgraded', email, 'to', plan, '(' + newLimit + ' scans/day)');
+      }
+    }
+  }
+
+  if (event.type === 'customer.subscription.deleted') {
+    const subscription = event.data.object;
+    const customerId = subscription.customer;
+
+    // Find user by stripe_customer_id and downgrade
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('stripe_customer_id', customerId)
+      .single();
+
+    if (user) {
+      await supabase
+        .from('users')
+        .update({ plan: 'free', scan_limit_override: null })
+        .eq('id', user.id);
+      console.log('[Lakkot] Stripe webhook: downgraded', user.email, 'to free (subscription cancelled)');
+    }
+  }
+
   res.json({ received: true });
 });
 
