@@ -1061,15 +1061,16 @@ app.post('/stripe/checkout', async (req, res) => {
   const priceId = priceMap[plan] || priceMap.pro;
 
   try {
+    const isTopup = plan === 'topup50';
     const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
+      mode: isTopup ? 'payment' : 'subscription',
       customer_email: email,
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: 'https://lakkot.com/success?session_id={CHECKOUT_SESSION_ID}',
       cancel_url: 'https://lakkot.com/pricing',
       metadata: { email, plan: plan || 'pro' },
     });
-    console.log('[Lakkot] Stripe checkout session created:', session.id, '| email:', email, '| plan:', plan);
+    console.log('[Lakkot] Stripe checkout session created:', session.id, '| email:', email, '| plan:', plan, '| mode:', isTopup ? 'payment' : 'subscription');
     return res.json({ url: session.url });
   } catch (err) {
     console.error('[Lakkot] Stripe checkout error:', err.message);
@@ -1107,17 +1108,31 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (re
     const customerId = session.customer;
 
     if (email) {
-      const newLimit = PLAN_LIMITS[plan] || 250;
-
-      const { error } = await supabase
-        .from('users')
-        .update({ plan, scan_limit_override: newLimit, stripe_customer_id: customerId })
-        .eq('email', email);
-
-      if (error) {
-        console.error('[Lakkot] Stripe webhook: Supabase update failed:', error.message);
+      if (plan === 'topup50') {
+        // Top-up: add 50 to current month's limit
+        const { data: user } = await supabase.from('users').select('scan_limit_override, plan').eq('email', email).single();
+        const currentLimit = user?.scan_limit_override ?? (PLAN_LIMITS[user?.plan] ?? 10);
+        const { error } = await supabase
+          .from('users')
+          .update({ scan_limit_override: currentLimit + 50, stripe_customer_id: customerId })
+          .eq('email', email);
+        if (error) {
+          console.error('[Lakkot] Stripe webhook: top-up failed:', error.message);
+        } else {
+          console.log('[Lakkot] Stripe webhook: top-up +50 for', email, '→', currentLimit + 50, 'scans');
+        }
       } else {
-        console.log('[Lakkot] Stripe webhook: upgraded', email, 'to', plan, '(' + newLimit + ' scans/day)');
+        // Plan upgrade: change plan and set new limit
+        const newLimit = PLAN_LIMITS[plan] || 250;
+        const { error } = await supabase
+          .from('users')
+          .update({ plan, scan_limit_override: newLimit, stripe_customer_id: customerId })
+          .eq('email', email);
+        if (error) {
+          console.error('[Lakkot] Stripe webhook: upgrade failed:', error.message);
+        } else {
+          console.log('[Lakkot] Stripe webhook: upgraded', email, 'to', plan, '(' + newLimit + ' scans/month)');
+        }
       }
     }
   }
