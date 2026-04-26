@@ -1361,23 +1361,30 @@ async function handleGoogleShopping(productName) {
   };
 }
 
+// ─── Temporary image hosting (self-hosted, replaces imgbb) ───────────────────
+const _tempImages = new Map();
+const TEMP_IMAGE_TTL = 5 * 60 * 1000; // 5 minutes
+
+app.get('/tmp-img/:id', (req, res) => {
+  const data = _tempImages.get(req.params.id);
+  if (!data) return res.status(404).send('Not found');
+  const buf = Buffer.from(data, 'base64');
+  res.set('Content-Type', 'image/jpeg');
+  res.set('Cache-Control', 'no-store');
+  res.send(buf);
+});
+
+function hostTempImage(base64) {
+  const id = crypto.randomUUID();
+  _tempImages.set(id, base64);
+  setTimeout(() => _tempImages.delete(id), TEMP_IMAGE_TTL);
+  return `https://pikanalyst-ebay-endpoint.onrender.com/tmp-img/${id}`;
+}
+
 async function handleGoogleLens(imageBase64) {
-  // STEP A: Upload image to imgbb to get a public URL
-  const formData = new URLSearchParams({
-    key: process.env.IMGBB_KEY,
-    image: imageBase64,
-    expiration: '600',
-  });
-
-  const imgbbRes = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: formData });
-  const imgbbData = await imgbbRes.json();
-
-  if (!imgbbData.success) {
-    throw new Error('imgbb upload failed: ' + JSON.stringify(imgbbData));
-  }
-
-  const imageUrl = imgbbData.data.url;
-  console.log('[Yamo] google_lens: imgbb upload OK —', imageUrl);
+  // STEP A: Host image temporarily on our own server
+  const imageUrl = hostTempImage(imageBase64);
+  console.log('[Lakkot] google_lens: self-hosted image OK —', imageUrl);
 
   // STEP B: Call SerpApi Google Lens
   const params = new URLSearchParams({
