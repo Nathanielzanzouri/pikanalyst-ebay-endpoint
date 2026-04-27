@@ -1696,11 +1696,12 @@ app.post('/scan', async (req, res) => {
         // Strip grading keywords from Lens product name — Lens often finds graded listings
         // but the card on stream is typically raw
         const cleanedName = productName
-          .replace(/\b(psa|cgc|bgs|sgc|beckett|pca|hga|collectaura|collect aura)\s*\d*\b/gi, '')
-          .replace(/\b(graded|slab|slabbed|gem mint|gem mt)\b/gi, '')
+          .replace(/\b(psa|cgc|bgs|sgc|beckett|pca|hga|ccc|collectaura|collect aura)\s*\d*\b/gi, '')
+          .replace(/\b(graded|slab|slabbed|gem mint|gem mt|gold label|silver label|black label)\b/gi, '')
           .replace(/\b(grad[ée]+e?|carte grad[ée]+e?|cartes grad[ée]+e?s?)\b/gi, '')
           .replace(/\bcarte\s+pokemon\s+/gi, '')
           .replace(/\bpok[ée]mon\s+carte\b/gi, '')
+          .replace(/\bcarte\s+/gi, '')
           .replace(/\s+/g, ' ')
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
