@@ -501,6 +501,15 @@ function buildEbayQuery(domTitle) {
     .replace(/\s*#\d+\s*$/, '')
     .replace(/[^\u0000-\u024F]/g, '')
     .replace(/[()]/g, '')          // strip parentheses (eBay treats them as grouping operators)
+    // Strip seller jargon and non-card descriptors
+    .replace(/\b(swirl|swirled|no swirl)\b/gi, '')
+    .replace(/\b(exclu|exclusif|exclusive|exclusivit[ée])\b/gi, '')
+    .replace(/\b(jpn|jap|japanese|anglaise|fran[çc]aise?|monde?|world)\b/gi, '')
+    .replace(/\b(neuf|mint|played|damaged|exc|tbe|tb|be)\b/gi, '')
+    .replace(/\b(1[eè]re?\s*[ée]d(ition)?|1st\s*ed(ition)?|first\s*edition)\b/gi, '1st edition')
+    .replace(/\b(pas d.annulation|pdd|vu en live|vue en live)\b/gi, '')
+    .replace(/\b(us|eu|fr|en)\b/gi, '')
+    .replace(/&/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
