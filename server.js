@@ -1832,6 +1832,17 @@ app.post('/scan', async (req, res) => {
       result = await handleAnalyze(params);
     } else if (type === 'manual') {
       result = await handleManualLookup(params.cardName, params.language);
+      // Log manual lookup
+      const manualUser = token ? (await supabase.from('users').select('email, name').eq('token', token).single()).data : null;
+      const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+      const v = mp ? 'NO_DATA' : 'NO_DATA'; // manual lookups don't have asking price for verdict
+      if (mp) {
+        const askP = result.seller_asking_price ?? null;
+        const verdict = mp && askP ? (askP / mp < 0.90 ? 'DEAL' : askP / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0 });
+      } else {
+        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA' });
+      }
     } else {
       return res.status(400).json({ error: 'unknown_type', type });
     }
