@@ -989,7 +989,21 @@ async function handleManualLookup(cardName, language = 'WORLD') {
   let priceData = cached;
   if (!priceData) {
     try { priceData = await fetchPrices(card, language); }
-    catch (err) { priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, tcg_market_price: null, tcg_url: null, listings: [] }; }
+    catch (err) { priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] }; }
+
+    // Retry with card number only if no results (FR name → EN eBay mismatch)
+    if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && cardNumber) {
+      console.log('[Lakkot] Manual retry: no results, trying number-only →', cardNumber);
+      const retryCard = { ...card, card_name: '', ebay_search: `${cardNumber} pokemon card` };
+      try {
+        const retryData = await fetchPrices(retryCard, language);
+        if (retryData.ebay_sales_count > 0) {
+          console.log('[Lakkot] Manual retry: found', retryData.ebay_sales_count, 'results');
+          priceData = retryData;
+        }
+      } catch (_) {}
+    }
+
     cacheSet(cacheKey, priceData);
   }
   return { ...card, ...priceData };
