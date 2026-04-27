@@ -223,12 +223,15 @@ function isSpecialEdition(title) {
 
 // ─── TCG card detection (unified scan router) ────────────────────────────────
 const TCG_BRAND_KEYWORDS = [
-  'pokemon', 'pokémon', 'pikachu', 'charizard', 'dracaufeu',
+  'pokemon', 'pokémon', 'pocket monsters', 'pocket monster',
+  'pikachu', 'charizard', 'dracaufeu',
   'yugioh', 'yu-gi-oh', 'yu gi oh',
   'one piece card', 'one piece tcg',
   'magic the gathering', 'mtg',
   'digimon card', 'dragon ball super card',
   'psa', 'cgc', 'bgs', 'pca',
+  'carddass', 'bandai',
+  'topps', 'wizards',
 ];
 const TCG_MECHANIC_KEYWORDS = [
   'holo', 'reverse holo', 'vstar', 'vmax', 'ex', 'gx',
