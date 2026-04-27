@@ -888,9 +888,23 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
     try {
       priceData = await fetchPrices(item, language);
     } catch (err) {
-      console.error('[Yamo] Card price error:', err.message);
-      priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, tcg_market_price: null, tcg_url: null, listings: [] };
+      console.error('[Lakkot] Card price error:', err.message);
+      priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] };
     }
+
+    // Retry with card number only if first query returned no results (FR name → EN eBay mismatch)
+    if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && item.card_number) {
+      console.log('[Lakkot] Card retry: no results with name, trying number-only query →', item.card_number);
+      const retryItem = { ...item, card_name: '', ebay_search: `${item.card_number} pokemon card` };
+      try {
+        const retryData = await fetchPrices(retryItem, language);
+        if (retryData.ebay_sales_count > 0) {
+          console.log('[Lakkot] Card retry: found', retryData.ebay_sales_count, 'results with number-only query');
+          priceData = retryData;
+        }
+      } catch (_) {}
+    }
+
     cacheSet(cacheKey, priceData);
   }
   return { ...item, ...priceData, seller_asking_price: sellerPrice ?? item.seller_asking_price ?? null };
