@@ -270,18 +270,26 @@ function filterByCardIdentity(query, items, getTitleFn, language = 'WORLD') {
     // fall through to number filter below
   }
 
-  const cardNumber = query.match(/\b(\d{2,3}\/\d{2,3})\b/);
+  const cardNumber = query.match(/\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/);
 
   if (cardNumber) {
-    const targetNum = cardNumber[1];
+    // Normalize: strip leading zeros and spaces for comparison
+    const normalize = (num) => num.replace(/\s/g, '').replace(/^0+(\d)/, '$1').replace(/\/0+(\d)/, '/$1').toLowerCase();
+    const targetNum = normalize(cardNumber[1]);
     const before = items.length;
     const filtered = items.filter(item => {
       const title = getTitleFn(item);
-      const itemNum = title.match(/\b(\d{2,3}\/\d{2,3})\b/);
-      if (!itemNum) return language === 'JP';
-      return itemNum[1] === targetNum;
+      // Match both pure numeric and alphanumeric card numbers in listing titles
+      const nums = title.match(/\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/g);
+      if (!nums) return language === 'JP';
+      return nums.some(n => normalize(n) === targetNum);
     });
-    console.log(`[Pikanalyst] Card identity filter: by number ${targetNum} | ${before} → ${filtered.length}`);
+    console.log(`[Lakkot] Card identity filter: by number ${targetNum} | ${before} → ${filtered.length}`);
+    // If filter removed everything, return unfiltered (better to show something)
+    if (filtered.length === 0 && before > 0) {
+      console.log('[Lakkot] Card identity filter: all items filtered out, returning unfiltered');
+      return items;
+    }
     return filtered;
   }
 
