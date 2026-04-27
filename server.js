@@ -1610,11 +1610,22 @@ app.post('/scan', async (req, res) => {
         }
       }
 
-      // Route 1: DOM title has a card number (NNN/NNN) → skip Lens, use title directly for eBay
-      // Card number in title = precise enough for eBay query without vision (saves Lens API cost)
-      // Titles without card number (e.g. "Ronflex holo jungle") fall through to Lens for accurate ID
-      if (hasTitle && CARD_NUMBER_RE.test(rawTitle)) {
-        console.log('[Lakkot] Unified: card number in title, fast path →', rawTitle);
+      // Route 1: DOM title has card signals → skip Lens, use title directly for eBay
+      // Card number (NNN/NNN) or strong card keywords = precise enough for eBay query
+      const STRONG_CARD_KEYWORDS = [
+        'vmax', 'vstar', 'chr', 'sar', 'sir', 'ar', 'fa',
+        'holo', 'reverse', 'gx', 'ex', 'v ',
+        'full art', 'alt art', 'illustration rare', 'art rare',
+        'trainer gallery', 'radiant', 'secret rare', 'ultra rare',
+      ];
+      const titleLower = rawTitle.toLowerCase();
+      const hasCardNumber = CARD_NUMBER_RE.test(rawTitle);
+      const hasStrongKeyword = hasTitle && STRONG_CARD_KEYWORDS.some(kw => titleLower.includes(kw));
+      const hasBrandKeyword = hasTitle && TCG_BRAND_KEYWORDS.some(kw => titleLower.includes(kw));
+      const titleIsCard = hasCardNumber || (hasStrongKeyword && hasBrandKeyword) || (hasStrongKeyword && titleLower.split(/\s+/).length >= 2);
+
+      if (hasTitle && titleIsCard) {
+        console.log('[Lakkot] Unified: card detected from title, fast path →', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota });
       }
