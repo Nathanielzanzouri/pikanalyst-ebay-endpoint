@@ -893,14 +893,20 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
       priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] };
     }
 
-    // Retry with card number only if first query returned no results (FR name → EN eBay mismatch)
+    // Retry with card number + set code if first query returned no results (FR name → EN eBay mismatch)
     if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && item.card_number) {
-      console.log('[Lakkot] Card retry: no results with name, trying number-only query →', item.card_number);
-      const retryItem = { ...item, card_name: '', ebay_search: `${item.card_number} pokemon card` };
+      // Extract set code from title or ebay_search (e.g. "POR", "TWM", "SV4a", "S10B")
+      const setCodeMatch = (item.ebay_search || '').match(/\b([A-Za-z]{2,4}\d{0,2}[a-z]?)\b/);
+      const setCode = setCodeMatch ? setCodeMatch[1] : '';
+      const retryQuery = setCode
+        ? `${item.card_number} ${setCode} pokemon card`
+        : `${item.card_number} pokemon card`;
+      console.log('[Lakkot] Card retry: no results with name, trying →', retryQuery);
+      const retryItem = { ...item, card_name: '', ebay_search: retryQuery };
       try {
         const retryData = await fetchPrices(retryItem, language);
         if (retryData.ebay_sales_count > 0) {
-          console.log('[Lakkot] Card retry: found', retryData.ebay_sales_count, 'results with number-only query');
+          console.log('[Lakkot] Card retry: found', retryData.ebay_sales_count, 'results');
           priceData = retryData;
         }
       } catch (_) {}
@@ -992,10 +998,15 @@ async function handleManualLookup(cardName, language = 'WORLD') {
     try { priceData = await fetchPrices(card, language); }
     catch (err) { priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] }; }
 
-    // Retry with card number only if no results (FR name → EN eBay mismatch)
+    // Retry with card number + set code if no results (FR name → EN eBay mismatch)
     if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && cardNumber) {
-      console.log('[Lakkot] Manual retry: no results, trying number-only →', cardNumber);
-      const retryCard = { ...card, card_name: '', ebay_search: `${cardNumber} pokemon card` };
+      const setCodeMatch = cardName.match(/\b([A-Za-z]{2,4}\d{0,2}[a-z]?)\b/);
+      const setCode = setCodeMatch ? setCodeMatch[1] : '';
+      const retryQuery = setCode
+        ? `${cardNumber} ${setCode} pokemon card`
+        : `${cardNumber} pokemon card`;
+      console.log('[Lakkot] Manual retry: no results, trying →', retryQuery);
+      const retryCard = { ...card, card_name: '', ebay_search: retryQuery };
       try {
         const retryData = await fetchPrices(retryCard, language);
         if (retryData.ebay_sales_count > 0) {
