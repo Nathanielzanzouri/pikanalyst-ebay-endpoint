@@ -1711,9 +1711,12 @@ app.post('/scan', async (req, res) => {
           .replace(/\b(psa|cgc|bgs|sgc|beckett|pca|hga|ccc|collectaura|collect aura)\s*\d*\b/gi, '')
           .replace(/\b(graded|slab|slabbed|gem mint|gem mt|gold label|silver label|black label)\b/gi, '')
           .replace(/\b(grad[ée]+e?|carte grad[ée]+e?|cartes grad[ée]+e?s?)\b/gi, '')
-          .replace(/\bcarte\s+pokemon\s+/gi, '')
+          .replace(/\bcarte\s+pok[ée]mon\b/gi, '')
           .replace(/\bpok[ée]mon\s+carte\b/gi, '')
-          .replace(/\bcarte\s+/gi, '')
+          .replace(/\bcartes?\s+promo\b/gi, '')
+          .replace(/\bblack\s+star\b/gi, '')
+          .replace(/\bcarte[s]?\s+/gi, '')
+          .replace(/\bpok[ée]mon\b/gi, '')
           .replace(/\s+/g, ' ')
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
