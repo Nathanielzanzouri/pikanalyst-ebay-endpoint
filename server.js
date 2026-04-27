@@ -1551,6 +1551,21 @@ async function handleGoogleLens(imageBase64) {
   };
 }
 
+// ─── Scan feedback (thumbs up/down) ──────────────────────────────────────────
+app.post('/scan/feedback', async (req, res) => {
+  const { scanLogId, feedback } = req.body;
+  if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
+    return res.status(400).json({ error: 'invalid_feedback' });
+  }
+  try {
+    await supabase.from('scan_logs').update({ user_feedback: feedback, feedback_at: new Date().toISOString() }).eq('id', scanLogId);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[Lakkot] feedback error:', err.message);
+    return res.status(500).json({ error: 'feedback_failed' });
+  }
+});
+
 app.post('/scan', async (req, res) => {
   const { token, type, ...params } = req.body;
 
@@ -1565,12 +1580,55 @@ app.post('/scan', async (req, res) => {
     }
   }
 
+  // ─── Scan logging helper ──────────────────────────────────────────────────
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount }) {
+    try {
+      // Upload image to Supabase Storage
+      let imageUrl = null;
+      if (imageBase64) {
+        const buf = Buffer.from(imageBase64, 'base64');
+        const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.jpg`;
+        const { data: uploadData, error: uploadErr } = await supabase.storage
+          .from('scan-images')
+          .upload(fileName, buf, { contentType: 'image/jpeg', upsert: false });
+        if (!uploadErr && uploadData) {
+          const { data: urlData } = supabase.storage.from('scan-images').getPublicUrl(fileName);
+          imageUrl = urlData?.publicUrl ?? null;
+        }
+      }
+      // Insert log
+      const { data: logData } = await supabase.from('scan_logs').insert({
+        user_email: userEmail ?? null,
+        user_name: userName ?? null,
+        platform: platform ?? null,
+        dom_title: domTitle ?? null,
+        image_url: imageUrl,
+        route: route ?? null,
+        product_name: productName ?? null,
+        lens_product_name: lensProductName ?? null,
+        ebay_query: ebayQuery ?? null,
+        result_type: resultType ?? null,
+        market_price: marketPrice ?? null,
+        asking_price: askingPrice ?? null,
+        verdict: verdict ?? null,
+        sources_count: sourcesCount ?? 0,
+        ebay_sales_count: ebaySalesCount ?? 0,
+      }).select('id').single();
+      return logData?.id ?? null;
+    } catch (err) {
+      console.warn('[Lakkot] scan log failed:', err.message);
+      return null;
+    }
+  }
+
   // unified: auto-detect item type and route to correct pricing pipeline
   if (type === 'unified') {
     // Track quota — increment scan count and return remaining
     let quota = null;
+    let scanUser = null;
     if (token) {
-      const { data: user } = await supabase.from('users').select('id, email, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
+      const { data: user } = await supabase.from('users').select('id, email, name, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
+      scanUser = user;
       if (user) {
         const month = currentMonth();
         if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
@@ -1596,17 +1654,11 @@ app.post('/scan', async (req, res) => {
 
       // Check for unsupported items first
       if (hasTitle) {
-        if (isGradedCard(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'graded', message: 'Graded card — pricing not supported yet', title: rawTitle, quota });
-        }
-        if (isBooster(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'sealed', message: 'Sealed product — pricing not supported yet', title: rawTitle, quota });
-        }
-        if (isLot(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'lot', message: 'Lot/bundle — pricing not supported yet', title: rawTitle, quota });
-        }
-        if (isMultiChoice(rawTitle)) {
-          return res.json({ type: 'UNSUPPORTED', reason: 'multi', message: 'Multi-choice listing — pricing not supported yet', title: rawTitle, quota });
+        const unsupportedReason = isGradedCard(rawTitle) ? 'graded' : isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
+        if (unsupportedReason) {
+          const messages = { graded: 'Graded card — pricing not supported yet', sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
+          return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
         }
       }
 
@@ -1625,9 +1677,13 @@ app.post('/scan', async (req, res) => {
       const titleIsCard = hasCardNumber || (hasStrongKeyword && hasBrandKeyword) || (hasStrongKeyword && titleLower.split(/\s+/).length >= 2);
 
       if (hasTitle && titleIsCard) {
-        console.log('[Lakkot] Unified: card detected from title, fast path →', rawTitle);
+        const route = hasCardNumber ? 'title-card-number' : 'title-card-keyword';
+        console.log('[Lakkot] Unified:', route, '→', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota });
+        const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+        const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route, productName: result.card_name, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota, scanLogId: logId });
       }
 
       // Route 2: Not a card (or no title) → Google Lens → check if card → route
@@ -1649,7 +1705,10 @@ app.post('/scan', async (req, res) => {
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
         const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language });
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota });
+        const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+        const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
       }
 
       // Route 3: Non-card → Google Shopping for retail pricing
@@ -1667,6 +1726,9 @@ app.post('/scan', async (req, res) => {
       const usesShopping = shoppingResult.cards.length > 0;
       const finalCards = usesShopping ? shoppingResult.cards : (lensResult?.cards ?? []);
       const medianPrice = shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null;
+      const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
+      const webVerdict = medianPrice && sellerPrice ? (sellerPrice / medianPrice < 0.90 ? 'DEAL' : sellerPrice / medianPrice > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route: webRoute, productName, lensProductName: productName, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length });
 
       return res.json({
         type: 'WEB_RESULT',
@@ -1680,6 +1742,7 @@ app.post('/scan', async (req, res) => {
         priceSource: usesShopping ? 'shopping' : 'lens',
         totalFound: usesShopping ? shoppingResult.totalFound : (lensResult?.sourcesCount ?? 0),
         quota,
+        scanLogId: logId,
       });
     } catch (err) {
       console.error('[Lakkot] Unified scan error:', err.message);
