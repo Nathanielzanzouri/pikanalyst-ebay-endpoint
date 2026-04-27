@@ -228,6 +228,7 @@ const TCG_BRAND_KEYWORDS = [
   'one piece card', 'one piece tcg',
   'magic the gathering', 'mtg',
   'digimon card', 'dragon ball super card',
+  'psa', 'cgc', 'bgs', 'pca',
 ];
 const TCG_MECHANIC_KEYWORDS = [
   'holo', 'reverse holo', 'vstar', 'vmax', 'ex', 'gx',
@@ -238,6 +239,7 @@ const TCG_MECHANIC_KEYWORDS = [
   'ultra rare', 'secret rare', 'starlight rare',
   'near mint', 'lightly played', 'moderately played',
   'common', 'uncommon', 'rare holo',
+  'mega ', 'méga ', 'promo', 'gold star',
 ];
 const CARD_NUMBER_RE = /\b\d{1,3}\s*\/\s*\d{1,3}\b/;
 
@@ -1691,11 +1693,21 @@ app.post('/scan', async (req, res) => {
       const lensResult = await handleGoogleLens(imageBase64);
       const productName = lensResult?.productName ?? null;
 
+      // Clean Lens product name — strip YouTube/article titles, domain names
+      const cleanLensName = productName
+        ? productName
+            .replace(/\s*[:|\-–—]\s*(pourquoi|comment|top|best|how|why|watch|review|unboxing).*/i, '') // YouTube titles
+            .replace(/\s*\|\s*.+$/, '')  // "Product | Site Name"
+            .replace(/\s*-\s*(amazon|ebay|fnac|rakuten|cdiscount).*$/i, '') // retailer suffixes
+            .replace(/\.(com|fr|co\.uk|de|net)\s*$/i, '') // domain extensions
+            .trim()
+        : null;
+
       // Check if Lens identified a card
-      if (productName && isTCGCard(productName)) {
+      if (cleanLensName && isTCGCard(cleanLensName)) {
         // Strip grading keywords from Lens product name — Lens often finds graded listings
         // but the card on stream is typically raw
-        const cleanedName = productName
+        const cleanedName = cleanLensName
           .replace(/\b(psa|cgc|bgs|sgc|beckett|pca|hga|ccc|collectaura|collect aura)\s*\d*\b/gi, '')
           .replace(/\b(graded|slab|slabbed|gem mint|gem mt|gold label|silver label|black label)\b/gi, '')
           .replace(/\b(grad[ée]+e?|carte grad[ée]+e?|cartes grad[ée]+e?s?)\b/gi, '')
@@ -1714,9 +1726,10 @@ app.post('/scan', async (req, res) => {
 
       // Route 3: Non-card → Google Shopping for retail pricing
       let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
-      if (productName) {
+      const shoppingQuery = cleanLensName || productName;
+      if (shoppingQuery) {
         try {
-          shoppingResult = await handleGoogleShopping(productName);
+          shoppingResult = await handleGoogleShopping(shoppingQuery);
           console.log('[Lakkot] Unified: Google Shopping', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
         } catch (err) {
           console.error('[Lakkot] Unified: Google Shopping error:', err.message);
