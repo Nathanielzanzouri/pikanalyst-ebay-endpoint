@@ -244,7 +244,7 @@ const TCG_MECHANIC_KEYWORDS = [
   'common', 'uncommon', 'rare holo',
   'mega ', 'méga ', 'promo', 'gold star',
 ];
-const CARD_NUMBER_RE = /\b\d{1,3}\s*\/\s*\d{1,3}\b/;
+const CARD_NUMBER_RE = /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/;
 
 function isTCGCard(text) {
   if (!text) return false;
@@ -500,6 +500,7 @@ function findDeep(obj, key, depth = 0) {
 // ─── DOM title cleaner ────────────────────────────────────────────────────────
 function buildEbayQuery(domTitle) {
   return domTitle
+    .replace(/^\s*\d{1,4}\s*[-–—]\s*/, '')   // strip seller lot number prefix (e.g. "051 - ")
     .replace(/^\s*\d+\s*\[\s*/, '')
     .replace(/\s*#\d+\s*$/, '')
     .replace(/[^\u0000-\u024F]/g, '')
