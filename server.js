@@ -511,7 +511,9 @@ function buildEbayQuery(domTitle) {
     .replace(/^\s*\d{1,4}\s*[-–—]\s*/, '')   // strip seller lot number prefix (e.g. "051 - ")
     .replace(/^\s*\d+\s*\[\s*/, '')
     .replace(/\s*#\d+\s*$/, '')
-    .replace(/[^\u0000-\u024F]/g, '')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")   // smart quotes → normal apostrophe
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')   // smart double quotes → normal
+    .replace(/[^\u0000-\u024F']/g, '')
     .replace(/[()]/g, '')          // strip parentheses (eBay treats them as grouping operators)
     // Strip seller jargon and non-card descriptors
     .replace(/\b(swirl|swirled|no swirl)\b/gi, '')
