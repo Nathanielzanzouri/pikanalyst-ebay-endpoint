@@ -1797,6 +1797,7 @@ app.post('/scan', async (req, res) => {
             .replace(/\.(com|fr|co\.uk|de|net)\s*$/i, '') // domain extensions
             .replace(/\b(legit|fake|real|authentic|counterfeit)\b/gi, '') // authentication questions
             .replace(/\b(r\/\w+)\b/gi, '') // subreddit refs
+            .replace(/\b(jual|beli|shopee|tokopedia|bukalapak|lazada)\b/gi, '') // Indonesian marketplace noise
             .replace(/\s+/g, ' ')
             .trim()
         : null;
