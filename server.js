@@ -901,14 +901,16 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
       priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] };
     }
 
-    // Retry with card number + set code if first query returned no results (FR name → EN eBay mismatch)
-    if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && item.card_number) {
+    // Retry if no results — try card number or promo code
+    const promoMatch = !item.card_number && (item.ebay_search || '').match(/\b(SM\d{2,3}|SWSH\d{2,3}|XY\d{2,3}|BW\d{2,3}|SVP?\d{2,3})\b/i);
+    const retryNumber = item.card_number || (promoMatch ? promoMatch[1] : null);
+    if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && retryNumber) {
       // Extract set code from title or ebay_search (e.g. "POR", "TWM", "SV4a", "S10B")
       const setCodeMatch = (item.ebay_search || '').match(/\b([A-Za-z]{2,4}\d{0,2}[a-z]?)\b/);
       const setCode = setCodeMatch ? setCodeMatch[1] : '';
-      const retryQuery = setCode
-        ? `${item.card_number} ${setCode} pokemon card`
-        : `${item.card_number} pokemon card`;
+      const retryQuery = setCode && setCode !== retryNumber
+        ? `${retryNumber} ${setCode} pokemon card`
+        : `${retryNumber} pokemon card`;
       console.log('[Lakkot] Card retry: no results with name, trying →', retryQuery);
       const retryItem = { ...item, card_name: '', ebay_search: retryQuery };
       try {
