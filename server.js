@@ -729,7 +729,8 @@ async function fetchEbayBrowse(card, token, language = 'WORLD') {
   for (const query of queries) {
     const settled = await Promise.allSettled(
       MARKETS.map(async (market) => {
-        const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true&sort=endDateDesc&limit=200`;
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true,endDate:[${thirtyDaysAgo}]&sort=endDateDesc&limit=200`;
         console.log(`[Pikanalyst] Browse API URL [${market.id}]:`, url);
         const res = await fetch(url, {
           headers: {
