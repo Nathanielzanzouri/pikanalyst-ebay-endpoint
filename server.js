@@ -1779,10 +1779,14 @@ app.post('/scan', async (req, res) => {
       // Clean Lens product name — strip YouTube/article titles, domain names
       const cleanLensName = productName
         ? productName
-            .replace(/\s*[:|\-–—]\s*(pourquoi|comment|top|best|how|why|watch|review|unboxing).*/i, '') // YouTube titles
+            .replace(/\s*[:|\-–—]\s*(pourquoi|comment|top|best|how|why|watch|review|unboxing|is this|is my|are these).*/i, '') // YouTube/Reddit titles
+            .replace(/\s*:\s*r\/\w+.*$/i, '')  // Reddit subreddit references
             .replace(/\s*\|\s*.+$/, '')  // "Product | Site Name"
-            .replace(/\s*-\s*(amazon|ebay|fnac|rakuten|cdiscount).*$/i, '') // retailer suffixes
+            .replace(/\s*-\s*(amazon|ebay|fnac|rakuten|cdiscount|reddit|fandom|wiki).*$/i, '') // site suffixes
             .replace(/\.(com|fr|co\.uk|de|net)\s*$/i, '') // domain extensions
+            .replace(/\b(legit|fake|real|authentic|counterfeit)\b/gi, '') // authentication questions
+            .replace(/\b(r\/\w+)\b/gi, '') // subreddit refs
+            .replace(/\s+/g, ' ')
             .trim()
         : null;
 
