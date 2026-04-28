@@ -1589,15 +1589,27 @@ async function handleGoogleLens(imageBase64) {
 
   const kgTitle = serpData.knowledge_graph?.title ?? null;
   const colorMatch = visualMatches.find(m => titleHasColor(m.title));
-  // For cards: prefer visual match with card number (NNN/NNN) — most precise for eBay
-  const cardNumberMatch = visualMatches.find(m => m.title && /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/.test(m.title));
-  // For cards: prefer English titles over French (better for eBay)
-  const englishMatch = visualMatches.find(m => m.title && /\b(charizard|blastoise|venusaur|pikachu|mewtwo|mew|eevee|snorlax|gengar|dragonite|lugia|rayquaza|garchomp)\b/i.test(m.title));
+  // For cards: prefer visual match with card number AND English name (best for eBay)
+  const CARD_NUM_RE = /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/;
+  const FR_SIGNAL_RE = /\b(carte|pokémon carte|aube|crépuscul|destins|mascarade|équilibre|flammes|obsidiennes|tempête|étoiles|phyllali|dracaufeu|tortank|florizarre|ronflex|noctali|mentali|givrali|voltali|pyroli|aquali)\b/i;
+  const EN_SIGNAL_RE = /\b(pokemon tcg|charizard|blastoise|venusaur|pikachu|mewtwo|mew|eevee|leafeon|snorlax|gengar|dragonite|lugia|rayquaza|garchomp|vaporeon|jolteon|flareon|umbreon|espeon|glaceon|sylveon|hidden fates|twilight|obsidian|paldea|scarlet|violet|silver tempest|crown zenith|astral|brilliant stars)\b/i;
+
+  // Best: card number + English name
+  const bestCardMatch = visualMatches.find(m => m.title && CARD_NUM_RE.test(m.title) && EN_SIGNAL_RE.test(m.title));
+  // Good: English name (even without number)
+  const englishMatch = visualMatches.find(m => m.title && EN_SIGNAL_RE.test(m.title));
+  // OK: card number (even if French)
+  const cardNumberMatch = visualMatches.find(m => m.title && CARD_NUM_RE.test(m.title) && !FR_SIGNAL_RE.test(m.title));
+  // Fallback: any card number
+  const anyCardNumberMatch = visualMatches.find(m => m.title && CARD_NUM_RE.test(m.title));
+
   const productName =
-    (cardNumberMatch?.title ?? null) ??
+    (bestCardMatch?.title ?? null) ??
     (englishMatch?.title ?? null) ??
+    (cardNumberMatch?.title ?? null) ??
     kgTitle ??
     (colorMatch?.title ?? null) ??
+    (anyCardNumberMatch?.title ?? null) ??
     serpData.visual_matches?.[0]?.title ??
     null;
 
