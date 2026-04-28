@@ -1462,10 +1462,12 @@ async function handleGoogleLens(imageBase64) {
   const serpRes = await fetch('https://serpapi.com/search.json?' + params);
   const serpData = await serpRes.json();
 
-  // STEP C: Extract visual_matches
+  // STEP C: Extract visual_matches + detected_objects
   const visualMatches = serpData.visual_matches ?? [];
-  console.log(`[Yamo] google_lens: ${visualMatches.length} visual matches`);
-  console.log('SerpApi visual_matches sample:', JSON.stringify(visualMatches?.slice(0, 3), null, 2));
+  const detectedObjects = serpData.detected_objects ?? [];
+  console.log(`[Lakkot] google_lens: ${visualMatches.length} visual matches, ${detectedObjects.length} detected objects`);
+  console.log('[Lakkot] detected_objects:', JSON.stringify(detectedObjects?.slice(0, 3), null, 2));
+  console.log('[Lakkot] visual_matches sample:', JSON.stringify(visualMatches?.slice(0, 3).map(m => m.title), null, 2));
 
   // Price extraction helpers
   function extractPriceFromString(str) {
