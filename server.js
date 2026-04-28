@@ -1589,7 +1589,13 @@ async function handleGoogleLens(imageBase64) {
 
   const kgTitle = serpData.knowledge_graph?.title ?? null;
   const colorMatch = visualMatches.find(m => titleHasColor(m.title));
+  // For cards: prefer visual match with card number (NNN/NNN) — most precise for eBay
+  const cardNumberMatch = visualMatches.find(m => m.title && /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/.test(m.title));
+  // For cards: prefer English titles over French (better for eBay)
+  const englishMatch = visualMatches.find(m => m.title && /\b(charizard|blastoise|venusaur|pikachu|mewtwo|mew|eevee|snorlax|gengar|dragonite|lugia|rayquaza|garchomp)\b/i.test(m.title));
   const productName =
+    (cardNumberMatch?.title ?? null) ??
+    (englishMatch?.title ?? null) ??
     kgTitle ??
     (colorMatch?.title ?? null) ??
     serpData.visual_matches?.[0]?.title ??
