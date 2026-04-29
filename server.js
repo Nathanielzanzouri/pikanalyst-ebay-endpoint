@@ -244,7 +244,20 @@ const TCG_MECHANIC_KEYWORDS = [
   'common', 'uncommon', 'rare holo',
   'mega ', 'méga ', 'promo', 'gold star',
 ];
-const CARD_NUMBER_RE = /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/;
+// Card number regex + date exclusion
+const _CARD_NUM_BASE = /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/g;
+const CARD_NUMBER_RE = {
+  test(text) {
+    _CARD_NUM_BASE.lastIndex = 0;
+    let m;
+    while ((m = _CARD_NUM_BASE.exec(text)) !== null) {
+      // Reject if followed by / (it's a date like 05/12/2014)
+      if (text[m.index + m[0].length] === '/') continue;
+      return true;
+    }
+    return false;
+  }
+};
 
 function isTCGCard(text) {
   if (!text) return false;
