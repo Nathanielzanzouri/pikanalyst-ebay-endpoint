@@ -285,8 +285,9 @@ function filterByCardIdentity(query, items, getTitleFn, language = 'WORLD') {
       return nums.some(n => normalize(n) === targetNum);
     });
     console.log(`[Lakkot] Card identity filter: by number ${targetNum} | ${before} → ${filtered.length}`);
+    // If filter removed everything, return unfiltered (better to show something)
     if (filtered.length === 0 && before > 0) {
-      console.log('[Lakkot] Card identity filter: all items filtered out by number, returning unfiltered');
+      console.log('[Lakkot] Card identity filter: all items filtered out, returning unfiltered');
       return items;
     }
     return filtered;
@@ -902,9 +903,31 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
       priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] };
     }
 
-    // Retry disabled — was causing wrong listings (retry results replaced correct ones)
-    // The filterByCardIdentity sometimes filters out all results, triggering retry
-    // which then returns unrelated cards. Better to show "no data" than wrong data.
+    // Retry if no results — try card number with name (not number alone)
+    const promoMatch = !item.card_number && (item.ebay_search || '').match(/\b(SM\d{2,3}|SWSH\d{2,3}|XY\d{2,3}|BW\d{2,3}|SVP?\d{2,3})\b/i);
+    const retryNumber = item.card_number || (promoMatch ? promoMatch[1] : null);
+    if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && retryNumber) {
+      // Try multiple retry queries in order of specificity
+      const name = (item.card_name || '').trim();
+      const retryQueries = [
+        name ? `${name} ${retryNumber}` : null,                    // "Saquedeneu 218/217"
+        name ? `${name} pokemon card` : null,                      // "Saquedeneu pokemon card"
+        `${retryNumber} pokemon card`,                              // "218/217 pokemon card" (last resort)
+      ].filter(Boolean);
+
+      for (const retryQuery of retryQueries) {
+        console.log('[Lakkot] Card retry →', retryQuery);
+        const retryItem = { ...item, ebay_search: retryQuery };
+        try {
+          const retryData = await fetchPrices(retryItem, language);
+          if (retryData.ebay_sales_count >= 3) {
+            console.log('[Lakkot] Card retry: found', retryData.ebay_sales_count, 'results');
+            priceData = retryData;
+            break;
+          }
+        } catch (_) {}
+      }
+    }
 
     cacheSet(cacheKey, priceData);
   }
@@ -992,7 +1015,28 @@ async function handleManualLookup(cardName, language = 'WORLD') {
     try { priceData = await fetchPrices(card, language); }
     catch (err) { priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] }; }
 
-    // Retry disabled — was causing wrong listings to replace correct ones
+    // Retry if no results — try card number with name
+    if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && cardNumber) {
+      const name = parsedName.trim();
+      const retryQueries = [
+        name ? `${name} ${cardNumber}` : null,
+        name ? `${name} pokemon card` : null,
+        `${cardNumber} pokemon card`,
+      ].filter(Boolean);
+
+      for (const retryQuery of retryQueries) {
+        console.log('[Lakkot] Manual retry →', retryQuery);
+        const retryCard = { ...card, ebay_search: retryQuery };
+        try {
+          const retryData = await fetchPrices(retryCard, language);
+          if (retryData.ebay_sales_count >= 3) {
+            console.log('[Lakkot] Manual retry: found', retryData.ebay_sales_count, 'results');
+            priceData = retryData;
+            break;
+          }
+        } catch (_) {}
+      }
+    }
 
     cacheSet(cacheKey, priceData);
   }
