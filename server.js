@@ -285,10 +285,8 @@ function filterByCardIdentity(query, items, getTitleFn, language = 'WORLD') {
       return nums.some(n => normalize(n) === targetNum);
     });
     console.log(`[Lakkot] Card identity filter: by number ${targetNum} | ${before} → ${filtered.length}`);
-    // If filter removed everything, return unfiltered (better to show something)
     if (filtered.length === 0 && before > 0) {
-      console.log('[Lakkot] Card identity filter: all items filtered out, returning unfiltered');
-      return items;
+      console.log('[Lakkot] Card identity filter: all items filtered out by number, returning empty');
     }
     return filtered;
   }
