@@ -1421,9 +1421,12 @@ async function handleGoogleShopping(productName) {
   const COUNTERFEIT_DOMAINS = [
     'aliexpress', 'temu', 'dhgate', 'wish',
   ];
+  const KIDS_RE = /\b(kids|enfant|enfants|junior|juniors|toddler|infant|pre.?school|grade.?school|little kid|big kid|bébé|bebe|ps|td|gs)\b/i;
   const legitimate = filtered.filter(c => {
     const domain = (c.retailer || c.domain || '').toLowerCase();
-    return !COUNTERFEIT_DOMAINS.some(r => domain.includes(r));
+    if (COUNTERFEIT_DOMAINS.some(r => domain.includes(r))) return false;
+    if (KIDS_RE.test(c.title || '')) return false;
+    return true;
   });
 
   // Trusted marketplaces — never filter these even if flagged as secondhand
