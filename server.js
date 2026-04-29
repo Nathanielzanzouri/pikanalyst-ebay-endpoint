@@ -1770,9 +1770,27 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      const { imageBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR' } = params;
+      let { imageBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false } = params;
       const rawTitle = (streamTitle ?? '').trim();
       const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
+
+      // Centre crop: crop to center 50% of image for better card recognition
+      if (cropCenter && imageBase64) {
+        try {
+          const buf = Buffer.from(imageBase64, 'base64');
+          const meta = await sharp(buf).metadata();
+          const w = meta.width, h = meta.height;
+          const cropW = Math.round(w * 0.5);
+          const cropH = Math.round(h * 0.5);
+          const left = Math.round((w - cropW) / 2);
+          const top = Math.round((h - cropH) / 2);
+          const cropped = await sharp(buf).extract({ left, top, width: cropW, height: cropH }).jpeg().toBuffer();
+          imageBase64 = cropped.toString('base64');
+          console.log(`[Lakkot] Centre crop: ${w}x${h} → ${cropW}x${cropH}`);
+        } catch (cropErr) {
+          console.warn('[Lakkot] Centre crop failed:', cropErr.message);
+        }
+      }
 
       // Check for unsupported items first
       if (hasTitle) {
