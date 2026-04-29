@@ -1672,6 +1672,14 @@ app.get('/test/lens-objects', async (req, res) => {
   }
 });
 
+// ─── Clear cache (dev/debug) ──────────────────────────────────────────────────
+app.get('/cache/clear', (req, res) => {
+  const size = _cache.size;
+  _cache.clear();
+  console.log(`[Lakkot] Cache cleared: ${size} entries`);
+  res.json({ cleared: size });
+});
+
 app.post('/scan/feedback', async (req, res) => {
   const { scanLogId, feedback } = req.body;
   if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
