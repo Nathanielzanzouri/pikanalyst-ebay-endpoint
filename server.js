@@ -1648,6 +1648,32 @@ async function handleGoogleLens(imageBase64) {
 }
 
 // ─── Scan feedback (thumbs up/down) ──────────────────────────────────────────
+// ─── Test endpoint: check detected_objects from SerpApi Lens ──────────────────
+app.get('/test/lens-objects', async (req, res) => {
+  const imageUrl = req.query.url;
+  if (!imageUrl) return res.status(400).json({ error: 'missing url param' });
+  try {
+    const params = new URLSearchParams({
+      engine: 'google_lens',
+      url: imageUrl,
+      api_key: process.env.SERPAPI_KEY,
+      hl: 'fr',
+      country: 'fr',
+    });
+    const serpRes = await fetch('https://serpapi.com/search.json?' + params);
+    const serpData = await serpRes.json();
+    return res.json({
+      keys: Object.keys(serpData),
+      detected_objects: serpData.detected_objects ?? [],
+      visual_matches_count: (serpData.visual_matches ?? []).length,
+      visual_matches_titles: (serpData.visual_matches ?? []).slice(0, 5).map(m => m.title),
+      knowledge_graph: serpData.knowledge_graph ?? null,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/scan/feedback', async (req, res) => {
   const { scanLogId, feedback } = req.body;
   if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
