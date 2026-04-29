@@ -1842,7 +1842,7 @@ app.post('/scan', async (req, res) => {
 
       // Route 1: DOM title has card signals → skip Lens, use title directly for eBay
       // Card number (NNN/NNN) or strong card keywords = precise enough for eBay query
-      const STRONG_CARD_KEYWORDS_RE = /\b(vmax|vstar|chr|sar|sir|ar|fa|holo|reverse|gx|ex|full art|alt art|illustration rare|art rare|trainer gallery|radiant|secret rare|ultra rare)\b/i;
+      const STRONG_CARD_KEYWORDS_RE = /\b(vmax|vstar|chr|sar|sir|ar|fa|holo|reverse|gx|ex|full art|alt art|illustration rare|art rare|trainer gallery|radiant|secret rare|ultra rare|fossil|jungle|rocket|neo|base set|xy)\b/i;
       const titleLower = rawTitle.toLowerCase();
       const hasCardNumber = CARD_NUMBER_RE.test(rawTitle);
       const hasStrongKeyword = hasTitle && STRONG_CARD_KEYWORDS_RE.test(titleLower);
