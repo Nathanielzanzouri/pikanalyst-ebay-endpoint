@@ -1703,9 +1703,9 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount }) {
     try {
-      // Upload image to Supabase Storage
+      // Upload original image to Supabase Storage
       let imageUrl = null;
       if (imageBase64) {
         const buf = Buffer.from(imageBase64, 'base64');
@@ -1718,6 +1718,19 @@ app.post('/scan', async (req, res) => {
           imageUrl = urlData?.publicUrl ?? null;
         }
       }
+      // Upload cropped image if exists
+      let croppedImageUrl = null;
+      if (croppedImageBase64) {
+        const cropBuf = Buffer.from(croppedImageBase64, 'base64');
+        const cropFileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-crop.jpg`;
+        const { data: cropUpload, error: cropErr } = await supabase.storage
+          .from('scan-images')
+          .upload(cropFileName, cropBuf, { contentType: 'image/jpeg', upsert: false });
+        if (!cropErr && cropUpload) {
+          const { data: cropUrlData } = supabase.storage.from('scan-images').getPublicUrl(cropFileName);
+          croppedImageUrl = cropUrlData?.publicUrl ?? null;
+        }
+      }
       // Insert log
       const { data: logData } = await supabase.from('scan_logs').insert({
         user_email: userEmail ?? null,
@@ -1725,6 +1738,7 @@ app.post('/scan', async (req, res) => {
         platform: platform ?? null,
         dom_title: domTitle ?? null,
         image_url: imageUrl,
+        cropped_image_url: croppedImageUrl,
         route: route ?? null,
         product_name: productName ?? null,
         lens_product_name: lensProductName ?? null,
@@ -1771,8 +1785,10 @@ app.post('/scan', async (req, res) => {
 
     try {
       let { imageBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false } = params;
+      const originalImageBase64 = imageBase64; // keep original for logging
       const rawTitle = (streamTitle ?? '').trim();
       const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
+      let croppedImageBase64 = null;
 
       // Centre crop: crop to center 50% of image for better card recognition
       if (cropCenter && imageBase64) {
@@ -1785,7 +1801,8 @@ app.post('/scan', async (req, res) => {
           const left = Math.round((w - cropW) / 2);
           const top = Math.round((h - cropH) / 2);
           const cropped = await sharp(buf).extract({ left, top, width: cropW, height: cropH }).jpeg().toBuffer();
-          imageBase64 = cropped.toString('base64');
+          croppedImageBase64 = cropped.toString('base64');
+          imageBase64 = croppedImageBase64;
           console.log(`[Lakkot] Centre crop: ${w}x${h} → ${cropW}x${cropH}`);
         } catch (cropErr) {
           console.warn('[Lakkot] Centre crop failed:', cropErr.message);
@@ -1797,7 +1814,7 @@ app.post('/scan', async (req, res) => {
         const unsupportedReason = isGradedCard(rawTitle) ? 'graded' : isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
         if (unsupportedReason) {
           const messages = { graded: 'Graded card — pricing not supported yet', sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
         }
       }
@@ -1822,7 +1839,7 @@ app.post('/scan', async (req, res) => {
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route, productName: result.card_name, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route, productName: result.card_name, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota, scanLogId: logId });
       }
 
@@ -1866,7 +1883,7 @@ app.post('/scan', async (req, res) => {
         const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
       }
 
@@ -1888,7 +1905,7 @@ app.post('/scan', async (req, res) => {
       const medianPrice = shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null;
       const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
       const webVerdict = medianPrice && sellerPrice ? (sellerPrice / medianPrice < 0.90 ? 'DEAL' : sellerPrice / medianPrice > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64, route: webRoute, productName, lensProductName: productName, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length });
+      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length });
 
       return res.json({
         type: 'WEB_RESULT',
