@@ -607,10 +607,12 @@ async function getEbayOAuthToken() {
 async function fetchEbayFinding(card, language = 'WORLD') {
   const ebayAppId = process.env.EBAY_APP_ID;
   const now = Date.now();
-  if (now - lastFindingCallTime < FINDING_MIN_INTERVAL) {
-    throw new Error(`Finding API cooldown (${Math.round((FINDING_MIN_INTERVAL - (now - lastFindingCallTime)) / 1000)}s)`);
+  const waitTime = FINDING_MIN_INTERVAL - (now - lastFindingCallTime);
+  if (waitTime > 0) {
+    console.log(`[Lakkot] Finding API: waiting ${waitTime}ms for cooldown...`);
+    await new Promise(resolve => setTimeout(resolve, waitTime));
   }
-  lastFindingCallTime = now;
+  lastFindingCallTime = Date.now();
 
   const baseQuery = card.ebay_search || buildSearchQuery(card);
   const query = applyLanguageToQuery(baseQuery, language);
@@ -915,6 +917,9 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
       console.error('[Lakkot] Card price error:', err.message);
       priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] };
     }
+
+    // DEBUG: log what the first query returned
+    console.log(`[Lakkot] FIRST QUERY: sales=${priceData.ebay_sales_count} | market=${priceData.market_price_usd} | listings=${(priceData.listings||[]).length} | first_listing=${(priceData.listings?.[0]?.title||'-').slice(0,50)}`);
 
     // Retry if no results — try card number with name (not number alone)
     const promoMatch = !item.card_number && (item.ebay_search || '').match(/\b(SM\d{2,3}|SWSH\d{2,3}|XY\d{2,3}|BW\d{2,3}|SVP?\d{2,3})\b/i);
