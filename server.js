@@ -1698,6 +1698,50 @@ app.get('/cache/clear', (req, res) => {
   res.json({ cleared: size });
 });
 
+// ─── Wishlist ─────────────────────────────────────────────────────────────────
+app.post('/wishlist/add', async (req, res) => {
+  const { token, productName, imageUrl, marketPrice, scanLogId } = req.body;
+  if (!token) return res.status(401).json({ error: 'missing_token' });
+  const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
+  if (!user) return res.status(401).json({ error: 'invalid_token' });
+  try {
+    const { data, error } = await supabase.from('wishlists').insert({
+      user_email: user.email,
+      product_name: productName ?? null,
+      image_url: imageUrl ?? null,
+      market_price: marketPrice ?? null,
+      scan_log_id: scanLogId ?? null,
+    }).select('id').single();
+    if (error) throw error;
+    return res.json({ success: true, id: data.id });
+  } catch (err) {
+    console.error('[Lakkot] wishlist add error:', err.message);
+    return res.status(500).json({ error: 'wishlist_add_failed' });
+  }
+});
+
+app.post('/wishlist/remove', async (req, res) => {
+  const { token, id } = req.body;
+  if (!token || !id) return res.status(400).json({ error: 'missing_params' });
+  const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
+  if (!user) return res.status(401).json({ error: 'invalid_token' });
+  try {
+    await supabase.from('wishlists').delete().eq('id', id).eq('user_email', user.email);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'wishlist_remove_failed' });
+  }
+});
+
+app.get('/wishlist', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(401).json({ error: 'missing_token' });
+  const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
+  if (!user) return res.status(401).json({ error: 'invalid_token' });
+  const { data: items } = await supabase.from('wishlists').select('*').eq('user_email', user.email).order('created_at', { ascending: false });
+  return res.json({ items: items ?? [] });
+});
+
 app.post('/scan/feedback', async (req, res) => {
   const { scanLogId, feedback } = req.body;
   if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
