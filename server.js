@@ -562,6 +562,7 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
   // Find the best number for this Pokemon
   const matchesForTop = nameWithNumber.filter(m => m.nameEN === topNameEN);
   const bestNumber = matchesForTop.length > 0 ? matchesForTop[0].number : null;
+  const selectedTitle = matchesForTop.length > 0 ? matchesForTop[0].title : null;
 
   // Get FR name
   const topNameFR = pokemonToFR(topNameEN) || topNameEN;
@@ -586,6 +587,7 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
     votes: topVotes,
     totalMatches: Object.keys(nameVotes).length,
     set: topSet ? { name: topSet.name, series: topSet.series, code: topSet.code } : null,
+    selectedTitle,
   };
 }
 
@@ -1884,7 +1886,7 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle }) {
     try {
       // Upload original image to Supabase Storage
       let imageUrl = null;
@@ -1930,6 +1932,10 @@ app.post('/scan', async (req, res) => {
         verdict: verdict ?? null,
         sources_count: sourcesCount ?? 0,
         ebay_sales_count: ebaySalesCount ?? 0,
+        lens_matches: lensMatches ?? null,
+        lens_selected: lensSelected ?? null,
+        ebay_results: ebayResults ?? null,
+        lang_toggle: langToggle ?? null,
       }).select('id').single();
       return logData?.id ?? null;
     } catch (err) {
@@ -1991,9 +1997,10 @@ app.post('/scan', async (req, res) => {
       }
 
       // Check for unsupported items first
+      // EN flag: graded cards are allowed — Lens identifies the card, we show raw price
       if (hasTitle) {
         const unsupportedReason = isGradedCard(rawTitle) ? 'graded' : isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
-        if (unsupportedReason) {
+        if (unsupportedReason && !(language === 'EN' && unsupportedReason === 'graded')) {
           const messages = { graded: 'Graded card — pricing not supported yet', sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
@@ -2009,13 +2016,14 @@ app.post('/scan', async (req, res) => {
       const hasBrandKeyword = hasTitle && TCG_BRAND_KEYWORDS.some(kw => titleLower.includes(kw));
       const titleIsCard = hasCardNumber || (hasStrongKeyword && hasBrandKeyword) || (hasStrongKeyword && titleLower.split(/\s+/).length >= 2);
 
-      if (hasTitle && titleIsCard) {
+      if (hasTitle && titleIsCard && language !== 'EN') {
         const route = hasCardNumber ? 'title-card-number' : 'title-card-keyword';
         console.log('[Lakkot] Unified:', route, '→', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route, productName: result.card_name, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        const ebayTopResults0 = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price }));
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route, productName: result.card_name, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, ebayResults: ebayTopResults0, langToggle: language });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota, scanLogId: logId });
       }
 
@@ -2051,7 +2059,9 @@ app.post('/scan', async (req, res) => {
             }
           }
 
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+          const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
+          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price }));
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language });
 
           return res.json({
             type: 'CARD_RESULT',
@@ -2104,7 +2114,9 @@ app.post('/scan', async (req, res) => {
         const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
+        const ebayTopResults2 = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price }));
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
       }
 
@@ -2126,7 +2138,8 @@ app.post('/scan', async (req, res) => {
       const medianPrice = shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null;
       const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
       const webVerdict = medianPrice && sellerPrice ? (sellerPrice / medianPrice < 0.90 ? 'DEAL' : sellerPrice / medianPrice > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length });
+      const lensMatchTitles3 = (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || '');
+      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length, lensMatches: lensMatchTitles3, lensSelected: productName, langToggle: language });
 
       return res.json({
         type: 'WEB_RESULT',
