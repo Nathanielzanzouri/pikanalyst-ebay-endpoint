@@ -7,6 +7,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
+const { findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -565,12 +566,26 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
   // Get FR name
   const topNameFR = pokemonToFR(topNameEN) || topNameEN;
 
+  // Vote on set name
+  const setVotes = {};
+  for (const match of (visualMatches || []).slice(0, 15)) {
+    const setInfo = findSetInText(match.title || '');
+    if (setInfo) {
+      const key = setInfo.name;
+      setVotes[key] = (setVotes[key] || { ...setInfo, count: 0 });
+      setVotes[key].count++;
+    }
+  }
+  const topSet = Object.values(setVotes).sort((a, b) => b.count - a.count)[0] || null;
+  if (topSet) console.log(`[Lakkot] Set vote: "${topSet.name}" (${topSet.series}) — ${topSet.count} votes`);
+
   return {
     nameEN: topNameEN,
     nameFR: topNameFR,
     number: bestNumber,
     votes: topVotes,
     totalMatches: Object.keys(nameVotes).length,
+    set: topSet ? { name: topSet.name, series: topSet.series, code: topSet.code } : null,
   };
 }
 
@@ -2043,6 +2058,7 @@ app.post('/scan', async (req, res) => {
             ...result,
             card_name: vote.nameEN,
             card_name_fr: vote.nameFR,
+            set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
             tcg_market_price: tcgPrice,
             identified_by: 'lens-en-vote',
