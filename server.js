@@ -6,6 +6,7 @@ if (process.env.NODE_ENV !== 'production') {
 const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
+const { pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -516,6 +517,97 @@ function findDeep(obj, key, depth = 0) {
     if (found !== undefined) return found;
   }
   return undefined;
+}
+
+// ─── Pokemon vote system — extract name + number from visual matches ─────────
+function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
+  const nameVotes = {};
+  const nameWithNumber = []; // [{name, nameEN, number, title}]
+
+  const cardNumRe = /\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/;
+
+  for (const match of (visualMatches || []).slice(0, 15)) {
+    const title = match.title || '';
+    // Split title into words and check each against Pokemon names
+    const words = title.replace(/[^a-zA-ZÀ-ÿ\s'-]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+
+    for (const word of words) {
+      const lower = word.toLowerCase();
+      if (isPokemonName(lower)) {
+        const en = pokemonToEN(lower) || lower;
+        nameVotes[en] = (nameVotes[en] || 0) + 1;
+
+        // Also check if this match has a card number
+        const numMatch = title.match(cardNumRe);
+        if (numMatch && numMatch[0].indexOf('/') > -1) {
+          // Verify it's not a date
+          const afterIdx = title.indexOf(numMatch[0]) + numMatch[0].length;
+          if (title[afterIdx] !== '/') {
+            nameWithNumber.push({ name: lower, nameEN: en, number: numMatch[1], title });
+          }
+        }
+      }
+    }
+  }
+
+  if (Object.keys(nameVotes).length === 0) return null;
+
+  // Get the most voted English name
+  const sorted = Object.entries(nameVotes).sort((a, b) => b[1] - a[1]);
+  const topNameEN = sorted[0][0];
+  const topVotes = sorted[0][1];
+  console.log(`[Lakkot] Pokemon vote: "${topNameEN}" (${topVotes} votes) | all: ${JSON.stringify(sorted.slice(0, 5))}`);
+
+  // Find the best number for this Pokemon
+  const matchesForTop = nameWithNumber.filter(m => m.nameEN === topNameEN);
+  const bestNumber = matchesForTop.length > 0 ? matchesForTop[0].number : null;
+
+  // Get FR name
+  const topNameFR = pokemonToFR(topNameEN) || topNameEN;
+
+  return {
+    nameEN: topNameEN,
+    nameFR: topNameFR,
+    number: bestNumber,
+    votes: topVotes,
+    totalMatches: Object.keys(nameVotes).length,
+  };
+}
+
+// ─── TCGPlayer price lookup (EN cards only) ──────────────────────────────────
+async function fetchPokemonTCG(card) {
+  const NULL_PRICES = { market_price_usd: null };
+  const rawName = (card.card_name || '').replace(/"/g, '').trim();
+  const rawNum = card.card_number ? card.card_number.split('/')[0].trim() : '';
+  const numberPart = rawNum ? (/^[a-zA-Z]+\d+$/.test(rawNum) ? rawNum : rawNum.replace(/\D/g, '') || null) : null;
+
+  const queries = [];
+  if (numberPart) queries.push(`name:"${rawName}" number:"${numberPart}"`);
+  queries.push(`name:"${rawName}"`);
+
+  for (const q of queries) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      const res = await fetch(
+        `https://api.pokemontcg.io/v2/cards?q=${encodeURIComponent(q)}&select=id,name,number,set,tcgplayer&pageSize=5`,
+        { headers: { 'Accept': 'application/json' }, signal: ctrl.signal }
+      );
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const c of (data.data ?? [])) {
+        const prices = c.tcgplayer?.prices;
+        if (!prices) continue;
+        const marketPrice = Object.values(prices).find(p => p?.market != null)?.market;
+        if (marketPrice) {
+          console.log('[Lakkot] TCG match:', c.name, '|', c.set?.name, '→ $' + marketPrice);
+          return { market_price_usd: Math.round(marketPrice * 100) / 100, tcg_url: c.tcgplayer?.url ?? null };
+        }
+      }
+    } catch (e) { continue; }
+  }
+  return NULL_PRICES;
 }
 
 // ─── DOM title cleaner ────────────────────────────────────────────────────────
@@ -1665,6 +1757,7 @@ async function handleGoogleLens(imageBase64) {
     medianPrice,
     sourcesCount: pricedCards.length,
     pricesCount: prices.length,
+    visualMatches: visualMatches.slice(0, 15), // for Pokemon vote system
   };
 }
 
@@ -1915,6 +2008,50 @@ app.post('/scan', async (req, res) => {
       console.log('[Lakkot] Unified: non-card or no title, running Google Lens...');
       const lensResult = await handleGoogleLens(imageBase64);
       const productName = lensResult?.productName ?? null;
+
+      // === EN toggle: vote-based Pokemon identification ===
+      if (language === 'EN' && lensResult?.visualMatches) {
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN');
+        if (vote) {
+          const voteQuery = vote.number
+            ? `${vote.nameEN} ${vote.number}`
+            : `${vote.nameEN} pokemon card`;
+          console.log(`[Lakkot] EN vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
+
+          // eBay sold price
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language });
+          const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+          const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+
+          // TCGPlayer price (EN cards only)
+          let tcgPrice = null;
+          if (vote.number) {
+            try {
+              const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: '', condition: 'Near Mint' };
+              const tcgData = await fetchPokemonTCG(tcgCard);
+              tcgPrice = tcgData?.market_price_usd ?? null;
+              if (tcgPrice) console.log(`[Lakkot] TCGPlayer price: $${tcgPrice}`);
+            } catch (e) {
+              console.warn('[Lakkot] TCGPlayer failed:', e.message);
+            }
+          }
+
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0 });
+
+          return res.json({
+            type: 'CARD_RESULT',
+            ...result,
+            card_name: vote.nameEN,
+            card_name_fr: vote.nameFR,
+            ebay_sales_count: result.ebay_sales_count ?? 0,
+            tcg_market_price: tcgPrice,
+            identified_by: 'lens-en-vote',
+            pokemon_votes: vote.votes,
+            quota,
+            scanLogId: logId,
+          });
+        }
+      }
 
       // Clean Lens product name — strip YouTube/article titles, domain names
       const cleanLensName = productName
