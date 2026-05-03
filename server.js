@@ -1969,6 +1969,26 @@ app.get('/wishlist', async (req, res) => {
   return res.json({ items: items ?? [] });
 });
 
+// ─── Re-price: same card query, different date range (no new scan) ───────────
+app.post('/scan/reprice', async (req, res) => {
+  const { query, language = 'WORLD', dateRange = 90 } = req.body;
+  if (!query) return res.status(400).json({ error: 'missing query' });
+  try {
+    const result = await handleAnalyze({ imageBase64: '', streamTitle: query, sellerPrice: null, mode: 'cards', manualCardOverride: query, language, dateRange });
+    const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+    return res.json({
+      market_price_usd: mp,
+      ebay_sales_count: result.ebay_sales_count ?? 0,
+      listings: result.listings ?? [],
+      ebay_url: result.ebay_url ?? null,
+      dateRange,
+    });
+  } catch (err) {
+    console.error('[Lakkot] reprice error:', err.message);
+    return res.json({ market_price_usd: null, ebay_sales_count: 0, listings: [], dateRange });
+  }
+});
+
 app.post('/scan/feedback', async (req, res) => {
   const { scanLogId, feedback } = req.body;
   if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
