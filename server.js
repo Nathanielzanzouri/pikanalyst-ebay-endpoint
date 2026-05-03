@@ -7,7 +7,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
-const { findSetInText } = require('./pokemon-sets');
+const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -521,6 +521,30 @@ function findDeep(obj, key, depth = 0) {
 }
 
 // ─── Pokemon vote system — extract name + number from visual matches ─────────
+
+// Build promo code regex from pokemon-sets.js — all sets with "Promo" in name
+const _promoPrefixes = (() => {
+  const prefixes = new Set();
+  for (const [code, name] of POKEMON_SETS) {
+    if (/promo/i.test(name)) {
+      const upper = code.toUpperCase();
+      // Add full code (e.g., SVP, SWSHP, SMP)
+      if (upper.length >= 2) prefixes.add(upper);
+      // Also add without trailing P if result is >= 2 chars (SWSH, SM, XY, BW, DP, HS)
+      const noP = upper.replace(/P$/, '');
+      if (noP.length >= 2) prefixes.add(noP);
+    }
+  }
+  // Add common variants with FR/EN suffix (SVPFR, SVPEN, SVFR, SVEN, etc.)
+  for (const p of [...prefixes]) {
+    prefixes.add(p + 'FR');
+    prefixes.add(p + 'EN');
+  }
+  return [...prefixes].sort((a, b) => b.length - a.length); // longest first for regex
+})();
+const PROMO_CODE_RE = new RegExp('\\b(' + _promoPrefixes.join('|') + ')\\s*[#]?\\s*(\\d{2,4})\\b', 'i');
+console.log('[Lakkot] Promo prefixes:', _promoPrefixes.join(', '));
+
 // Detect language of a Lens match title based on signals
 function detectTitleLang(title) {
   const lower = title.toLowerCase();
@@ -545,8 +569,7 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
   const cardNumRe = /\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/;
   // Also match dash-separated format: "033-106-SV8-B" → "033/106"
   const dashNumRe = /^(\d{2,4})-(\d{2,4})-[A-Z]{2,}/;
-  // Promo codes: SVP044, SVP 044, SVPFR 044, SWSH044, XYP044, #044
-  const promoCodeRe = /\b(SVP?(?:FR)?|SWSH|XY|BW|SM|DP|HGSS)\s*[#]?\s*(\d{2,4})\b/i;
+  // Promo codes: uses PROMO_CODE_RE built from pokemon-sets.js at module load
 
   for (const match of (visualMatches || []).slice(0, 15)) {
     const title = match.title || '';
@@ -575,7 +598,7 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
             nameWithNumber.push({ name: lower, nameEN: en, number: `${dashMatch[1]}/${dashMatch[2]}`, title, lang: titleLang });
           } else {
             // Try promo code: SVP044, SVPFR 044, etc.
-            const promoMatch = title.match(promoCodeRe);
+            const promoMatch = title.match(PROMO_CODE_RE);
             if (promoMatch) {
               const promoNum = `${promoMatch[1].toUpperCase()} ${promoMatch[2]}`;
               nameWithNumber.push({ name: lower, nameEN: en, number: promoNum, title, lang: titleLang, isPromo: true });
