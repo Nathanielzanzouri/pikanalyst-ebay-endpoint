@@ -2052,11 +2052,13 @@ app.post('/scan', async (req, res) => {
 
           // TCGPlayer price (EN cards only)
           let tcgPrice = null;
+          let tcgUrl = null;
           if (vote.number) {
             try {
               const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: '', condition: 'Near Mint' };
               const tcgData = await fetchPokemonTCG(tcgCard);
               tcgPrice = tcgData?.market_price_usd ?? null;
+              tcgUrl = tcgData?.tcg_url ?? null;
               if (tcgPrice) console.log(`[Lakkot] TCGPlayer price: $${tcgPrice}`);
             } catch (e) {
               console.warn('[Lakkot] TCGPlayer failed:', e.message);
@@ -2075,6 +2077,7 @@ app.post('/scan', async (req, res) => {
             set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
             tcg_market_price: tcgPrice,
+            tcg_url: tcgUrl,
             identified_by: 'lens-en-vote',
             pokemon_votes: vote.votes,
             quota,
