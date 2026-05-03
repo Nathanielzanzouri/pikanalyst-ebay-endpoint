@@ -165,8 +165,10 @@ function getMarketsForLanguage(language) {
 const GRADING_KEYWORDS = [
   // Major grading companies
   'psa', 'cgc', 'bgs', 'sgc', 'beckett',
-  // Minor / European (only unambiguous company names — NOT 'tag', 'ace', 'mnt', 'pcs', 'acs', 'ags', 'icg')
+  // Minor / European (only unambiguous company names — NOT 'tag', 'mnt', 'pcs', 'acs', 'ags', 'icg')
   'ccc', 'hga', 'pfx', 'fcg', 'sfg',
+  // ACE grading (with number to avoid false positives)
+  'ace 10', 'ace 9', 'ace 8',
   // Collect Aura
   'collectaura', 'collect aura', 'collect-aura', 'ca grade', 'ca 9', 'ca 10',
   // French grading companies
