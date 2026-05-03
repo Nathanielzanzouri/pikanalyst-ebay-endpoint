@@ -545,6 +545,8 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
   const cardNumRe = /\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/;
   // Also match dash-separated format: "033-106-SV8-B" → "033/106"
   const dashNumRe = /^(\d{2,4})-(\d{2,4})-[A-Z]{2,}/;
+  // Promo codes: SVP044, SVP 044, SVPFR 044, SWSH044, XYP044, #044
+  const promoCodeRe = /\b(SVP?(?:FR)?|SWSH|XY|BW|SM|DP|HGSS)\s*[#]?\s*(\d{2,4})\b/i;
 
   for (const match of (visualMatches || []).slice(0, 15)) {
     const title = match.title || '';
@@ -571,6 +573,13 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
           const dashMatch = title.match(dashNumRe);
           if (dashMatch) {
             nameWithNumber.push({ name: lower, nameEN: en, number: `${dashMatch[1]}/${dashMatch[2]}`, title, lang: titleLang });
+          } else {
+            // Try promo code: SVP044, SVPFR 044, etc.
+            const promoMatch = title.match(promoCodeRe);
+            if (promoMatch) {
+              const promoNum = `${promoMatch[1].toUpperCase()} ${promoMatch[2]}`;
+              nameWithNumber.push({ name: lower, nameEN: en, number: promoNum, title, lang: titleLang, isPromo: true });
+            }
           }
         }
       }
