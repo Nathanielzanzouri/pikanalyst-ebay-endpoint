@@ -521,14 +521,34 @@ function findDeep(obj, key, depth = 0) {
 }
 
 // ─── Pokemon vote system — extract name + number from visual matches ─────────
+// Detect language of a Lens match title based on signals
+function detectTitleLang(title) {
+  const lower = title.toLowerCase();
+  // JP signals: "japanese", katakana, JP sites, JP-style set codes
+  if (/\b(japanese|japan|jap)\b/i.test(title)) return 'JP';
+  if (/[\u30A0-\u30FF\u3040-\u309F\u4E00-\u9FFF]/.test(title)) return 'JP'; // katakana/hiragana/kanji
+  if (/\b(mercari\.jp|rakuten|yahoo\s*japan|cardova\s*japan|japantcg)\b/i.test(title)) return 'JP';
+  // FR signals: French Pokemon terms, French set names, .fr domains
+  if (/\b(carte pokémon|carte pokemon|cartes pokémon)\b/i.test(title)) return 'FR';
+  if (/\b(étincelles|déferlantes|écarlate|obsidiennes|mascarade|destinées|rivaux|flamboyant|flammes|crépuscul|aube|tempête)\b/i.test(title)) return 'FR';
+  if (/\bamazon\.fr\b/i.test(title)) return 'FR';
+  // EN signals: English TCG terms, English set names, English sites
+  if (/\b(pokemon tcg|pokemon card[^e]|surging sparks|destined rivals|obsidian flames|twilight masquerade|paldea evolved|scarlet.*violet|silver tempest|crown zenith|brilliant stars)\b/i.test(title)) return 'EN';
+  if (/\b(ebay|gamestop|fanatics|tcgplayer)\b/i.test(title)) return 'EN';
+  return null; // unknown
+}
+
 function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
   const nameVotes = {};
-  const nameWithNumber = []; // [{name, nameEN, number, title}]
+  const nameWithNumber = []; // [{name, nameEN, number, title, lang}]
 
   const cardNumRe = /\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/;
+  // Also match dash-separated format: "033-106-SV8-B" → "033/106"
+  const dashNumRe = /^(\d{2,4})-(\d{2,4})-[A-Z]{2,}/;
 
   for (const match of (visualMatches || []).slice(0, 15)) {
     const title = match.title || '';
+    const titleLang = detectTitleLang(title);
     // Split title into words and check each against Pokemon names
     const words = title.replace(/[^a-zA-ZÀ-ÿ\s'-]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
 
@@ -544,7 +564,13 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
           // Verify it's not a date
           const afterIdx = title.indexOf(numMatch[0]) + numMatch[0].length;
           if (title[afterIdx] !== '/') {
-            nameWithNumber.push({ name: lower, nameEN: en, number: numMatch[1], title });
+            nameWithNumber.push({ name: lower, nameEN: en, number: numMatch[1], title, lang: titleLang });
+          }
+        } else {
+          // Try dash-separated format: "033-106-SV8-B" → "033/106"
+          const dashMatch = title.match(dashNumRe);
+          if (dashMatch) {
+            nameWithNumber.push({ name: lower, nameEN: en, number: `${dashMatch[1]}/${dashMatch[2]}`, title, lang: titleLang });
           }
         }
       }
@@ -559,10 +585,22 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
   const topVotes = sorted[0][1];
   console.log(`[Lakkot] Pokemon vote: "${topNameEN}" (${topVotes} votes) | all: ${JSON.stringify(sorted.slice(0, 5))}`);
 
-  // Find the best number for this Pokemon
+  // Find the best number for this Pokemon — prefer number from matching language
   const matchesForTop = nameWithNumber.filter(m => m.nameEN === topNameEN);
-  const bestNumber = matchesForTop.length > 0 ? matchesForTop[0].number : null;
-  const selectedTitle = matchesForTop.length > 0 ? matchesForTop[0].title : null;
+  // 1st priority: number from a title matching the target language
+  const langMatch = matchesForTop.find(m => m.lang === targetLang);
+  // 2nd priority: number from a title with unknown language (neutral)
+  const neutralMatch = matchesForTop.find(m => m.lang === null);
+  // 3rd priority: any number (fallback)
+  const bestMatch = langMatch || neutralMatch || matchesForTop[0] || null;
+  const bestNumber = bestMatch ? bestMatch.number : null;
+  const selectedTitle = bestMatch ? bestMatch.title : null;
+
+  if (matchesForTop.length > 0) {
+    console.log(`[Lakkot] Number candidates for "${topNameEN}":`);
+    matchesForTop.forEach(m => console.log(`  [${m.lang || '?'}] ${m.number} ← ${m.title.slice(0, 60)}`));
+    console.log(`  → Selected [${bestMatch?.lang || '?'}]: ${bestNumber}`);
+  }
 
   // Get FR name
   const topNameFR = pokemonToFR(topNameEN) || topNameEN;
