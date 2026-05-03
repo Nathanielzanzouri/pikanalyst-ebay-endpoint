@@ -2001,6 +2001,7 @@ app.post('/scan', async (req, res) => {
       const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
       // If zone crop was done client-side, imageBase64 is already cropped
       let croppedImageBase64 = fullFrameBase64 ? imageBase64 : null;
+      const hasZone = !!fullFrameBase64; // scan zone is active
 
       // Centre crop: crop to center 50% of image for better card recognition
       if (cropCenter && imageBase64) {
@@ -2025,7 +2026,7 @@ app.post('/scan', async (req, res) => {
       // EN flag: graded cards are allowed — Lens identifies the card, we show raw price
       if (hasTitle) {
         const unsupportedReason = isGradedCard(rawTitle) ? 'graded' : isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
-        if (unsupportedReason && !((language === 'EN' || language === 'JP' || language === 'FR') && unsupportedReason === 'graded')) {
+        if (unsupportedReason && !((language !== 'WORLD' || hasZone) && unsupportedReason === 'graded')) {
           const messages = { graded: 'Graded card — pricing not supported yet', sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
@@ -2041,7 +2042,7 @@ app.post('/scan', async (req, res) => {
       const hasBrandKeyword = hasTitle && TCG_BRAND_KEYWORDS.some(kw => titleLower.includes(kw));
       const titleIsCard = hasCardNumber || (hasStrongKeyword && hasBrandKeyword) || (hasStrongKeyword && titleLower.split(/\s+/).length >= 2);
 
-      if (hasTitle && titleIsCard && language !== 'EN' && language !== 'JP' && language !== 'FR') {
+      if (hasTitle && titleIsCard && !hasZone && language === 'WORLD') {
         const route = hasCardNumber ? 'title-card-number' : 'title-card-keyword';
         console.log('[Lakkot] Unified:', route, '→', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
