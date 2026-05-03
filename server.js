@@ -2253,6 +2253,10 @@ app.post('/scan', async (req, res) => {
           const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language });
 
+          // Flag when JP toggle couldn't find a JP-specific number (fell back to EN/FR promo)
+          const langMismatch = vote.isPromo ? 'EN promo — JP version not found' : null;
+          if (langMismatch) console.log(`[Lakkot] JP lang mismatch: ${vote.number} is a promo code, not a JP set number`);
+
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -2261,6 +2265,7 @@ app.post('/scan', async (req, res) => {
             set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
             identified_by: 'lens-jp-vote',
+            lang_mismatch: langMismatch,
             pokemon_votes: vote.votes,
             quota,
             scanLogId: logId,
