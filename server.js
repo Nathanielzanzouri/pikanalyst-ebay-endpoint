@@ -961,6 +961,12 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
         if (!res.ok) { const t = await res.text(); throw new Error(`Browse ${market.id} ${res.status}: ${t.slice(0, 100)}`); }
         const data = await res.json();
         console.log(`[Pikanalyst] Browse raw [${market.id}]: total=${data.total ?? '?'} returned=${data.itemSummaries?.length ?? 0}`);
+        // Debug: log first item's date fields
+        if (data.itemSummaries?.[0]) {
+          const first = data.itemSummaries[0];
+          console.log(`[Pikanalyst] Browse first item keys: ${Object.keys(first).join(', ')}`);
+          console.log(`[Pikanalyst] Browse first item dates: lastSoldDate=${first.lastSoldDate ?? 'MISSING'} itemEndDate=${first.itemEndDate ?? 'MISSING'} itemCreationDate=${first.itemCreationDate ?? 'MISSING'}`);
+        }
         return { market, items: data.itemSummaries ?? [] };
       })
     );
