@@ -1971,11 +1971,15 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false } = params;
-      const originalImageBase64 = imageBase64; // keep original for logging
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false } = params;
+      // If client sent a full frame (scan zone active), use it as the original for logging
+      // imageBase64 = the zone-cropped image (what Lens/eBay sees)
+      // fullFrameBase64 = the full stream frame (for QA)
+      const originalImageBase64 = fullFrameBase64 || imageBase64;
       const rawTitle = (streamTitle ?? '').trim();
       const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
-      let croppedImageBase64 = null;
+      // If zone crop was done client-side, imageBase64 is already cropped
+      let croppedImageBase64 = fullFrameBase64 ? imageBase64 : null;
 
       // Centre crop: crop to center 50% of image for better card recognition
       if (cropCenter && imageBase64) {
