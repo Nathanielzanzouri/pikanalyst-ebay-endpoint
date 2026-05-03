@@ -783,7 +783,7 @@ async function getEbayOAuthToken() {
 }
 
 // ─── eBay Finding API (legacy, rate limit 5000/day) ──────────────────────────
-async function fetchEbayFinding(card, language = 'WORLD') {
+async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const now = Date.now();
   const waitTime = FINDING_MIN_INTERVAL - (now - lastFindingCallTime);
@@ -875,6 +875,17 @@ async function fetchEbayFinding(card, language = 'WORLD') {
     identity = identity.filter(i => !exKw.some(kw => (i?.title?.[0] ?? '').toLowerCase().includes(kw)));
   }
 
+  // Date range filter
+  if (dateRange && dateRange < 90) {
+    const cutoff = Date.now() - dateRange * 24 * 60 * 60 * 1000;
+    const beforeDate = identity.length;
+    identity = identity.filter(i => {
+      const d = i?.listingInfo?.[0]?.endTime?.[0];
+      return d ? new Date(d).getTime() >= cutoff : false;
+    });
+    console.log(`[Lakkot] Date filter (${dateRange}d): ${beforeDate} → ${identity.length} listings`);
+  }
+
   if (identity.length === 0) throw new Error('Finding: 0 results after card identity filter');
 
   const rawPrices = identity
@@ -920,7 +931,7 @@ async function fetchEbayFinding(card, language = 'WORLD') {
 // ─── eBay Browse API (OAuth, active listings) ─────────────────────────────────
 const BROWSE_SITE_MAP = { EBAY_FR: 'www.ebay.fr', EBAY_US: 'www.ebay.com', EBAY_DE: 'www.ebay.de', EBAY_GB: 'www.ebay.co.uk' };
 
-async function fetchEbayBrowse(card, token, language = 'WORLD') {
+async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) {
   const baseQueries = buildBrowseQueries(card);
   const queries = baseQueries.map(q => applyLanguageToQuery(q, language));
 
@@ -935,7 +946,10 @@ async function fetchEbayBrowse(card, token, language = 'WORLD') {
   for (const query of queries) {
     const settled = await Promise.allSettled(
       MARKETS.map(async (market) => {
-        const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true&sort=endDateDesc&limit=200`;
+        const dateFilter = dateRange && dateRange < 90
+          ? `,itemEndDate:[${new Date(Date.now() - dateRange * 86400000).toISOString()}]`
+          : '';
+        const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true${dateFilter}&sort=endDateDesc&limit=200`;
         console.log(`[Pikanalyst] Browse API URL [${market.id}]:`, url);
         const res = await fetch(url, {
           headers: {
@@ -1069,25 +1083,25 @@ async function fetchEbayBrowse(card, token, language = 'WORLD') {
   throw new Error('Browse: 0 results for all queries and markets');
 }
 
-async function fetchEbayAny(card, language = 'WORLD') {
+async function fetchEbayAny(card, language = 'WORLD', dateRange = 90) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const certId    = process.env.EBAY_CERT_ID;
   try {
-    if (ebayAppId) return await fetchEbayFinding(card, language);
+    if (ebayAppId) return await fetchEbayFinding(card, language, dateRange);
   } catch (e) {
     console.warn('[Yamo] Finding API failed:', e.message, '→ trying Browse API...');
   }
   if (ebayAppId && certId) {
     const token = await getEbayOAuthToken();
-    return await fetchEbayBrowse(card, token, language);
+    return await fetchEbayBrowse(card, token, language, dateRange);
   }
   throw new Error('No eBay credentials available');
 }
 
-async function fetchPrices(card, language = 'WORLD') {
+async function fetchPrices(card, language = 'WORLD', dateRange = 90) {
   let ebay = null;
   try {
-    ebay = await fetchEbayAny(card, language);
+    ebay = await fetchEbayAny(card, language, dateRange);
   } catch (err) {
     console.warn('[Yamo] eBay failed:', err.message);
   }
@@ -1104,15 +1118,15 @@ async function fetchPrices(card, language = 'WORLD') {
   };
 }
 
-async function handleCard(item, sellerPrice, language = 'WORLD') {
-  const cacheKey = `card|${item.card_name}|${item.card_number ?? ''}|${item.condition ?? ''}|${language}`;
+async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90) {
+  const cacheKey = `card|${item.card_name}|${item.card_number ?? ''}|${item.condition ?? ''}|${language}|${dateRange}`;
   const cached = cacheGet(cacheKey);
   let priceData;
   if (cached) {
     priceData = cached;
   } else {
     try {
-      priceData = await fetchPrices(item, language);
+      priceData = await fetchPrices(item, language, dateRange);
     } catch (err) {
       console.error('[Lakkot] Card price error:', err.message);
       priceData = { market_price_usd: null, price_low_usd: null, price_high_usd: null, price_source: 'none', ebay_market_price: null, ebay_sales_count: 0, ebay_url: null, listings: [] };
@@ -1152,7 +1166,7 @@ async function handleCard(item, sellerPrice, language = 'WORLD') {
   return { ...item, ...priceData, seller_asking_price: sellerPrice ?? item.seller_asking_price ?? null };
 }
 
-async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD' }) {
+async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90 }) {
   const rawTitle = streamTitle?.trim() ?? '';
   const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
 
@@ -1216,7 +1230,7 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     }
   }
 
-  return handleCard(item, sellerPrice, language);
+  return handleCard(item, sellerPrice, language, dateRange);
 }
 
 async function handleManualLookup(cardName, language = 'WORLD') {
@@ -2062,7 +2076,7 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false } = params;
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90 } = params;
       // If client sent a full frame (scan zone active), use it as the original for logging
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
@@ -2115,7 +2129,7 @@ app.post('/scan', async (req, res) => {
       if (hasTitle && titleIsCard && !hasZone && language === 'WORLD') {
         const route = hasCardNumber ? 'title-card-number' : 'title-card-keyword';
         console.log('[Lakkot] Unified:', route, '→', rawTitle);
-        const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
+        const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language, dateRange });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
         const ebayTopResults0 = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price }));
@@ -2138,7 +2152,7 @@ app.post('/scan', async (req, res) => {
           console.log(`[Lakkot] EN vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
           // eBay sold price
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language });
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -2188,7 +2202,7 @@ app.post('/scan', async (req, res) => {
           console.log(`[Lakkot] JP vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
           // eBay sold price — search with JP language filter
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP' });
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -2222,7 +2236,7 @@ app.post('/scan', async (req, res) => {
           console.log(`[Lakkot] FR vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
           // eBay sold price — search with FR language filter
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR' });
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -2277,7 +2291,7 @@ app.post('/scan', async (req, res) => {
           .replace(/\s+/g, ' ')
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
-        const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language });
+        const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language, dateRange });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
