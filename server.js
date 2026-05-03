@@ -2004,7 +2004,7 @@ app.post('/scan', async (req, res) => {
       // EN flag: graded cards are allowed — Lens identifies the card, we show raw price
       if (hasTitle) {
         const unsupportedReason = isGradedCard(rawTitle) ? 'graded' : isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
-        if (unsupportedReason && !(language === 'EN' && unsupportedReason === 'graded')) {
+        if (unsupportedReason && !((language === 'EN' || language === 'JP') && unsupportedReason === 'graded')) {
           const messages = { graded: 'Graded card — pricing not supported yet', sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
@@ -2020,7 +2020,7 @@ app.post('/scan', async (req, res) => {
       const hasBrandKeyword = hasTitle && TCG_BRAND_KEYWORDS.some(kw => titleLower.includes(kw));
       const titleIsCard = hasCardNumber || (hasStrongKeyword && hasBrandKeyword) || (hasStrongKeyword && titleLower.split(/\s+/).length >= 2);
 
-      if (hasTitle && titleIsCard && language !== 'EN') {
+      if (hasTitle && titleIsCard && language !== 'EN' && language !== 'JP') {
         const route = hasCardNumber ? 'title-card-number' : 'title-card-keyword';
         console.log('[Lakkot] Unified:', route, '→', rawTitle);
         const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language });
@@ -2076,6 +2076,39 @@ app.post('/scan', async (req, res) => {
             ebay_sales_count: result.ebay_sales_count ?? 0,
             tcg_market_price: tcgPrice,
             identified_by: 'lens-en-vote',
+            pokemon_votes: vote.votes,
+            quota,
+            scanLogId: logId,
+          });
+        }
+      }
+
+      // === JP toggle: vote-based Pokemon identification ===
+      if (language === 'JP' && lensResult?.visualMatches) {
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN');
+        if (vote) {
+          const voteQuery = vote.number
+            ? `${vote.nameEN} ${vote.number} japanese`
+            : `${vote.nameEN} japanese pokemon card`;
+          console.log(`[Lakkot] JP vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
+
+          // eBay sold price — search with JP language filter
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP' });
+          const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+          const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+
+          const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
+          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price }));
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language });
+
+          return res.json({
+            type: 'CARD_RESULT',
+            ...result,
+            card_name: vote.nameEN,
+            card_name_fr: vote.nameFR,
+            set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
+            ebay_sales_count: result.ebay_sales_count ?? 0,
+            identified_by: 'lens-jp-vote',
             pokemon_votes: vote.votes,
             quota,
             scanLogId: logId,
