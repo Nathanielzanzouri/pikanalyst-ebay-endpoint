@@ -947,8 +947,9 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
     const settled = await Promise.allSettled(
       MARKETS.map(async (market) => {
         const dateFilter = dateRange && dateRange < 90
-          ? `,itemEndDate:[${new Date(Date.now() - dateRange * 86400000).toISOString()}]`
+          ? `,itemEndDate:[${new Date(Date.now() - dateRange * 86400000).toISOString()}..]`
           : '';
+        if (dateFilter) console.log(`[Lakkot] Browse date filter: last ${dateRange} days`);
         const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true${dateFilter}&sort=endDateDesc&limit=200&fieldgroups=EXTENDED`;
         console.log(`[Pikanalyst] Browse API URL [${market.id}]:`, url);
         const res = await fetch(url, {
