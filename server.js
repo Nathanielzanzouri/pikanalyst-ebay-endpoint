@@ -1060,7 +1060,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
       return {
         title:    i.title ?? '',
         price:    priceEur != null ? Math.round(priceEur * 100) / 100 : null,
-        soldDate: i.lastSoldDate ?? null,
+        soldDate: i.lastSoldDate ?? i.itemEndDate ?? null,
         imageUrl: i.image?.imageUrl ?? null,
         itemUrl:  i.itemWebUrl ?? null,
         country:  i.itemLocation?.country ?? null,
