@@ -665,6 +665,7 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
     nameEN: topNameEN,
     nameFR: topNameFR,
     number: bestNumber,
+    isPromo: bestMatch?.isPromo ?? false,
     votes: topVotes,
     totalMatches: Object.keys(nameVotes).length,
     set: topSet ? { name: topSet.name, series: topSet.series, code: topSet.code } : null,
@@ -679,7 +680,9 @@ async function fetchPokemonTCG(card) {
   const rawNum = card.card_number ? card.card_number.split('/')[0].trim() : '';
   const numberPart = rawNum ? (/^[a-zA-Z]+\d+$/.test(rawNum) ? rawNum : rawNum.replace(/\D/g, '') || null) : null;
 
+  const setId = (card.set_name || '').toLowerCase().trim();
   const queries = [];
+  if (numberPart && setId) queries.push(`name:"${rawName}" number:"${numberPart}" set.id:"${setId}"`);
   if (numberPart) queries.push(`name:"${rawName}" number:"${numberPart}"`);
   queries.push(`name:"${rawName}"`);
 
@@ -2199,7 +2202,9 @@ app.post('/scan', async (req, res) => {
           let tcgUrl = null;
           if (vote.number) {
             try {
-              const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: '', condition: 'Near Mint' };
+              // For promo codes, pass the set info so TCGPlayer finds the right card
+              const tcgSetId = vote.isPromo && vote.set ? vote.set.code : '';
+              const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: tcgSetId, condition: 'Near Mint' };
               const tcgData = await fetchPokemonTCG(tcgCard);
               tcgPrice = tcgData?.market_price_usd ?? null;
               tcgUrl = tcgData?.tcg_url ?? null;
