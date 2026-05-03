@@ -547,11 +547,10 @@ console.log('[Lakkot] Promo prefixes:', _promoPrefixes.join(', '));
 
 // Detect language of a Lens match title based on signals
 function detectTitleLang(title) {
-  const lower = title.toLowerCase();
-  // JP signals: "japanese", katakana, JP sites, JP-style set codes
-  if (/\b(japanese|japan|jap)\b/i.test(title)) return 'JP';
+  // JP signals checked FIRST — "Carte Pokémon Japonaise" should be JP, not FR
+  if (/\b(japanese|japonais[e]?|japan|jap)\b/i.test(title)) return 'JP';
   if (/[\u30A0-\u30FF\u3040-\u309F\u4E00-\u9FFF]/.test(title)) return 'JP'; // katakana/hiragana/kanji
-  if (/\b(mercari\.jp|rakuten|yahoo\s*japan|cardova\s*japan|japantcg)\b/i.test(title)) return 'JP';
+  if (/\b(mercari\.jp|rakuten|yahoo\s*japan|cardova\s*japan|japantcg|meccha\s*japan)\b/i.test(title)) return 'JP';
   // FR signals: French Pokemon terms, French set names, .fr domains
   if (/\b(carte pokémon|carte pokemon|cartes pokémon)\b/i.test(title)) return 'FR';
   if (/\b(étincelles|déferlantes|écarlate|obsidiennes|mascarade|destinées|rivaux|flamboyant|flammes|crépuscul|aube|tempête)\b/i.test(title)) return 'FR';
