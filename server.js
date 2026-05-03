@@ -1030,7 +1030,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
       const raw = parseFloat(item.price?.value);
       const cur = item.price?.currency ?? 'EUR';
       const eur = isNaN(raw) ? '?' : toEur(raw, cur).toFixed(2);
-      console.log(`${idx + 1}. [€${eur} (${cur} ${item.price?.value})] [${item._market}] ${item.title}`);
+      console.log(`${idx + 1}. [€${eur} (${cur} ${item.price?.value})] [${item._market}] ${item.title} | lastSoldDate=${item.lastSoldDate ?? 'null'} itemEndDate=${item.itemEndDate ?? 'null'}`);
     });
 
     const rawPrices = identityItems
