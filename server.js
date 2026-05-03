@@ -2149,38 +2149,17 @@ app.post('/scan', async (req, res) => {
         }
       }
 
-      // Check for unsupported items first
-      // EN flag: graded cards are allowed — Lens identifies the card, we show raw price
+      // Check for unsupported items (sealed, lots, multi — graded cards are allowed, Lens identifies through slab)
       if (hasTitle) {
-        const unsupportedReason = isGradedCard(rawTitle) ? 'graded' : isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
-        if (unsupportedReason && !((language !== 'WORLD' || hasZone) && unsupportedReason === 'graded')) {
-          const messages = { graded: 'Graded card — pricing not supported yet', sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
+        const unsupportedReason = isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
+        if (unsupportedReason) {
+          const messages = { sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
         }
       }
 
-      // Route 1: DOM title has card signals → skip Lens, use title directly for eBay
-      // Card number (NNN/NNN) or strong card keywords = precise enough for eBay query
-      const STRONG_CARD_KEYWORDS_RE = /\b(vmax|vstar|chr|sar|sir|ar|fa|holo|reverse|gx|ex|full art|alt art|illustration rare|art rare|trainer gallery|radiant|secret rare|ultra rare|fossil|jungle|rocket|neo|base set|xy)\b/i;
-      const titleLower = rawTitle.toLowerCase();
-      const hasCardNumber = CARD_NUMBER_RE.test(rawTitle);
-      const hasStrongKeyword = hasTitle && STRONG_CARD_KEYWORDS_RE.test(titleLower);
-      const hasBrandKeyword = hasTitle && TCG_BRAND_KEYWORDS.some(kw => titleLower.includes(kw));
-      const titleIsCard = hasCardNumber || (hasStrongKeyword && hasBrandKeyword) || (hasStrongKeyword && titleLower.split(/\s+/).length >= 2);
-
-      if (hasTitle && titleIsCard && !hasZone && language === 'WORLD') {
-        const route = hasCardNumber ? 'title-card-number' : 'title-card-keyword';
-        console.log('[Lakkot] Unified:', route, '→', rawTitle);
-        const result = await handleAnalyze({ imageBase64, streamTitle: rawTitle, sellerPrice, mode: 'cards', manualCardOverride: '', language, dateRange });
-        const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
-        const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        const ebayTopResults0 = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
-        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route, productName: result.card_name, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, ebayResults: ebayTopResults0, langToggle: language });
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, quota, scanLogId: logId });
-      }
-
-      // Route 2: Not a card (or no title) → Google Lens → check if card → route
+      // All scans go through Google Lens — no DOM title route
       console.log('[Lakkot] Unified: non-card or no title, running Google Lens...');
       const lensResult = await handleGoogleLens(imageBase64);
       const productName = lensResult?.productName ?? null;
