@@ -619,12 +619,24 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
 
   // Find the best number for this Pokemon — prefer number from matching language
   const matchesForTop = nameWithNumber.filter(m => m.nameEN === topNameEN);
-  // 1st priority: number from a title matching the target language
-  const langMatch = matchesForTop.find(m => m.lang === targetLang);
-  // 2nd priority: number from a title with unknown language (neutral)
-  const neutralMatch = matchesForTop.find(m => m.lang === null);
-  // 3rd priority: any number (fallback)
-  const bestMatch = langMatch || neutralMatch || matchesForTop[0] || null;
+
+  let bestMatch = null;
+  if (targetLang === 'JP') {
+    // JP cards use NNN/NNN set numbers, never promo codes (SVP, SWSH, etc.)
+    // Priority: JP-tagged non-promo > any JP-tagged > neutral non-promo > any non-promo > fallback
+    bestMatch =
+      matchesForTop.find(m => m.lang === 'JP' && !m.isPromo) ||
+      matchesForTop.find(m => m.lang === 'JP') ||
+      matchesForTop.find(m => m.lang === null && !m.isPromo) ||
+      matchesForTop.find(m => !m.isPromo) ||
+      matchesForTop[0] || null;
+  } else {
+    // EN/FR: prefer language-matched > neutral > any
+    bestMatch =
+      matchesForTop.find(m => m.lang === targetLang) ||
+      matchesForTop.find(m => m.lang === null) ||
+      matchesForTop[0] || null;
+  }
   const bestNumber = bestMatch ? bestMatch.number : null;
   const selectedTitle = bestMatch ? bestMatch.title : null;
 
