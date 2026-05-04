@@ -2218,7 +2218,7 @@ app.post('/scan', async (req, res) => {
 
       // === JP toggle: vote-based Pokemon identification ===
       if (language === 'JP' && lensResult?.visualMatches) {
-        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN');
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'JP');
         if (vote) {
           const voteQuery = vote.number
             ? `${vote.nameEN} ${vote.number} japanese`
@@ -2256,7 +2256,7 @@ app.post('/scan', async (req, res) => {
 
       // === FR toggle: vote-based Pokemon identification ===
       if (language === 'FR' && lensResult?.visualMatches) {
-        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN');
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'FR');
         if (vote) {
           // Use French name for eBay query — French cards are listed with FR names on eBay France
           const voteQuery = vote.number
