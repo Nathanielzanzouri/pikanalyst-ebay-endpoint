@@ -686,7 +686,7 @@ async function fetchPokemonTCG(card) {
   const queries = [];
   if (numberPart && setId) queries.push(`name:"${rawName}" number:"${numberPart}" set.id:"${setId}"`);
   if (numberPart) queries.push(`name:"${rawName}" number:"${numberPart}"`);
-  queries.push(`name:"${rawName}"`);
+  // No name-only fallback — too risky, returns random cards with same name
 
   for (const q of queries) {
     try {
