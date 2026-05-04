@@ -1985,6 +1985,27 @@ app.get('/wishlist', async (req, res) => {
   return res.json({ items: items ?? [] });
 });
 
+// ─── Scan history per user ───────────────────────────────────────────────────
+app.post('/scan/history', async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'missing token' });
+  const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
+  if (!user) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const { data: scans } = await supabase
+      .from('scan_logs')
+      .select('id, created_at, image_url, cropped_image_url, product_name, market_price, asking_price, ebay_sales_count, lang_toggle, route, result_type')
+      .eq('user_email', user.email)
+      .not('product_name', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    return res.json({ history: scans ?? [] });
+  } catch (err) {
+    console.error('[Lakkot] history error:', err.message);
+    return res.json({ history: [] });
+  }
+});
+
 // ─── Re-price: same card query, different date range (no new scan) ───────────
 app.post('/scan/reprice', async (req, res) => {
   const { query, language = 'WORLD', dateRange = 90 } = req.body;
