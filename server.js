@@ -680,7 +680,7 @@ async function fetchPokemonTCG(card) {
   const NULL_PRICES = { market_price_usd: null };
   const rawName = (card.card_name || '').replace(/"/g, '').trim();
   const rawNum = card.card_number ? card.card_number.split('/')[0].trim() : '';
-  const numberPart = rawNum ? (/^[a-zA-Z]+\d+$/.test(rawNum) ? rawNum : rawNum.replace(/\D/g, '') || null) : null;
+  const numberPart = rawNum ? (/^[a-zA-Z]+\d+$/.test(rawNum) ? rawNum : rawNum.replace(/\D/g, '').replace(/^0+(\d)/, '$1') || null) : null;
 
   const setId = (card.set_name || '').toLowerCase().trim();
   const queries = [];
