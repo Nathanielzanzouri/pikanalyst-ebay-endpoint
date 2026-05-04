@@ -2459,6 +2459,17 @@ app.post('/scan', async (req, res) => {
       result = await handleAnalyze(params);
     } else if (type === 'manual') {
       result = await handleManualLookup(params.cardName, params.language);
+      // TCGPlayer for EN manual lookups
+      if (params.language === 'EN' && result.card_name && result.card_number) {
+        try {
+          const tcgCard = { card_name: result.card_name, card_number: result.card_number, set_name: '', condition: 'Near Mint' };
+          const tcgData = await fetchPokemonTCG(tcgCard);
+          if (tcgData?.market_price_usd) {
+            result.tcg_market_price = tcgData.market_price_usd;
+            result.tcg_url = tcgData.tcg_url ?? null;
+          }
+        } catch (e) { console.warn('[Lakkot] TCG manual failed:', e.message); }
+      }
       // Log manual lookup
       const manualUser = token ? (await supabase.from('users').select('email, name').eq('token', token).single()).data : null;
       const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
@@ -2466,9 +2477,9 @@ app.post('/scan', async (req, res) => {
       if (mp) {
         const askP = result.seller_asking_price ?? null;
         const verdict = mp && askP ? (askP / mp < 0.90 ? 'DEAL' : askP / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0 });
+        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0, langToggle: params.language });
       } else {
-        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA' });
+        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA', langToggle: params.language });
       }
     } else {
       return res.status(400).json({ error: 'unknown_type', type });
