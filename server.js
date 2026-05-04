@@ -2204,8 +2204,8 @@ app.post('/scan', async (req, res) => {
           let tcgUrl = null;
           if (vote.number) {
             try {
-              // For promo codes, pass the set info so TCGPlayer finds the right card
-              const tcgSetId = vote.isPromo && vote.set ? vote.set.code : '';
+              // Always pass set ID when available — prevents wrong card with same number
+              const tcgSetId = vote.set ? vote.set.code : '';
               const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: tcgSetId, condition: 'Near Mint' };
               const tcgData = await fetchPokemonTCG(tcgCard);
               tcgPrice = tcgData?.market_price_usd ?? null;
