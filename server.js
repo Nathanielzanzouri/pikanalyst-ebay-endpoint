@@ -249,7 +249,7 @@ const TCG_MECHANIC_KEYWORDS = [
   'mega ', 'méga ', 'promo', 'gold star',
 ];
 // Card number regex + date exclusion
-const _CARD_NUM_BASE = /\b[A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4}\b/g;
+const _CARD_NUM_BASE = /\b[A-Za-z]{0,3}\d{2,4}\s*\/\s*[A-Za-z]{0,3}\d{2,4}\b/g;
 const CARD_NUMBER_RE = {
   test(text) {
     _CARD_NUM_BASE.lastIndex = 0;
