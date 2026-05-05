@@ -576,7 +576,8 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
     const title = match.title || '';
     const titleLang = detectTitleLang(title);
     // Split title into words and check each against Pokemon names
-    const words = title.replace(/[^a-zA-ZÀ-ÿ\s'-]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+    // Also split on hyphens — "Méga-Lucario-ex" → ["Méga", "Lucario", "ex"]
+    const words = title.replace(/[^a-zA-ZÀ-ÿ\s'-]/g, ' ').split(/[\s-]+/).filter(w => w.length >= 3);
 
     for (const word of words) {
       const lower = word.toLowerCase();
