@@ -924,6 +924,8 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
     const cur  = i?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] ?? 'EUR';
     const val  = parseFloat(i?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__);
     const priceEur = isNaN(val) || val <= 0 ? null : toEur(val, cur);
+    const lType = i?.listingInfo?.[0]?.listingType?.[0] ?? '';
+    const isAuc = lType === 'Auction' || lType === 'AuctionWithBIN';
     return {
       title:    i?.title?.[0] ?? '',
       price:    priceEur != null ? Math.round(priceEur * 100) / 100 : null,
@@ -931,6 +933,8 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
       imageUrl: (i?.galleryURL?.[0] ?? '').replace('http://', 'https://') || null,
       itemUrl:  i?.viewItemURL?.[0] ?? null,
       country:  i?.country?.[0] ?? null,
+      listingType: isAuc ? 'Auction' : 'Fixed Price',
+      bidCount: isAuc ? (parseInt(i?.sellingStatus?.[0]?.bidCount?.[0]) || null) : null,
     };
   }).filter(l => l.price != null);
 
@@ -1082,6 +1086,8 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
       const val  = parseFloat(i.price?.value);
       const cur  = i.price?.currency ?? 'EUR';
       const priceEur = isNaN(val) || val <= 0 ? null : toEur(val, cur);
+      const buyOpts = i.buyingOptions ?? [];
+      const isAuction = buyOpts.includes('AUCTION');
       return {
         title:    i.title ?? '',
         price:    priceEur != null ? Math.round(priceEur * 100) / 100 : null,
@@ -1089,6 +1095,8 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
         imageUrl: i.image?.imageUrl ?? null,
         itemUrl:  i.itemWebUrl ?? null,
         country:  i.itemLocation?.country ?? null,
+        listingType: isAuction ? 'Auction' : 'Fixed Price',
+        bidCount: isAuction ? (i.bidCount ?? null) : null,
       };
     }).filter(l => l.price != null);
 
