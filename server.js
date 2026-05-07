@@ -553,7 +553,7 @@ function detectTitleLang(title) {
   if (/\b(japanese|japonais[e]?|japan|jap)\b/i.test(title)) return 'JP';
   if (/[\u30A0-\u30FF\u3040-\u309F\u4E00-\u9FFF]/.test(title)) return 'JP'; // katakana/hiragana/kanji
   if (/\b(mercari\.jp|rakuten|yahoo\s*japan|cardova\s*japan|japantcg|meccha\s*japan)\b/i.test(title)) return 'JP';
-  if (/\b(M1[LSMA]|M2[ab]|SV[0-9][a-z]|S[0-9]{1,2}[a-z]?)\b/.test(title)) return 'JP'; // JP-exclusive set codes
+  if (/\b(M1[LSMA]|M2[ab]|SV[0-9]{1,2}[a-z]|S[0-9]{1,2}[a-z])\b/i.test(title)) return 'JP'; // JP-exclusive set codes (must have letter suffix: SV9a, S12a, M1L)
   // FR signals: French Pokemon terms, French set names, .fr domains
   if (/\b(carte pokémon|carte pokemon|cartes pokémon)\b/i.test(title)) return 'FR';
   if (/\b(étincelles|déferlantes|écarlate|obsidiennes|mascarade|destinées|rivaux|flamboyant|flammes|crépuscul|aube|tempête)\b/i.test(title)) return 'FR';
