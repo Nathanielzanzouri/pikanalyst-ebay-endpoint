@@ -2190,7 +2190,7 @@ app.post('/scan', async (req, res) => {
 
       // Check for unsupported items (sealed, lots, multi — graded cards are allowed, Lens identifies through slab)
       if (hasTitle) {
-        const unsupportedReason = isBooster(rawTitle) ? 'sealed' : isLot(rawTitle) ? 'lot' : isMultiChoice(rawTitle) ? 'multi' : null;
+        const unsupportedReason = isBooster(rawTitle) ? 'sealed' : isMultiChoice(rawTitle) ? 'multi' : null;
         if (unsupportedReason) {
           const messages = { sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice });
