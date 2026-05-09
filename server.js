@@ -605,6 +605,13 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
             if (promoMatch) {
               const promoNum = `${promoMatch[1].toUpperCase()} ${promoMatch[2]}`;
               nameWithNumber.push({ name: lower, nameEN: en, number: promoNum, title, lang: titleLang, isPromo: true });
+            } else {
+              // Try "Promo" + number pattern: "Evoli 173 Promo" or "Promo 173"
+              const promoNumMatch = title.match(/\bpromo\b[^0-9]*(\d{2,4})\b|\b(\d{2,4})\s+promo\b/i);
+              if (promoNumMatch) {
+                const pNum = promoNumMatch[1] || promoNumMatch[2];
+                nameWithNumber.push({ name: lower, nameEN: en, number: `Promo ${pNum}`, title, lang: titleLang, isPromo: true });
+              }
             }
           }
         }
