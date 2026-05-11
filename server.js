@@ -2009,7 +2009,8 @@ app.post('/scan/cardmarket', async (req, res) => {
   if (!cardName) return res.status(400).json({ error: 'missing cardName' });
   try {
     // Map our language toggle to TCGdex path
-    const langMap = { EN: 'en', FR: 'fr', JP: 'ja' };
+    // JP uses /en/ path because English names work best and Cardmarket price is the same
+    const langMap = { EN: 'en', FR: 'fr', JP: 'en' };
     const tcgdexLang = langMap[language] || 'en';
 
     // Extract the card number (first part before /)
