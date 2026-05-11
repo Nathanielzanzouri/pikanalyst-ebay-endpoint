@@ -2080,12 +2080,15 @@ app.post('/scan/cardmarket', async (req, res) => {
         low: cm.low,
         avg30: avg30,
         // Cardmarket's /Cards/{idProduct} short URL is unreliable. Use the
-        // advanced singles search with the card name + number — guaranteed to land
-        // on a valid results page where the user can confirm the card.
+        // advanced singles search — we add the localId from TCGdex (which carries
+        // any leading zero) plus the set's TCGdex slug (e.g. "sv2a", "sv03.5") so
+        // the right variant lands at or near the top of the results.
         url: (() => {
-          const q = [cardName, (cardNumber || '').split('/')[0]].filter(Boolean).join(' ').trim();
-          return q
-            ? `https://www.cardmarket.com/en/Pokemon/Products/Singles?searchString=${encodeURIComponent(q)}`
+          const setSlug = cardData?.set?.id || '';
+          const localId = cardData?.localId || (cardNumber || '').split('/')[0] || '';
+          const terms = [cardName, localId, setSlug].filter(Boolean).join(' ').trim();
+          return terms
+            ? `https://www.cardmarket.com/en/Pokemon/Products/Singles?searchString=${encodeURIComponent(terms)}`
             : null;
         })(),
         updated: cm.updated,
