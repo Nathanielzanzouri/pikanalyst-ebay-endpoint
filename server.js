@@ -2057,7 +2057,15 @@ app.post('/scan/cardmarket', async (req, res) => {
         avg: cm.avg,
         low: cm.low,
         avg30: cm['avg30'],
-        url: cm.idProduct ? `https://www.cardmarket.com/en/Pokemon/Cards/${cm.idProduct}` : null,
+        // Cardmarket's /Cards/{idProduct} short URL is unreliable. Use the
+        // advanced singles search with the card name + number — guaranteed to land
+        // on a valid results page where the user can confirm the card.
+        url: (() => {
+          const q = [cardName, (cardNumber || '').split('/')[0]].filter(Boolean).join(' ').trim();
+          return q
+            ? `https://www.cardmarket.com/en/Pokemon/Products/Singles?searchString=${encodeURIComponent(q)}`
+            : null;
+        })(),
         updated: cm.updated,
       }
     });
