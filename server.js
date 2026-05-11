@@ -2003,6 +2003,69 @@ app.get('/wishlist', async (req, res) => {
   return res.json({ items: items ?? [] });
 });
 
+// ─── Cardmarket price via TCGdex ─────────────────────────────────────────────
+app.post('/scan/cardmarket', async (req, res) => {
+  const { cardName, cardNumber, setName, language } = req.body;
+  if (!cardName) return res.status(400).json({ error: 'missing cardName' });
+  try {
+    // Map our language toggle to TCGdex path
+    const langMap = { EN: 'en', FR: 'fr', JP: 'ja' };
+    const tcgdexLang = langMap[language] || 'en';
+
+    // Extract the card number (first part before /)
+    const num = cardNumber ? cardNumber.split('/')[0].trim() : '';
+
+    // Search TCGdex by name (+ set name if available)
+    let searchUrl = `https://api.tcgdex.net/v2/${tcgdexLang}/cards?name=${encodeURIComponent(cardName)}`;
+    if (setName) searchUrl += `&set.name=${encodeURIComponent(setName)}`;
+
+    const ctrl1 = new AbortController();
+    const timer1 = setTimeout(() => ctrl1.abort(), 5000);
+    const searchRes = await fetch(searchUrl, { signal: ctrl1.signal });
+    clearTimeout(timer1);
+    const searchData = await searchRes.json();
+
+    if (!Array.isArray(searchData) || searchData.length === 0) {
+      return res.json({ cardmarket: null });
+    }
+
+    // Find matching card by number
+    let match = null;
+    if (num) {
+      const padNum = num.padStart(3, '0');
+      match = searchData.find(c => c.localId === padNum || c.localId === num);
+    }
+    // Fallback: first result if no number match
+    if (!match) match = searchData[0];
+
+    // Fetch full card data with pricing
+    const ctrl2 = new AbortController();
+    const timer2 = setTimeout(() => ctrl2.abort(), 5000);
+    const cardRes = await fetch(`https://api.tcgdex.net/v2/${tcgdexLang}/cards/${match.id}`, { signal: ctrl2.signal });
+    clearTimeout(timer2);
+    const cardData = await cardRes.json();
+
+    const cm = cardData.pricing?.cardmarket;
+    if (!cm || !cm.trend) {
+      return res.json({ cardmarket: null });
+    }
+
+    return res.json({
+      cardmarket: {
+        trend: cm.trend,
+        avg: cm.avg,
+        low: cm.low,
+        avg30: cm['avg30'],
+        url: cm.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products/Singles?idProduct=${cm.idProduct}` : null,
+        updated: cm.updated,
+      }
+    });
+  } catch (err) {
+    console.warn('[Lakkot] Cardmarket fetch failed:', err.message);
+    return res.json({ cardmarket: null });
+  }
+});
+
 // ─── Scan history per user ───────────────────────────────────────────────────
 app.post('/scan/history', async (req, res) => {
   const { token } = req.body;
