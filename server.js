@@ -6,7 +6,7 @@ if (process.env.NODE_ENV !== 'production') {
 const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
-const { pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
+const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
 const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -2009,16 +2009,25 @@ app.post('/scan/cardmarket', async (req, res) => {
   if (!cardName) return res.status(400).json({ error: 'missing cardName' });
   try {
     // Map our language toggle to TCGdex path
-    // JP uses /en/ path because English names work best and Cardmarket price is the same
-    const langMap = { EN: 'en', FR: 'fr', JP: 'en' };
+    const langMap = { EN: 'en', FR: 'fr', JP: 'ja' };
     const tcgdexLang = langMap[language] || 'en';
+
+    // For JP scans, look up the Japanese (katakana) name from POKEMON_NAMES.
+    // The /v2/ja/ database requires a Japanese name to return useful matches —
+    // searching with the English name returns almost nothing.
+    let searchName = cardName;
+    if (language === 'JP') {
+      const lc = (cardName || '').toLowerCase().split(/\s+/)[0];
+      const row = POKEMON_NAMES.find(r => r[0] === lc);
+      if (row && row[2]) searchName = row[2];
+    }
 
     // Extract the card number (first part before /)
     const num = cardNumber ? cardNumber.split('/')[0].trim() : '';
 
     // Search TCGdex by name (+ set name if available)
-    let searchUrl = `https://api.tcgdex.net/v2/${tcgdexLang}/cards?name=${encodeURIComponent(cardName)}`;
-    if (setName) searchUrl += `&set.name=${encodeURIComponent(setName)}`;
+    let searchUrl = `https://api.tcgdex.net/v2/${tcgdexLang}/cards?name=${encodeURIComponent(searchName)}`;
+    if (setName && language !== 'JP') searchUrl += `&set.name=${encodeURIComponent(setName)}`;
 
     const ctrl1 = new AbortController();
     const timer1 = setTimeout(() => ctrl1.abort(), 5000);
@@ -2047,16 +2056,29 @@ app.post('/scan/cardmarket', async (req, res) => {
     const cardData = await cardRes.json();
 
     const cm = cardData.pricing?.cardmarket;
-    if (!cm || !cm.trend) {
+    if (!cm) {
+      return res.json({ cardmarket: null });
+    }
+
+    // Pick the most reliable price reference.
+    // For sparse markets (typical for JP variants), the "trend" can collapse to
+    // the minimum listing (e.g. €0.02). avg30 — the 30-day average — is more
+    // resistant to that, so prefer it when it's meaningfully higher than trend.
+    const trend = cm.trend ?? null;
+    const avg30 = cm['avg30'] ?? null;
+    const referencePrice = (avg30 != null && (trend == null || avg30 > trend * 2))
+      ? avg30
+      : trend;
+    if (referencePrice == null || referencePrice <= 0) {
       return res.json({ cardmarket: null });
     }
 
     return res.json({
       cardmarket: {
-        trend: cm.trend,
+        trend: referencePrice,
         avg: cm.avg,
         low: cm.low,
-        avg30: cm['avg30'],
+        avg30: avg30,
         // Cardmarket's /Cards/{idProduct} short URL is unreliable. Use the
         // advanced singles search with the card name + number — guaranteed to land
         // on a valid results page where the user can confirm the card.
