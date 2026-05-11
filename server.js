@@ -2056,7 +2056,7 @@ app.post('/scan/cardmarket', async (req, res) => {
         avg: cm.avg,
         low: cm.low,
         avg30: cm['avg30'],
-        url: cm.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products/Singles?idProduct=${cm.idProduct}` : null,
+        url: cm.idProduct ? `https://www.cardmarket.com/en/Pokemon/Cards/${cm.idProduct}` : null,
         updated: cm.updated,
       }
     });
