@@ -689,9 +689,53 @@ async function fetchPokemonTCG(card) {
   const NULL_PRICES = { market_price_usd: null };
   const rawName = (card.card_name || '').replace(/"/g, '').trim();
   const rawNum = card.card_number ? card.card_number.split('/')[0].trim() : '';
-  const numberPart = rawNum ? (/^[a-zA-Z]+\d+$/.test(rawNum) ? rawNum : rawNum.replace(/\D/g, '').replace(/^0+(\d)/, '$1') || null) : null;
 
-  const setId = (card.set_name || '').toLowerCase().trim();
+  // Parse the number. Promo cards arrive in three shapes:
+  //   "SWSH039"        — letters+digits, no separator
+  //   "SWSH 039"       — letters+space+digits (from the vote system's promoNum)
+  //   "Promo 173"      — generic promo, no recognized prefix
+  //   "Promo 044"      — same
+  // Regular cards arrive as "069" or "069/195" or similar.
+  let numberPart = null;
+  let inferredPromoSet = null;
+  if (rawNum) {
+    // Compact letter+digit form (e.g. "SWSH039") — already valid pokemontcg.io format
+    if (/^[a-zA-Z]+\d+$/.test(rawNum)) {
+      numberPart = rawNum;
+    } else {
+      // letters + space + digits → join them so it matches the API's format
+      const promoMatch = rawNum.match(/^([A-Za-z]+)\s+(\d+)$/);
+      if (promoMatch) {
+        numberPart = (promoMatch[1] + promoMatch[2]).toUpperCase();
+      } else {
+        // Plain digits (regular set): strip non-digits and leading zeros
+        const digitsOnly = rawNum.replace(/\D/g, '').replace(/^0+(\d)/, '$1');
+        numberPart = digitsOnly || null;
+      }
+    }
+  }
+
+  // Promo-set inference: when we have a letter prefix on the number and the
+  // caller didn't pass a set, map the prefix to the matching Black Star Promo
+  // set id on pokemontcg.io. Prevents falling back to a wrong card with the
+  // same numeric suffix in an unrelated set.
+  if (numberPart && /^[A-Z]+\d+$/.test(numberPart)) {
+    const prefix = numberPart.match(/^[A-Z]+/)[0];
+    const promoSetMap = {
+      SWSH: 'swshp',
+      SVP: 'svp',
+      SVPSV: 'svp',
+      BW: 'bwp',
+      XY: 'xyp',
+      SM: 'smp',
+      DP: 'dpp',
+      HGSS: 'hsp',
+      NP: 'np',
+    };
+    if (promoSetMap[prefix]) inferredPromoSet = promoSetMap[prefix];
+  }
+
+  const setId = ((card.set_name || '').toLowerCase().trim()) || inferredPromoSet || '';
   const queries = [];
   if (numberPart && setId) queries.push(`name:"${rawName}" number:"${numberPart}" set.id:"${setId}"`);
   // Only fall back to number-without-set if we have no set info at all
