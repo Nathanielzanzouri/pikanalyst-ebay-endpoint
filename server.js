@@ -2153,7 +2153,7 @@ app.post('/scan/history', async (req, res) => {
   try {
     const { data: scans } = await supabase
       .from('scan_logs')
-      .select('id, created_at, image_url, cropped_image_url, product_name, market_price, asking_price, ebay_sales_count, lang_toggle, route, result_type')
+      .select('id, created_at, image_url, cropped_image_url, product_name, market_price, asking_price, sold_price, ebay_sales_count, lang_toggle, route, result_type')
       .eq('user_email', user.email)
       .not('product_name', 'is', null)
       .order('created_at', { ascending: false })
@@ -2163,6 +2163,28 @@ app.post('/scan/history', async (req, res) => {
     console.error('[Lakkot] history error:', err.message);
     return res.json({ history: [] });
   }
+});
+
+// ─── Record SOLD price for a scan (auto-captured when Whatnot SOLD banner fires) ─
+app.post('/scan/sold', async (req, res) => {
+  const { token, scanLogId, soldPrice } = req.body;
+  if (!token || !scanLogId) return res.status(400).json({ error: 'missing token or scanLogId' });
+  const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
+  if (!user) return res.status(401).json({ error: 'unauthorized' });
+  const price = soldPrice == null ? null : Number(soldPrice);
+  if (price != null && (!Number.isFinite(price) || price < 0 || price > 999999)) {
+    return res.status(400).json({ error: 'invalid soldPrice' });
+  }
+  const { error } = await supabase
+    .from('scan_logs')
+    .update({ sold_price: price })
+    .eq('id', scanLogId)
+    .eq('user_email', user.email);
+  if (error) {
+    console.error('[Lakkot] /scan/sold update error:', error.message);
+    return res.status(500).json({ error: 'update_failed' });
+  }
+  return res.json({ ok: true });
 });
 
 // ─── Re-price: same card query, different date range (no new scan) ───────────
