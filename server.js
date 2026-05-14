@@ -10,6 +10,7 @@ const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./po
 const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
+const { buildIdentity, buildShoppingQuery, filterBySku, medianOf } = require('./sneaker-id');
 
 const app = express();
 
@@ -2520,22 +2521,48 @@ app.post('/scan', async (req, res) => {
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
       }
 
-      // Route 3: Non-card → Google Shopping for retail pricing
+      // Route 3: Non-card → Google Shopping for retail/resale pricing.
+      // Items with a detectable style code (sneakers) get the precise path:
+      // confident ID from Lens visual matches → "brand model sku" query →
+      // results filtered to the style code. Everything else keeps the
+      // original loose-title behavior, so non-sneaker items are not regressed.
       let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
-      const shoppingQuery = cleanLensName || productName;
-      if (shoppingQuery) {
+      let lowConfidence = false;
+      const identity = buildIdentity(lensResult?.visualMatches || []);
+      if (identity.confident) {
+        const skuQuery = buildShoppingQuery(identity);
+        console.log('[Lakkot] Unified: style-code ID', identity.styleCode, '(score', identity.score + ') → query:', skuQuery);
         try {
-          shoppingResult = await handleGoogleShopping(shoppingQuery);
-          console.log('[Lakkot] Unified: Google Shopping', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
+          const raw = await handleGoogleShopping(skuQuery);
+          const basket = filterBySku(raw.cards, identity.styleCode);
+          if (basket.length >= 3) {
+            shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
+            console.log('[Lakkot] Unified: SKU-filtered basket', basket.length, 'median=' + shoppingResult.medianPrice);
+          } else {
+            lowConfidence = true;
+            console.log('[Lakkot] Unified: only', basket.length, 'SKU matches — low confidence, no median');
+          }
         } catch (err) {
-          console.error('[Lakkot] Unified: Google Shopping error:', err.message);
+          console.error('[Lakkot] Unified: SKU shopping error:', err.message);
+        }
+      } else {
+        const shoppingQuery = cleanLensName || productName;
+        if (shoppingQuery) {
+          try {
+            shoppingResult = await handleGoogleShopping(shoppingQuery);
+            console.log('[Lakkot] Unified: Google Shopping (loose)', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
+          } catch (err) {
+            console.error('[Lakkot] Unified: Google Shopping error:', err.message);
+          }
         }
       }
 
-      // Prefer Shopping (more results, better median) over Lens visual matches
+      // Prefer Shopping (more results, better median) over Lens visual matches.
+      // When a confident style code yielded too few SKU matches, do NOT fall
+      // back to the unreliable Lens-priced matches — return an honest null median.
       const usesShopping = shoppingResult.cards.length > 0;
-      const finalCards = usesShopping ? shoppingResult.cards : (lensResult?.cards ?? []);
-      const medianPrice = shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null;
+      const finalCards = lowConfidence ? [] : (usesShopping ? shoppingResult.cards : (lensResult?.cards ?? []));
+      const medianPrice = lowConfidence ? null : (shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null);
       const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
       const webVerdict = medianPrice && sellerPrice ? (sellerPrice / medianPrice < 0.90 ? 'DEAL' : sellerPrice / medianPrice > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
       const lensMatchTitles3 = (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || '');
