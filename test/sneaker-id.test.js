@@ -95,3 +95,44 @@ test('buildIdentity: matches with no style code → not confident', () => {
   const id = buildIdentity([{ title: 'Nike running shoes', source: 'Nike' }]);
   assert.strictEqual(id.confident, false);
 });
+
+const { buildShoppingQuery, filterBySku, medianOf } = require('../sneaker-id');
+
+test('buildShoppingQuery: flattens retailer chrome, keeps brand/model/sku', () => {
+  const q = buildShoppingQuery({
+    styleCode: 'IB8873-666',
+    referenceTitle: 'Nike Air Pegasus 2K5 Pearl Pink | IB8873-666 | The Sole Supplier',
+  });
+  assert.ok(q.includes('Nike'));
+  assert.ok(q.includes('Air Pegasus 2K5'));
+  assert.ok(q.includes('IB8873-666'));
+  assert.ok(!q.includes('|'));
+});
+
+test('buildShoppingQuery: appends style code if reference title lacks it', () => {
+  const q = buildShoppingQuery({ styleCode: 'ID0477', referenceTitle: 'adidas Samba OG Maroon' });
+  assert.ok(q.includes('ID0477'));
+});
+
+test('filterBySku: keeps only titles containing the code, dash/space/case-insensitive', () => {
+  const cards = [
+    { title: 'Nike Air Pegasus 2K5 IB8873-666', price: 130 },
+    { title: 'nike air pegasus 2k5 ib8873 666', price: 120 },
+    { title: 'Nike Structure 26', price: 145 },
+  ];
+  const out = filterBySku(cards, 'IB8873-666');
+  assert.strictEqual(out.length, 2);
+});
+
+test('filterBySku: null style code → empty array', () => {
+  assert.deepStrictEqual(filterBySku([{ title: 'x', price: 1 }], null), []);
+});
+
+test('medianOf: returns the middle price, ignoring null/zero prices', () => {
+  const cards = [{ price: 100 }, { price: 200 }, { price: 150 }, { price: null }, { price: 0 }];
+  assert.strictEqual(medianOf(cards), 150);
+});
+
+test('medianOf: no valid prices → null', () => {
+  assert.strictEqual(medianOf([{ price: null }, {}]), null);
+});

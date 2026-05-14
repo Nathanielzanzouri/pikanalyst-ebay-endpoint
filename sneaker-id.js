@@ -93,4 +93,44 @@ function buildIdentity(visualMatches) {
   return { brand, styleCode, referenceTitle, score, confident };
 }
 
-module.exports = { findStyleCodes, extractStyleCode, extractBrand, buildIdentity };
+// Build the Google Shopping query from a confident identity. The reference
+// title already contains brand + model + colorway + style code; we just flatten
+// retailer chrome and guarantee the style code is present.
+function buildShoppingQuery({ styleCode, referenceTitle }) {
+  let q = String(referenceTitle || '')
+    .replace(/\s*\|\s*/g, ' ')                              // flatten "|" separators
+    .replace(/["']/g, ' ')                                  // drop quotes around colorways
+    .replace(/\b(buy|shop|achetez|giày|купить)\b/gi, ' ')   // common retailer verbs
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (styleCode && !q.toUpperCase().includes(styleCode.toUpperCase())) {
+    q += ' ' + styleCode;
+  }
+  return q.trim();
+}
+
+function normalizeCode(s) {
+  return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// Keep only Shopping results whose title contains the style code. Normalizing
+// strips dashes/spaces/case so "IB8873-666", "ib8873 666", "Ib8873666" all match.
+function filterBySku(cards, styleCode) {
+  if (!styleCode) return [];
+  const want = normalizeCode(styleCode);
+  return (cards || []).filter((c) => normalizeCode(c && c.title).includes(want));
+}
+
+function medianOf(cards) {
+  const prices = (cards || [])
+    .map((c) => (c && typeof c.price === 'number' ? c.price : null))
+    .filter((p) => p != null && p > 0)
+    .sort((a, b) => a - b);
+  if (!prices.length) return null;
+  return prices[Math.floor(prices.length / 2)];
+}
+
+module.exports = {
+  findStyleCodes, extractStyleCode, extractBrand, buildIdentity,
+  buildShoppingQuery, filterBySku, medianOf,
+};
