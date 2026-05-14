@@ -13,8 +13,10 @@ const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
-// CORS — allow Lovable preview/prod domains and the Chrome extension
+// CORS — allow the lakkot.com site, Lovable preview domains, and the Chrome extension
 const ALLOWED_ORIGINS = [
+  'https://lakkot.com',
+  'https://www.lakkot.com',
   'https://yamoapp.lovable.app',
   'https://yamo.app',
 ];
