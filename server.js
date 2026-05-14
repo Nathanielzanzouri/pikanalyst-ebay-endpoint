@@ -1553,12 +1553,12 @@ app.get('/me', async (req, res) => {
 
   if (!user) return res.status(401).json({ error: 'invalid_token' });
 
-  // Reset count if it's a new day
-  const today = new Date().toISOString().slice(0, 10);
+  // Reset count if it's a new month
+  const month = currentMonth();
   let scanCount = user.scan_count;
-  if (user.scan_reset_at < today) scanCount = 0;
+  if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) scanCount = 0;
 
-  const limit = user.scan_limit_override ?? (user.plan === 'pro' ? 100 : 10);
+  const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
   const remaining = Math.max(0, limit - scanCount);
 
   return res.json({ email: user.email, plan: user.plan, scan_count: scanCount, limit, remaining });
