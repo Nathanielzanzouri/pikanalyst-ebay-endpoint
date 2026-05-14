@@ -1470,7 +1470,7 @@ app.post('/stripe/checkout', async (req, res) => {
     return res.json({ url: session.url });
   } catch (err) {
     console.error('[Lakkot] Stripe checkout error:', err.message);
-    return res.status(500).json({ error: 'checkout_failed' });
+    return res.status(500).json({ error: 'checkout_failed', detail: err.message });
   }
 });
 
