@@ -2,7 +2,8 @@
   "name": "pikanalyst-ebay-endpoint",
   "version": "1.0.0",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
