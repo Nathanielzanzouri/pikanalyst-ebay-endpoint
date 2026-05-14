@@ -18,4 +18,25 @@ function findStyleCodes(text) {
   return [...found];
 }
 
-module.exports = { findStyleCodes };
+// Vote for the most likely style code across the top Lens matches.
+// Matches nearer the top of visual_matches are more trustworthy, so each
+// match's vote is weighted by its position (top = highest weight). This is
+// what stops a frequent-but-wrong lookalike code from winning.
+function extractStyleCode(visualMatches, topN = 15) {
+  const list = (visualMatches || []).slice(0, topN);
+  const scores = {};
+  list.forEach((m, i) => {
+    const weight = topN - i; // position 0 → weight topN, last → weight 1
+    for (const code of findStyleCodes(m && m.title)) {
+      scores[code] = (scores[code] || 0) + weight;
+    }
+  });
+  let styleCode = null;
+  let score = 0;
+  for (const [code, s] of Object.entries(scores)) {
+    if (s > score) { styleCode = code; score = s; }
+  }
+  return { styleCode, score };
+}
+
+module.exports = { findStyleCodes, extractStyleCode };
