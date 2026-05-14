@@ -79,7 +79,7 @@ async function validateAndCount(token, res) {
   }
 
   // Check limit
-  const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+  const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
   if (user.scan_count >= limit) {
     res.status(402).json({ error: 'limit_reached', plan: user.plan, limit, count: user.scan_count });
     return null;
@@ -1410,7 +1410,7 @@ app.post('/auth/google', async (req, res) => {
       // Create new user
       const { data: newUser, error: insertError } = await supabase
         .from('users')
-        .insert({ email, name, picture })
+        .insert({ email, name, picture, plan: 'free' })
         .select('id, token, plan, scan_count, scan_reset_at, scan_limit_override')
         .single();
       if (insertError) throw insertError;
@@ -1424,7 +1424,7 @@ app.post('/auth/google', async (req, res) => {
       user.scan_count = 0;
     }
 
-    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
 
     console.log('[Lakkot] Google auth OK:', email, '| plan:', user.plan, '| scans:', user.scan_count + '/' + limit);
 
@@ -2299,7 +2299,7 @@ app.post('/scan', async (req, res) => {
           await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
           user.scan_count += 1;
         }
-        const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+        const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
         quota = { count: user.scan_count, remaining: Math.max(0, limit - user.scan_count), limit };
 
         if (user.scan_count > limit) {
@@ -2610,14 +2610,14 @@ app.post('/scan', async (req, res) => {
     if (!user) return;
     const month = currentMonth();
     const scanCount = (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) ? 0 : user.scan_count;
-    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
     quota = { email: user.email, remaining: Math.max(0, limit - scanCount), limit };
   } else if (token) {
     const { data: user } = await supabase.from('users').select('email, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
     if (user) {
       const month = currentMonth();
       const scanCount = (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) ? 0 : user.scan_count;
-      const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? 10);
+      const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
       quota = { email: user.email, remaining: Math.max(0, limit - scanCount), limit };
     }
   }
