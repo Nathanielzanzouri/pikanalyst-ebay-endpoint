@@ -1459,6 +1459,7 @@ app.post('/stripe/checkout', async (req, res) => {
       mode: 'subscription',
       customer_email: email,
       line_items: [{ price: priceId, quantity: 1 }],
+      allow_promotion_codes: true,
       success_url: 'https://lakkot.com/success?session_id={CHECKOUT_SESSION_ID}',
       cancel_url: 'https://lakkot.com/pricing',
       metadata: { email, plan: plan || 'pro' },
