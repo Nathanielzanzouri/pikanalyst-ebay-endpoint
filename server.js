@@ -1444,10 +1444,11 @@ app.post('/auth/google', async (req, res) => {
 });
 
 // ─── Stripe: create checkout session ─────────────────────────────────────────
-// Live Stripe price IDs (price IDs are not secret — safe to keep in source)
+// LIVE price IDs (not secret — safe in source). These must match the live
+// STRIPE_SECRET_KEY this server runs with, or checkout fails with "No such price".
 const STRIPE_PRICE_IDS = {
-  pro:   'price_1TIyVOK8NB29l4GE11Qzqpg0', // Lakkot Pro — €9.99 / 200 scans
-  power: 'price_1TWcOLK8NB29l4GEQlhBL6pZ', // Lakkot Power — €39.99 / 1500 scans
+  pro:   'price_1TX4ZxGZw1nrPqC9veIVB053', // Lakkot Pro — €9.99/mo / 200 scans (live)
+  power: 'price_1TX4aJGZw1nrPqC96PZn8Dym', // Lakkot Power — €39.99/mo / 1500 scans (live)
 };
 
 app.post('/stripe/checkout', async (req, res) => {
