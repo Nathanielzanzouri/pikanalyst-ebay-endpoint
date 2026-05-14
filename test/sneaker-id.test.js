@@ -59,3 +59,39 @@ test('extractStyleCode: Samba OG fixture → correct SKU', () => {
 test('extractStyleCode: empty input → null', () => {
   assert.deepStrictEqual(extractStyleCode([]), { styleCode: null, score: 0 });
 });
+
+const { extractBrand, buildIdentity } = require('../sneaker-id');
+
+test('extractBrand: Pegasus → Nike', () => {
+  assert.strictEqual(extractBrand(pegasus.visualMatches), 'Nike');
+});
+
+test('extractBrand: Jordan 1 Low → Jordan (beats Nike mentions)', () => {
+  assert.strictEqual(extractBrand(jordan.visualMatches), 'Jordan');
+});
+
+test('extractBrand: New Balance 9060 → New Balance', () => {
+  assert.strictEqual(extractBrand(nb9060.visualMatches), 'New Balance');
+});
+
+test('buildIdentity: all 4 fixtures are confident with correct style codes', () => {
+  for (const fx of [pegasus, jordan, nb9060, samba]) {
+    const id = buildIdentity(fx.visualMatches);
+    assert.strictEqual(id.styleCode, fx.expectedSku, `${fx.slug} styleCode`);
+    assert.strictEqual(id.confident, true, `${fx.slug} confident`);
+    assert.ok(id.referenceTitle && id.referenceTitle.toUpperCase().includes(fx.expectedSku),
+      `${fx.slug} referenceTitle contains the SKU`);
+    assert.ok(id.brand, `${fx.slug} has a brand`);
+  }
+});
+
+test('buildIdentity: no matches → not confident', () => {
+  const id = buildIdentity([]);
+  assert.strictEqual(id.confident, false);
+  assert.strictEqual(id.styleCode, null);
+});
+
+test('buildIdentity: matches with no style code → not confident', () => {
+  const id = buildIdentity([{ title: 'Nike running shoes', source: 'Nike' }]);
+  assert.strictEqual(id.confident, false);
+});

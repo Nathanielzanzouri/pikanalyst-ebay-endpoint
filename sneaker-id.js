@@ -39,4 +39,58 @@ function extractStyleCode(visualMatches, topN = 15) {
   return { styleCode, score };
 }
 
-module.exports = { findStyleCodes, extractStyleCode };
+// Brand keyword → display label. "jordan" is listed before "nike" so a
+// Jordan shoe (whose titles also say "Nike") resolves to "Jordan".
+const BRAND_KEYWORDS = [
+  ['new balance', 'New Balance'],
+  ['jordan', 'Jordan'],
+  ['nike', 'Nike'],
+  ['adidas', 'adidas'],
+  ['yeezy', 'adidas Yeezy'],
+  ['asics', 'ASICS'],
+  ['puma', 'Puma'],
+  ['reebok', 'Reebok'],
+  ['salomon', 'Salomon'],
+  ['converse', 'Converse'],
+  ['vans', 'Vans'],
+];
+
+// Minimum position-weighted score for a style code to count as a confident ID.
+const STYLE_CODE_THRESHOLD = 8;
+
+function extractBrand(visualMatches, topN = 15) {
+  const list = (visualMatches || []).slice(0, topN);
+  const scores = {};
+  for (const m of list) {
+    const hay = (((m && m.title) || '') + ' ' + ((m && m.source) || '')).toLowerCase();
+    for (const [kw, label] of BRAND_KEYWORDS) {
+      if (hay.includes(kw)) scores[label] = (scores[label] || 0) + 1;
+    }
+  }
+  let brand = null;
+  let best = 0;
+  for (const [label, s] of Object.entries(scores)) {
+    if (s > best) { brand = label; best = s; }
+  }
+  return brand;
+}
+
+// Build a confident identity from Lens visual matches.
+// `referenceTitle` is the highest-ranked match whose title contains the
+// winning style code — it carries the real "brand model colorway sku" text.
+function buildIdentity(visualMatches) {
+  const { styleCode, score } = extractStyleCode(visualMatches);
+  const brand = extractBrand(visualMatches);
+  let referenceTitle = null;
+  if (styleCode) {
+    const up = styleCode.toUpperCase();
+    const hit = (visualMatches || []).find(
+      (m) => m && m.title && m.title.toUpperCase().includes(up)
+    );
+    referenceTitle = hit ? hit.title : null;
+  }
+  const confident = !!styleCode && score >= STYLE_CODE_THRESHOLD && !!referenceTitle;
+  return { brand, styleCode, referenceTitle, score, confident };
+}
+
+module.exports = { findStyleCodes, extractStyleCode, extractBrand, buildIdentity };
