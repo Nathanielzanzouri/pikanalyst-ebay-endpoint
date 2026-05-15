@@ -18,9 +18,11 @@ const app = express();
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
   res.json({
-    build: 'sneaker-pipeline-v2',
+    build: 'sneaker-pipeline-v3',
     sneakerIdLoaded: typeof buildIdentity === 'function',
     cleanQueryStripping: true,
+    fallbackQuery: true,
+    minBasket: 1,
     styleCodeThreshold: 5,
   });
 });
@@ -2544,14 +2546,26 @@ app.post('/scan', async (req, res) => {
         const skuQuery = buildShoppingQuery(identity);
         console.log('[Lakkot] Unified: style-code ID', identity.styleCode, '(score', identity.score + ') → query:', skuQuery);
         try {
-          const raw = await handleGoogleShopping(skuQuery);
-          const basket = filterBySku(raw.cards, identity.styleCode);
-          if (basket.length >= 3) {
+          const raw1 = await handleGoogleShopping(skuQuery);
+          let basket = filterBySku(raw1.cards, identity.styleCode);
+          // Fallback: if the precise query yielded too few SKU matches, retry with
+          // a broader "brand + sku" query and pool the unique results. This is the
+          // resilience layer against Google Lens / Shopping result variance.
+          if (basket.length < 2 && identity.brand && identity.styleCode) {
+            const fallbackQuery = `${identity.brand} ${identity.styleCode}`;
+            console.log('[Lakkot] Unified: thin basket — fallback query →', fallbackQuery);
+            const raw2 = await handleGoogleShopping(fallbackQuery);
+            const more = filterBySku(raw2.cards, identity.styleCode);
+            const seen = new Set(basket.map((c) => c.title));
+            for (const c of more) if (!seen.has(c.title)) { basket.push(c); seen.add(c.title); }
+            console.log('[Lakkot] Unified: pooled basket size', basket.length);
+          }
+          if (basket.length >= 1) {
             shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
             console.log('[Lakkot] Unified: SKU-filtered basket', basket.length, 'median=' + shoppingResult.medianPrice);
           } else {
             lowConfidence = true;
-            console.log('[Lakkot] Unified: only', basket.length, 'SKU matches — low confidence, no median');
+            console.log('[Lakkot] Unified: 0 SKU matches even after fallback — honest no-data');
           }
         } catch (err) {
           console.error('[Lakkot] Unified: SKU shopping error:', err.message);
