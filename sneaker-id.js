@@ -3,10 +3,14 @@
 // Style-code patterns. Each is tried independently; results are de-duped.
 // The adidas pattern uses a negative lookahead so it does not match the
 // "IB8873" prefix of a Nike modern code like "IB8873-666".
-const NIKE_MODERN = /\b[A-Z]{2}\d{4}-\d{3}\b/g;            // IB8873-666, IQ9381-100
-const NIKE_LEGACY = /\b\d{6}-\d{3}\b/g;                    // 555088-101
+// Style codes appear in retailer titles with either a dash ("CQ9447-700") or a
+// space ("CQ9447 700"), so the suffix separator is [\s-]. The adidas pattern's
+// negative lookahead matches that same character class so it doesn't grab the
+// "CQ9447" prefix of a Nike code that's space-separated.
+const NIKE_MODERN = /\b[A-Z]{2}\d{4}[\s-]\d{3}\b/g;        // IB8873-666, CQ9447 700
+const NIKE_LEGACY = /\b\d{6}[\s-]\d{3}\b/g;                // 555088-101, 555088 101
 const NEW_BALANCE = /\b[MWUG][A-Z]?\d{3,4}[A-Z]{2,3}\d?\b/g; // U9060FNB, M2002RDA
-const ADIDAS      = /\b[A-Z]{2}\d{4}(?!-?\d)\b/g;          // ID0477, IE3438
+const ADIDAS      = /\b[A-Z]{2}\d{4}(?![\s-]?\d)\b/g;      // ID0477, IE3438
 
 function findStyleCodes(text) {
   if (!text) return [];
@@ -56,7 +60,10 @@ const BRAND_KEYWORDS = [
 ];
 
 // Minimum position-weighted score for a style code to count as a confident ID.
-const STYLE_CODE_THRESHOLD = 8;
+// Score = sum of (topN - position) across matches containing the code. Threshold
+// of 5 admits one hit within the top 10, or any pattern of multiple hits.
+// Precision is still guaranteed downstream by the SKU filter on Shopping results.
+const STYLE_CODE_THRESHOLD = 5;
 
 function extractBrand(visualMatches, topN = 15) {
   const list = (visualMatches || []).slice(0, topN);
@@ -75,32 +82,60 @@ function extractBrand(visualMatches, topN = 15) {
   return brand;
 }
 
+// Marketplace listings (eBay/OfferUp/Mercari/...) carry junky titles loaded
+// with sizes, locations, conditions, and seller chrome. Retailer/aggregator
+// sources (StockX, GOAT, Laced, Footshop, SNS, Kith, ...) carry clean titles.
+// We prefer the latter as the reference title used to build the Shopping query.
+const MARKETPLACE_SOURCES = [
+  'ebay', 'offerup', 'mercari', 'poshmark', 'depop', 'grailed',
+  'amazon', 'vestiaire', 'vinted', 'kixify', 'wallapop', 'facebook',
+];
+
+function isMarketplace(source) {
+  const s = String(source || '').toLowerCase();
+  return MARKETPLACE_SOURCES.some((m) => s.includes(m));
+}
+
+// Pick the cleanest available reference title: first non-marketplace match
+// whose title contains the style code, falling back to any SKU-containing
+// match if no clean source is available.
+function pickReferenceTitle(visualMatches, styleCode) {
+  if (!styleCode) return null;
+  const up = styleCode.toUpperCase();
+  const skuHits = (visualMatches || []).filter(
+    (m) => m && m.title && m.title.toUpperCase().includes(up)
+  );
+  if (!skuHits.length) return null;
+  const clean = skuHits.find((m) => !isMarketplace(m.source));
+  return (clean || skuHits[0]).title;
+}
+
 // Build a confident identity from Lens visual matches.
-// `referenceTitle` is the highest-ranked match whose title contains the
-// winning style code — it carries the real "brand model colorway sku" text.
 function buildIdentity(visualMatches) {
   const { styleCode, score } = extractStyleCode(visualMatches);
   const brand = extractBrand(visualMatches);
-  let referenceTitle = null;
-  if (styleCode) {
-    const up = styleCode.toUpperCase();
-    const hit = (visualMatches || []).find(
-      (m) => m && m.title && m.title.toUpperCase().includes(up)
-    );
-    referenceTitle = hit ? hit.title : null;
-  }
+  const referenceTitle = pickReferenceTitle(visualMatches, styleCode);
   const confident = !!styleCode && score >= STYLE_CODE_THRESHOLD && !!referenceTitle;
   return { brand, styleCode, referenceTitle, score, confident };
 }
 
 // Build the Google Shopping query from a confident identity. The reference
-// title already contains brand + model + colorway + style code; we just flatten
-// retailer chrome and guarantee the style code is present.
+// title is the cleanest available, but even retailer titles can have noise
+// (sizes, gender markers, condition words, trailing chrome). Strip all of
+// that so Google Shopping isn't over-constrained.
 function buildShoppingQuery({ styleCode, referenceTitle }) {
   let q = String(referenceTitle || '')
-    .replace(/\s*\|\s*/g, ' ')                              // flatten "|" separators
-    .replace(/["']/g, ' ')                                  // drop quotes around colorways
-    .replace(/\b(buy|shop|achetez|giày|купить)\b/gi, ' ')   // common retailer verbs
+    .replace(/\s*\|\s*/g, ' ')                                                            // flatten "|" separators
+    .replace(/["']/g, ' ')                                                                // drop quotes
+    .replace(/\bfor\s+sale\s+in\s+[^,]+(?:,\s*[A-Z]{2})?/gi, ' ')                         // "for Sale in Crown Point, IN"
+    .replace(/\b(?:size|sz|us|eu|uk|talla|pointure|taille)\s*\d+(?:[.,]\d+)?\s*[mwy]?\b/gi, ' ') // "Size 12", "SZ 14", "Size 10.5"
+    .replace(/\b\d+(?:[.,]\d+)?\s*[MWY]\b/g, ' ')                                         // bare "12M", "5Y"
+    .replace(/\b(?:men'?s?|women'?s?|wmns)\b/gi, ' ')                                     // gender markers
+    .replace(/\b(?:pre[-\s]?owned|brand[-\s]?new|deadstock|ds|gs|td|ps|original\s+box|no\s+box)\b/gi, ' ') // condition / kids / box
+    .replace(/\b(?:ebay|offerup|mercari|poshmark|depop|grailed|amazon\.com|amazon|vestiaire|vinted|kixify|stockx|goat|facebook)\b/gi, ' ') // marketplace/retailer names
+    .replace(/\b(?:buy|shop|achetez|giày|купить|cheap|sale|release|info)\b/gi, ' ')      // retailer verbs
+    .replace(/[()[\]]/g, ' ')                                                             // parens / brackets
+    .replace(/\s+[-–—]\s+/g, ' ')                                                         // standalone dashes between words
     .replace(/\s+/g, ' ')
     .trim();
   if (styleCode && !q.toUpperCase().includes(styleCode.toUpperCase())) {
