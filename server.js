@@ -10,7 +10,7 @@ const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./po
 const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
-const { buildIdentity, buildShoppingQuery, filterBySku, medianOf } = require('./sneaker-id');
+const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
 
 const app = express();
 
@@ -18,10 +18,11 @@ const app = express();
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
   res.json({
-    build: 'sneaker-pipeline-v3',
+    build: 'sneaker-pipeline-v4',
     sneakerIdLoaded: typeof buildIdentity === 'function',
     cleanQueryStripping: true,
     fallbackQuery: true,
+    retailerAugment: true,
     minBasket: 1,
     styleCodeThreshold: 5,
   });
@@ -2560,12 +2561,35 @@ app.post('/scan', async (req, res) => {
             for (const c of more) if (!seen.has(c.title)) { basket.push(c); seen.add(c.title); }
             console.log('[Lakkot] Unified: pooled basket size', basket.length);
           }
+          // Retailer augment: SKU-only filtering biases toward marketplaces
+          // (eBay sellers consistently put style codes in titles; major retailers
+          // don't). To surface Nike / Foot Locker / JD Sports / Zalando / etc.,
+          // run a second query built from the consensus product name (word vote
+          // across Lens match titles) and keep results from non-marketplace
+          // sources only. Adds source diversity to the SKU-precise basket.
+          const phrase = extractCommonPhrase(lensResult?.visualMatches || []);
+          if (phrase && identity.brand) {
+            const nameQuery = `${identity.brand} ${phrase}`;
+            console.log('[Lakkot] Unified: retailer-augment query →', nameQuery);
+            try {
+              const raw3 = await handleGoogleShopping(nameQuery);
+              const retailers = (raw3.cards || []).filter((c) => !isMarketplace(c.source));
+              const seenTitles = new Set(basket.map((c) => c.title));
+              let added = 0;
+              for (const c of retailers) {
+                if (!seenTitles.has(c.title)) { basket.push(c); seenTitles.add(c.title); added++; }
+              }
+              console.log('[Lakkot] Unified: retailer augment added', added, '→ basket now', basket.length);
+            } catch (err) {
+              console.error('[Lakkot] Unified: retailer-augment error:', err.message);
+            }
+          }
           if (basket.length >= 1) {
             shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
-            console.log('[Lakkot] Unified: SKU-filtered basket', basket.length, 'median=' + shoppingResult.medianPrice);
+            console.log('[Lakkot] Unified: final basket', basket.length, 'median=' + shoppingResult.medianPrice);
           } else {
             lowConfidence = true;
-            console.log('[Lakkot] Unified: 0 SKU matches even after fallback — honest no-data');
+            console.log('[Lakkot] Unified: 0 matches even after all fallbacks — honest no-data');
           }
         } catch (err) {
           console.error('[Lakkot] Unified: SKU shopping error:', err.message);

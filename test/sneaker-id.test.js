@@ -208,6 +208,57 @@ test('findStyleCodes: captures full code when space-separated, not just the pref
   assert.ok(!result.includes('CQ9447'),    `should not also include the bare prefix`);
 });
 
+// ─── Retailer-friendly common-phrase extraction ─────────────────────────────
+
+const { extractCommonPhrase, isMarketplace } = require('../sneaker-id');
+
+test('extractCommonPhrase: Pegasus fixture surfaces brand + model + colorway', () => {
+  const phrase = extractCommonPhrase(pegasus.visualMatches);
+  assert.ok(/nike/i.test(phrase),    `expected "nike" in phrase: "${phrase}"`);
+  assert.ok(/pegasus/i.test(phrase), `expected "pegasus" in phrase: "${phrase}"`);
+  assert.ok(/pink/i.test(phrase),    `expected "pink" in phrase: "${phrase}"`);
+});
+
+test('extractCommonPhrase: NB 9060 fixture keeps the "9060" model number', () => {
+  const phrase = extractCommonPhrase(nb9060.visualMatches);
+  assert.ok(/9060/.test(phrase),     `expected "9060" in phrase: "${phrase}"`);
+  assert.ok(/balance/i.test(phrase), `expected "balance" in phrase: "${phrase}"`);
+});
+
+test('extractCommonPhrase: Samba OG fixture surfaces the colorway', () => {
+  const phrase = extractCommonPhrase(samba.visualMatches);
+  assert.ok(/samba/i.test(phrase), `expected "samba" in phrase: "${phrase}"`);
+  // colorway: "Maroon" or "burgundy" or "Off White Gum" depending on the fixture
+});
+
+test('extractCommonPhrase: empty input → empty string', () => {
+  assert.strictEqual(extractCommonPhrase([]), '');
+});
+
+test('extractCommonPhrase: filters generic sneaker chrome (sneakers, shoes, baskets, size)', () => {
+  const phrase = extractCommonPhrase([
+    { title: 'Nike Air Max 90 Sneakers Size 12 Men' },
+    { title: 'Nike Air Max 90 Shoes Size 10' },
+    { title: 'Nike Air Max 90 Baskets Homme' },
+    { title: 'Nike Air Max 90 Chaussures' },
+  ]);
+  // Should keep brand/model tokens, drop generic nouns + size/gender words
+  assert.ok(/nike/i.test(phrase) && /max/i.test(phrase));
+  assert.ok(!/sneakers?|shoes?|baskets|chaussures|size|men/i.test(phrase),
+    `expected generic words stripped: "${phrase}"`);
+});
+
+test('isMarketplace: classifies sources correctly', () => {
+  assert.strictEqual(isMarketplace('eBay - sellerX'), true);
+  assert.strictEqual(isMarketplace('OfferUp'),         true);
+  assert.strictEqual(isMarketplace('Amazon.com'),      true);
+  assert.strictEqual(isMarketplace('Laced'),           false);
+  assert.strictEqual(isMarketplace('Foot Locker'),     false);
+  assert.strictEqual(isMarketplace('Nike'),            false);
+  assert.strictEqual(isMarketplace(''),                false);
+  assert.strictEqual(isMarketplace(null),              false);
+});
+
 test('buildShoppingQuery: keeps year markers like 2021', () => {
   const q = buildShoppingQuery({
     styleCode: 'CT4838-011',

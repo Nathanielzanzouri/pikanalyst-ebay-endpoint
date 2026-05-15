@@ -156,6 +156,57 @@ function filterBySku(cards, styleCode) {
   return (cards || []).filter((c) => normalizeCode(c && c.title).includes(want));
 }
 
+// Tokens that show up in basically every sneaker listing and don't help a
+// Google Shopping query: sizing, gender, generic product category, commerce
+// chrome, language particles, marketplace names. The remainder of the title
+// is brand, model, colorway, year — exactly what we want to search on.
+const PHRASE_STOPWORDS = new Set([
+  // articles / prepositions / connectors
+  'a','an','the','and','or','for','with','of','to','in','on','at','by','from','vs','et','en','de','la','le','les','du','un','une','des','sur','par','pour','aux',
+  // sizing / metadata
+  'size','sz','taille','eu','us','uk','cm',
+  // gender / age
+  'men','mens','women','womens','wmns','homme','femme','femmes','hommes','unisex','enfant','kid','kids','child','baby','toddler','grade','school','gs','ps','td','garcon','fille',
+  // generic product nouns (any sneaker listing has these)
+  'sneaker','sneakers','shoe','shoes','baskets','basses','basket','chaussures','chaussure','trainers','trainer','baskets',
+  // commerce noise
+  'price','prix','sale','release','date','sortie','buy','shop','achetez','new','used','preowned','box','brand','original','authentic','official','review','available','feet','foot','pair','paire','pairs','paires','style','model',
+  // country/lang codes that bleed in
+  'fr','com','net','org','www','meilleur','tunisie',
+  // marketplaces (kept out of the phrase so the query targets retailers)
+  'ebay','offerup','mercari','poshmark','depop','amazon','grailed','vestiaire','vinted','kixify','facebook',
+]);
+
+// Word-frequency vote across the top Lens-match titles to recover the
+// shoe's "common name" the way retailer pages title it (brand + model + colorway
+// + maybe year). Used to build a retailer-friendly Shopping query that surfaces
+// links from Nike / Foot Locker / JD Sports / Zalando, not just eBay.
+function extractCommonPhrase(visualMatches, topN = 15, maxTokens = 6) {
+  const matches = (visualMatches || []).slice(0, topN);
+  if (!matches.length) return '';
+  const counts = {};
+  for (const m of matches) {
+    if (!m || !m.title) continue;
+    const seen = new Set();
+    const tokens = String(m.title).toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 3 && !PHRASE_STOPWORDS.has(t));
+    for (const t of tokens) {
+      if (seen.has(t)) continue;
+      seen.add(t);
+      counts[t] = (counts[t] || 0) + 1;
+    }
+  }
+  const minCount = Math.max(2, Math.ceil(matches.length * 0.25));
+  return Object.entries(counts)
+    .filter(([, c]) => c >= minCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxTokens)
+    .map(([t]) => t)
+    .join(' ');
+}
+
 function medianOf(cards) {
   const prices = (cards || [])
     .map((c) => (c && typeof c.price === 'number' ? c.price : null))
@@ -168,4 +219,5 @@ function medianOf(cards) {
 module.exports = {
   findStyleCodes, extractStyleCode, extractBrand, buildIdentity,
   buildShoppingQuery, filterBySku, medianOf,
+  isMarketplace, extractCommonPhrase,
 };
