@@ -14,6 +14,17 @@ const { buildIdentity, buildShoppingQuery, filterBySku, medianOf } = require('./
 
 const app = express();
 
+// Version probe — returns true only when sneaker-id is loaded, i.e. this build
+// has the SKU-based sneaker pipeline. Used to verify which build Render is running.
+app.get('/version', (req, res) => {
+  res.json({
+    build: 'sneaker-pipeline-v2',
+    sneakerIdLoaded: typeof buildIdentity === 'function',
+    cleanQueryStripping: true,
+    styleCodeThreshold: 5,
+  });
+});
+
 // CORS — allow the lakkot.com site, Lovable preview domains, and the Chrome extension
 const ALLOWED_ORIGINS = [
   'https://lakkot.com',
