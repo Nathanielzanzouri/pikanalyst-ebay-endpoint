@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse } = require('../gemini-scan');
+const { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse, mapToCardResult } = require('../gemini-scan');
 
 test('buildGeminiPrompt: mentions all supported TCGs and the JSON contract', () => {
   const p = buildGeminiPrompt();
@@ -80,4 +80,61 @@ test('parseGeminiResponse: handles null/undefined/empty input', () => {
 test('parseGeminiResponse: passes through {error:"unidentified"}', () => {
   assert.deepStrictEqual(parseGeminiResponse('{"error":"unidentified"}'),
     { error: 'unidentified' });
+});
+
+test('mapToCardResult: maps an identified card to CARD_RESULT shape', () => {
+  const parsed = {
+    game: 'Pokemon', card_name: 'Charizard ex', set_name: 'Obsidian Flames',
+    card_number: '125/197', language: 'EN', rarity: 'Special Illustration',
+    ebay_sold_avg_eur: 220, tcgplayer_price_eur: 245, pricecharting_price_eur: 210,
+    notes: 'Sample of 30 sales over 90 days',
+  };
+  const out = mapToCardResult(parsed);
+  assert.strictEqual(out.card_name,         'Charizard ex');
+  assert.strictEqual(out.set_name,          'Obsidian Flames');
+  assert.strictEqual(out.card_number,       '125/197');
+  assert.strictEqual(out.language,          'EN');
+  assert.strictEqual(out.card_game,         'Pokemon');
+  assert.strictEqual(out.market_price,      220);    // drives the verdict
+  assert.strictEqual(out.market_price_usd,  220);    // alias used by renderer
+  assert.strictEqual(out.tcg_player_price,  245);
+  assert.strictEqual(out.cardmarket_price,  210);    // PriceCharting goes in the cardmarket slot
+  assert.deepStrictEqual(out.listings,      []);     // Gemini does not return listings
+  assert.strictEqual(out.ebay_sales_count,  0);
+  assert.strictEqual(out._engine,           'gemini');
+  assert.strictEqual(out._geminiError,      null);
+  assert.strictEqual(out._geminiNotes,      'Sample of 30 sales over 90 days');
+});
+
+test('mapToCardResult: passes through {error:"unidentified"}', () => {
+  const out = mapToCardResult({ error: 'unidentified' });
+  assert.strictEqual(out.card_name,    null);
+  assert.strictEqual(out.market_price, null);
+  assert.strictEqual(out._engine,      'gemini');
+  assert.strictEqual(out._geminiError, 'unidentified');
+});
+
+test('mapToCardResult: passes through parse_failed', () => {
+  const out = mapToCardResult({ error: 'parse_failed' });
+  assert.strictEqual(out._geminiError, 'parse_failed');
+  assert.strictEqual(out.card_name,    null);
+});
+
+test('mapToCardResult: null-safe on missing optional fields', () => {
+  const out = mapToCardResult({ game: 'YuGiOh', card_name: 'Blue-Eyes' });
+  assert.strictEqual(out.card_name,         'Blue-Eyes');
+  assert.strictEqual(out.set_name,          null);
+  assert.strictEqual(out.ebay_sold_avg_eur, undefined); // not in CARD_RESULT shape
+  assert.strictEqual(out.market_price,      null);
+  assert.strictEqual(out.tcg_player_price,  null);
+  assert.strictEqual(out.cardmarket_price,  null);
+});
+
+test('mapToCardResult: handles null/undefined input gracefully', () => {
+  const out1 = mapToCardResult(null);
+  const out2 = mapToCardResult(undefined);
+  assert.strictEqual(out1.card_name,    null);
+  assert.strictEqual(out1._engine,      'gemini');
+  assert.strictEqual(out2.card_name,    null);
+  assert.strictEqual(out2._engine,      'gemini');
 });

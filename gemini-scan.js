@@ -84,4 +84,29 @@ function parseGeminiResponse(rawText) {
   return { error: 'parse_failed' };
 }
 
-module.exports = { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse };
+// Map Gemini's parsed JSON into the shape the existing CARD_RESULT renderer
+// expects. PriceCharting is placed in the cardmarket_price slot; the renderer
+// relabels that slot to "PriceCharting" when _engine === 'gemini'.
+function mapToCardResult(parsed) {
+  const p = parsed || {};
+  const ebay = p.ebay_sold_avg_eur ?? null;
+  return {
+    card_name:        p.card_name ?? null,
+    set_name:         p.set_name ?? null,
+    card_number:      p.card_number ?? null,
+    language:         p.language ?? null,
+    card_game:        p.game ?? null,
+    rarity:           p.rarity ?? null,
+    market_price:     ebay,                              // drives DEAL/FAIR/OVER verdict
+    market_price_usd: ebay,                              // alias the renderer also reads
+    tcg_player_price: p.tcgplayer_price_eur ?? null,
+    cardmarket_price: p.pricecharting_price_eur ?? null, // slot relabeled in the renderer
+    listings:         [],
+    ebay_sales_count: 0,
+    _engine:          'gemini',
+    _geminiError:     p.error ?? null,
+    _geminiNotes:     p.notes ?? null,
+  };
+}
+
+module.exports = { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse, mapToCardResult };
