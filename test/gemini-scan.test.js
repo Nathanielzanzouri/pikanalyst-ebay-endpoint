@@ -106,25 +106,35 @@ test('mapToCardResult: maps an identified card to CARD_RESULT shape', () => {
   assert.strictEqual(out._geminiNotes,      'Sample of 30 sales over 90 days');
 });
 
-test('mapToCardResult: passes through {error:"unidentified"}', () => {
+test('mapToCardResult: passes through {error:"unidentified"} and zeroes-out as null', () => {
   const out = mapToCardResult({ error: 'unidentified' });
-  assert.strictEqual(out.card_name,    null);
-  assert.strictEqual(out.market_price, null);
-  assert.strictEqual(out._engine,      'gemini');
-  assert.strictEqual(out._geminiError, 'unidentified');
+  assert.strictEqual(out.card_name,        null);
+  assert.strictEqual(out.market_price,     null);
+  assert.strictEqual(out._engine,          'gemini');
+  assert.strictEqual(out._geminiError,     'unidentified');
+  assert.strictEqual(out.ebay_sales_count, null,
+    'error path must distinguish "could not try" (null) from "tried, none" (0)');
 });
 
-test('mapToCardResult: passes through parse_failed', () => {
+test('mapToCardResult: passes through parse_failed and zeroes-out as null', () => {
   const out = mapToCardResult({ error: 'parse_failed' });
-  assert.strictEqual(out._geminiError, 'parse_failed');
-  assert.strictEqual(out.card_name,    null);
+  assert.strictEqual(out._geminiError,     'parse_failed');
+  assert.strictEqual(out.card_name,        null);
+  assert.strictEqual(out.ebay_sales_count, null);
+});
+
+test('mapToCardResult: identified card has ebay_sales_count: 0 (we tried, Gemini does not return a count)', () => {
+  const out = mapToCardResult({ game: 'Pokemon', card_name: 'Pikachu', ebay_sold_avg_eur: 12 });
+  assert.strictEqual(out.ebay_sales_count, 0);
+  assert.strictEqual(out._geminiError,     null);
 });
 
 test('mapToCardResult: null-safe on missing optional fields', () => {
   const out = mapToCardResult({ game: 'YuGiOh', card_name: 'Blue-Eyes' });
   assert.strictEqual(out.card_name,         'Blue-Eyes');
   assert.strictEqual(out.set_name,          null);
-  assert.strictEqual(out.ebay_sold_avg_eur, undefined); // not in CARD_RESULT shape
+  assert.ok(!Object.prototype.hasOwnProperty.call(out, 'ebay_sold_avg_eur'),
+    'raw Gemini field name should not leak into the CARD_RESULT shape');
   assert.strictEqual(out.market_price,      null);
   assert.strictEqual(out.tcg_player_price,  null);
   assert.strictEqual(out.cardmarket_price,  null);

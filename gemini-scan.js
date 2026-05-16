@@ -87,9 +87,15 @@ function parseGeminiResponse(rawText) {
 // Map Gemini's parsed JSON into the shape the existing CARD_RESULT renderer
 // expects. PriceCharting is placed in the cardmarket_price slot; the renderer
 // relabels that slot to "PriceCharting" when _engine === 'gemini'.
+//
+// `market_price_usd` keeps its legacy name from the original Pokemon pipeline
+// where the renderer reads it as the canonical market price; we populate it
+// with the EUR value from Gemini so the existing UI keeps working. Renaming
+// it would require touching every consumer — out of scope here.
 function mapToCardResult(parsed) {
   const p = parsed || {};
-  const ebay = p.ebay_sold_avg_eur ?? null;
+  const isError = !!p.error;
+  const ebayEur = p.ebay_sold_avg_eur ?? null;
   return {
     card_name:        p.card_name ?? null,
     set_name:         p.set_name ?? null,
@@ -97,12 +103,12 @@ function mapToCardResult(parsed) {
     language:         p.language ?? null,
     card_game:        p.game ?? null,
     rarity:           p.rarity ?? null,
-    market_price:     ebay,                              // drives DEAL/FAIR/OVER verdict
-    market_price_usd: ebay,                              // alias the renderer also reads
+    market_price:     ebayEur,                            // drives DEAL/FAIR/OVER verdict
+    market_price_usd: ebayEur,                            // legacy alias; same EUR value
     tcg_player_price: p.tcgplayer_price_eur ?? null,
-    cardmarket_price: p.pricecharting_price_eur ?? null, // slot relabeled in the renderer
+    cardmarket_price: p.pricecharting_price_eur ?? null,  // slot relabeled in the renderer
     listings:         [],
-    ebay_sales_count: 0,
+    ebay_sales_count: isError ? null : 0,                 // null = "we couldn't even try", 0 = "we tried, found none"
     _engine:          'gemini',
     _geminiError:     p.error ?? null,
     _geminiNotes:     p.notes ?? null,
