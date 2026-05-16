@@ -15,6 +15,11 @@ const { buildGeminiRequest, parseGeminiResponse, mapToCardResult } = require('./
 
 const app = express();
 
+// In-memory counter so we can tell if /scan/gemini requests are even arriving.
+let geminiHitCount = 0;
+let geminiLastHit = null;
+let geminiLastError = null;
+
 // ─── Gemini diagnostic endpoints (temp, no auth) ─────────────────────────────
 // /diag/gemini-models — lists models the configured key can access.
 // /diag/gemini-ping   — sends a 1-line text prompt to confirm key + model work
@@ -65,6 +70,9 @@ app.get('/version', (req, res) => {
     geminiLoaded: typeof buildGeminiRequest === 'function',
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
     geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    geminiHitCount,
+    geminiLastHit,
+    geminiLastError,
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -2275,12 +2283,17 @@ app.post('/scan/feedback', async (req, res) => {
 // response into the existing CARD_RESULT shape so the current renderer handles
 // it unchanged. No fallback to the standard pipeline — failures are shown honestly.
 app.post('/scan/gemini', async (req, res) => {
+  geminiHitCount++;
+  geminiLastHit = new Date().toISOString();
+  console.log('[Lakkot/Gemini] HIT #' + geminiHitCount, geminiLastHit, 'bodyKeys:', Object.keys(req.body || {}).join(','));
+
   const { imageBase64, askingPrice, streamCurrency, token } = req.body || {};
 
-  if (!token) return res.status(401).json({ error: 'missing_token' });
-  if (!imageBase64) return res.status(400).json({ error: 'missing_image' });
+  if (!token)       { geminiLastError = 'missing_token at ' + geminiLastHit;       return res.status(401).json({ error: 'missing_token' }); }
+  if (!imageBase64) { geminiLastError = 'missing_image at ' + geminiLastHit;       return res.status(400).json({ error: 'missing_image' }); }
   if (!process.env.GEMINI_API_KEY) {
     console.error('[Lakkot/Gemini] GEMINI_API_KEY not set');
+    geminiLastError = 'gemini_not_configured at ' + geminiLastHit;
     return res.status(500).json({ error: 'gemini_not_configured' });
   }
 
