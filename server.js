@@ -2293,6 +2293,10 @@ app.post('/scan/gemini', async (req, res) => {
   geminiLastHit = new Date().toISOString();
   console.log('[Lakkot/Gemini] HIT #' + geminiHitCount, geminiLastHit, 'bodyKeys:', Object.keys(req.body || {}).join(','));
 
+  // Wrap the entire handler so any unhandled rejection becomes a clean 500
+  // instead of crashing the Node process (Express 4 does not auto-catch async
+  // errors). Crashing the worker is what was returning 502 to the extension.
+  try {
   const { imageBase64, askingPrice, streamCurrency, token } = req.body || {};
 
   if (!token)       { geminiLastError = 'missing_token at ' + geminiLastHit;       return res.status(401).json({ error: 'missing_token' }); }
@@ -2304,20 +2308,37 @@ app.post('/scan/gemini', async (req, res) => {
   }
 
   // --- Quota: same shape as the unified scan path ---
-  const { data: user, error: userErr } = await supabase
-    .from('users')
-    .select('id, email, name, plan, scan_count, scan_reset_at, scan_limit_override')
-    .eq('token', token)
-    .single();
-  if (userErr || !user) return res.status(401).json({ error: 'invalid_token' });
+  let user, userErr;
+  try {
+    const sel = await supabase
+      .from('users')
+      .select('id, email, name, plan, scan_count, scan_reset_at, scan_limit_override')
+      .eq('token', token)
+      .single();
+    user = sel.data; userErr = sel.error;
+  } catch (e) {
+    console.error('[Lakkot/Gemini] supabase select threw:', e.message);
+    geminiLastError = 'supabase_select_threw: ' + e.message + ' at ' + geminiLastHit;
+    return res.status(503).json({ error: 'db_unavailable', detail: e.message });
+  }
+  if (userErr || !user) {
+    geminiLastError = 'invalid_token (userErr=' + (userErr?.message || 'none') + ') at ' + geminiLastHit;
+    return res.status(401).json({ error: 'invalid_token' });
+  }
 
   const month = currentMonth();
-  if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
-    await supabase.from('users').update({ scan_count: 1, scan_reset_at: month }).eq('id', user.id);
-    user.scan_count = 1;
-  } else {
-    await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
-    user.scan_count += 1;
+  try {
+    if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
+      await supabase.from('users').update({ scan_count: 1, scan_reset_at: month }).eq('id', user.id);
+      user.scan_count = 1;
+    } else {
+      await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
+      user.scan_count += 1;
+    }
+  } catch (e) {
+    console.error('[Lakkot/Gemini] supabase update threw:', e.message);
+    geminiLastError = 'supabase_update_threw: ' + e.message + ' at ' + geminiLastHit;
+    return res.status(503).json({ error: 'db_unavailable', detail: e.message });
   }
   const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
   const quota = { count: user.scan_count, remaining: Math.max(0, limit - user.scan_count), limit };
@@ -2383,20 +2404,26 @@ app.post('/scan/gemini', async (req, res) => {
     '| verdict:', verdict,
   );
 
-  const logId = await logScan({
-    userEmail: user.email, userName: user.name,
-    route: 'gemini',
-    productName: result.card_name,
-    lensProductName: result.card_name,
-    resultType: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
-    marketPrice: mp,
-    askingPrice: askingPrice ?? null,
-    verdict,
-    ebaySalesCount: 0,
-    lensMatches: [JSON.stringify(parsed).slice(0, 800)],
-    lensSelected: result.card_name,
-    langToggle: result.language,
-  });
+  let logId = null;
+  try {
+    logId = await logScan({
+      userEmail: user.email, userName: user.name,
+      route: 'gemini',
+      productName: result.card_name,
+      lensProductName: result.card_name,
+      resultType: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
+      marketPrice: mp,
+      askingPrice: askingPrice ?? null,
+      verdict,
+      ebaySalesCount: 0,
+      lensMatches: [JSON.stringify(parsed).slice(0, 800)],
+      lensSelected: result.card_name,
+      langToggle: result.language,
+    });
+  } catch (e) {
+    console.error('[Lakkot/Gemini] logScan threw:', e.message);
+    // continue — we still want to return the result to the user
+  }
 
   return res.json({
     type: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
@@ -2408,6 +2435,20 @@ app.post('/scan/gemini', async (req, res) => {
     scanLogId: logId,
     _geminiDiagnostic: apiDiagnostic, // temp: helps diagnose API failures from the response itself
   });
+  } catch (err) {
+    console.error('[Lakkot/Gemini] UNCAUGHT in handler:', err && err.stack ? err.stack : err);
+    geminiLastError = 'uncaught: ' + (err && err.message || String(err)) + ' at ' + geminiLastHit;
+    if (!res.headersSent) return res.status(500).json({ error: 'gemini_handler_threw', detail: err && err.message || String(err) });
+  }
+});
+
+// Global process-level guards so an unhandled async error never takes the
+// service down (which is what was returning 502 to clients).
+process.on('unhandledRejection', (reason) => {
+  console.error('[Lakkot] unhandledRejection:', reason && reason.stack ? reason.stack : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[Lakkot] uncaughtException:', err && err.stack ? err.stack : err);
 });
 
 app.post('/scan', async (req, res) => {
