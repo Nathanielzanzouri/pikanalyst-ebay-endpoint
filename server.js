@@ -2265,13 +2265,20 @@ app.post('/scan/gemini', async (req, res) => {
   }
 
   // --- Call Gemini 3 Flash ---
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  // Auth via header (not URL query) so the key never appears in any URL log.
+  // 25s timeout: Gemini Flash with grounded search can be slow; without a
+  // timeout the request handler would hang indefinitely if Google stalls.
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent';
   let parsed;
   try {
     const r = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': process.env.GEMINI_API_KEY,
+      },
       body: JSON.stringify(buildGeminiRequest(imageBase64, 'image/jpeg')),
+      signal: AbortSignal.timeout(25_000),
     });
     if (!r.ok) {
       const text = await r.text().catch(() => '');
@@ -2283,7 +2290,11 @@ app.post('/scan/gemini', async (req, res) => {
       parsed = parseGeminiResponse(rawText);
     }
   } catch (err) {
-    console.error('[Lakkot/Gemini] fetch failed:', err.message);
+    if (err && err.name === 'AbortError') {
+      console.error('[Lakkot/Gemini] timeout after 25s');
+    } else {
+      console.error('[Lakkot/Gemini] fetch failed:', err.message);
+    }
     parsed = { error: 'api_error' };
   }
 
