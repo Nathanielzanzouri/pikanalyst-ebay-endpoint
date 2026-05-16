@@ -39,6 +39,50 @@ app.get('/diag/gemini-models', async (req, res) => {
   }
 });
 
+// /diag/gemini-scan-url?url=<image_url> — runs the FULL production Gemini
+// pipeline (same prompt, same model, same grounded search) on a public image
+// and returns Gemini's raw output. Proof that image-in → card+prices-out works.
+app.get('/diag/gemini-scan-url', async (req, res) => {
+  if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'no_key' });
+  const imageUrl = req.query.url;
+  if (!imageUrl) return res.status(400).json({ error: 'missing url query param' });
+  const model = req.query.model || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  try {
+    const imgRes = await fetch(imageUrl, { signal: AbortSignal.timeout(15_000) });
+    if (!imgRes.ok) return res.status(502).json({ error: 'image_fetch_failed', status: imgRes.status });
+    const arr = new Uint8Array(await imgRes.arrayBuffer());
+    const imageBase64 = Buffer.from(arr).toString('base64');
+    const mimeType = imgRes.headers.get('content-type') || 'image/jpeg';
+
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify(buildGeminiRequest(imageBase64, mimeType)),
+      signal: AbortSignal.timeout(40_000),
+    });
+    const text = await r.text();
+    let parsedJson = null;
+    let geminiText = null;
+    try {
+      const data = JSON.parse(text);
+      geminiText = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+      parsedJson = geminiText ? parseGeminiResponse(geminiText) : null;
+    } catch (_) {}
+    return res.json({
+      status: r.status,
+      model,
+      mimeType,
+      imageBytes: arr.length,
+      geminiText,
+      parsed: parsedJson,
+      mapped: parsedJson && !parsedJson.error ? mapToCardResult(parsedJson) : null,
+      raw: text.slice(0, 1200),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message, model });
+  }
+});
+
 app.get('/diag/gemini-ping', async (req, res) => {
   if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'no_key' });
   const model = req.query.model || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
