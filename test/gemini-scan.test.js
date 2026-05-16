@@ -17,9 +17,12 @@ test('buildGeminiPrompt: mentions all supported TCGs and the JSON contract', () 
 
 test('buildGeminiRequest: wraps image + prompt and enables grounded search', () => {
   const req = buildGeminiRequest('BASE64DATA', 'image/jpeg');
+  assert.ok(Array.isArray(req.contents) && req.contents.length === 1, 'contents must have exactly one turn');
   assert.strictEqual(req.contents[0].role, 'user');
   const parts = req.contents[0].parts;
-  assert.ok(parts.some((p) => typeof p.text === 'string' && p.text.length > 100), 'text part missing');
+  const textPart = parts.find((p) => typeof p.text === 'string');
+  assert.ok(textPart, 'text part missing');
+  assert.strictEqual(textPart.text, buildGeminiPrompt());
   const img = parts.find((p) => p.inline_data);
   assert.ok(img,                                              'inline_data part missing');
   assert.strictEqual(img.inline_data.mime_type, 'image/jpeg');
@@ -32,4 +35,10 @@ test('buildGeminiRequest: defaults mime type to image/jpeg', () => {
   const req = buildGeminiRequest('XYZ');
   const img = req.contents[0].parts.find((p) => p.inline_data);
   assert.strictEqual(img.inline_data.mime_type, 'image/jpeg');
+});
+
+test('buildGeminiRequest: throws when imageBase64 is missing', () => {
+  assert.throws(() => buildGeminiRequest(),     /imageBase64 is required/);
+  assert.throws(() => buildGeminiRequest(null), /imageBase64 is required/);
+  assert.throws(() => buildGeminiRequest(''),   /imageBase64 is required/);
 });

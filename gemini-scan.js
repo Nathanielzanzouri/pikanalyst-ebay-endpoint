@@ -48,6 +48,7 @@ function buildGeminiPrompt() {
 // Build the generateContent request body for Gemini 3 Flash with the image
 // inlined as base64 and Google Search grounding enabled.
 function buildGeminiRequest(imageBase64, mimeType) {
+  if (!imageBase64) throw new TypeError('buildGeminiRequest: imageBase64 is required');
   return {
     contents: [{
       role: 'user',
