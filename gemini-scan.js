@@ -96,22 +96,32 @@ function mapToCardResult(parsed) {
   const p = parsed || {};
   const isError = !!p.error;
   const ebayEur = p.ebay_sold_avg_eur ?? null;
+  const tcgEur  = p.tcgplayer_price_eur ?? null;
+  const pcEur   = p.pricecharting_price_eur ?? null;
   return {
-    card_name:        p.card_name ?? null,
-    set_name:         p.set_name ?? null,
-    card_number:      p.card_number ?? null,
-    language:         p.language ?? null,
-    card_game:        p.game ?? null,
-    rarity:           p.rarity ?? null,
-    market_price:     ebayEur,                            // drives DEAL/FAIR/OVER verdict
-    market_price_usd: ebayEur,                            // legacy alias; same EUR value
-    tcg_player_price: p.tcgplayer_price_eur ?? null,
-    cardmarket_price: p.pricecharting_price_eur ?? null,  // slot relabeled in the renderer
-    listings:         [],
-    ebay_sales_count: isError ? null : 0,                 // null = "we couldn't even try", 0 = "we tried, found none"
-    _engine:          'gemini',
-    _geminiError:     p.error ?? null,
-    _geminiNotes:     p.notes ?? null,
+    card_name:         p.card_name ?? null,
+    set_name:          p.set_name ?? null,
+    card_number:       p.card_number ?? null,
+    language:          p.language ?? null,
+    card_game:         p.game ?? null,
+    rarity:            p.rarity ?? null,
+    // eBay sold — populate the canonical name AND `ebay_market_price`, which
+    // is what the existing sidepanel.js renderer actually reads.
+    market_price:      ebayEur,
+    market_price_usd:  ebayEur,
+    ebay_market_price: ebayEur,
+    // TCGPlayer — same duality. Renderer reads `tcg_market_price`.
+    tcg_player_price:  tcgEur,
+    tcg_market_price:  tcgEur,
+    // PriceCharting — placed in the Cardmarket slot; renderer relabels it and
+    // unhides the slot when _engine === 'gemini'.
+    cardmarket_price:  pcEur,
+    pricecharting_price: pcEur,
+    listings:          [],
+    ebay_sales_count:  isError ? null : 0,
+    _engine:           'gemini',
+    _geminiError:      p.error ?? null,
+    _geminiNotes:      p.notes ?? null,
   };
 }
 
