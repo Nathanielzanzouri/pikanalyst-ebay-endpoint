@@ -2297,7 +2297,11 @@ app.post('/scan/gemini', async (req, res) => {
   // instead of crashing the Node process (Express 4 does not auto-catch async
   // errors). Crashing the worker is what was returning 502 to the extension.
   try {
-  const { imageBase64, askingPrice, streamCurrency, token } = req.body || {};
+  // Extension's scan dispatcher sends the unified-scan body shape; we read the
+  // image + asking price + the user's language toggle (for the scan_log row;
+  // Gemini's own claimed language is unreliable for the schema's constraint).
+  const { imageBase64, fullFrameBase64, askingPrice, sellerPrice, streamCurrency, streamTitle, language, token } = req.body || {};
+  const ask = askingPrice ?? sellerPrice ?? null; // extension uses sellerPrice
 
   if (!token)       { geminiLastError = 'missing_token at ' + geminiLastHit;       return res.status(401).json({ error: 'missing_token' }); }
   if (!imageBase64) { geminiLastError = 'missing_image at ' + geminiLastHit;       return res.status(400).json({ error: 'missing_image' }); }
@@ -2392,8 +2396,8 @@ app.post('/scan/gemini', async (req, res) => {
   // --- Map to CARD_RESULT and compute verdict ---
   const result = mapToCardResult(parsed);
   const mp = result.market_price;
-  const verdict = mp && askingPrice
-    ? (askingPrice / mp < 0.90 ? 'DEAL' : askingPrice / mp > 1.10 ? 'OVER' : 'FAIR')
+  const verdict = mp && ask
+    ? (ask / mp < 0.90 ? 'DEAL' : ask / mp > 1.10 ? 'OVER' : 'FAIR')
     : 'NO_DATA';
 
   console.log(
@@ -2405,35 +2409,44 @@ app.post('/scan/gemini', async (req, res) => {
   );
 
   let logId = null;
+  let logScanError = null;
   try {
     logId = await logScan({
       userEmail: user.email, userName: user.name,
+      domTitle: streamTitle ?? null,                       // seller's DOM listing title
+      imageBase64: null,                                   // not stored for Gemini path (image is consumed inline)
+      croppedImageBase64: null,
       route: 'gemini',
       productName: result.card_name,
       lensProductName: result.card_name,
+      ebayQuery: null,
       resultType: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
       marketPrice: mp,
-      askingPrice: askingPrice ?? null,
+      askingPrice: ask,
       verdict,
+      sourcesCount: 0,
       ebaySalesCount: 0,
       lensMatches: [JSON.stringify(parsed).slice(0, 800)],
       lensSelected: result.card_name,
-      langToggle: result.language,
+      langToggle: language || 'WORLD',                     // user's toggle, NOT Gemini's claimed language
     });
   } catch (e) {
     console.error('[Lakkot/Gemini] logScan threw:', e.message);
+    logScanError = e.message;
     // continue — we still want to return the result to the user
   }
 
   return res.json({
     type: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
     ...result,
-    asking_price: askingPrice ?? null,
+    asking_price: ask,
     stream_currency: streamCurrency || 'EUR',
     verdict,
     quota,
     scanLogId: logId,
     _geminiDiagnostic: apiDiagnostic, // temp: helps diagnose API failures from the response itself
+    _logScanError: logScanError,      // temp: surface the logScan failure reason
+    _geminiRaw: JSON.stringify(parsed).slice(0, 800), // temp: see Gemini's actual parsed output
   });
   } catch (err) {
     console.error('[Lakkot/Gemini] UNCAUGHT in handler:', err && err.stack ? err.stack : err);
