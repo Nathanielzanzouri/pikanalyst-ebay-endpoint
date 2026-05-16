@@ -19,10 +19,11 @@ const app = express();
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
   res.json({
-    build: 'sneaker-pipeline-v4+gemini',
+    build: 'sneaker-pipeline-v4+gemini-2.5-flash',
     sneakerIdLoaded: typeof buildIdentity === 'function',
     geminiLoaded: typeof buildGeminiRequest === 'function',
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -2264,12 +2265,17 @@ app.post('/scan/gemini', async (req, res) => {
     return res.json({ type: 'LIMIT_REACHED', quota });
   }
 
-  // --- Call Gemini 3 Flash ---
+  // --- Call Gemini Flash ---
   // Auth via header (not URL query) so the key never appears in any URL log.
   // 25s timeout: Gemini Flash with grounded search can be slow; without a
   // timeout the request handler would hang indefinitely if Google stalls.
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent';
+  // Model: 2.5-flash is the stable Flash model with grounded search support.
+  // Override at deploy time with GEMINI_MODEL for testing newer previews
+  // (e.g. gemini-3-flash-preview-MM-YYYY when available).
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   let parsed;
+  let apiDiagnostic = null; // temp: surface API failures in the response for debugging
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -2283,17 +2289,21 @@ app.post('/scan/gemini', async (req, res) => {
     if (!r.ok) {
       const text = await r.text().catch(() => '');
       console.error('[Lakkot/Gemini] API error', r.status, text.slice(0, 400));
+      apiDiagnostic = { status: r.status, body: text.slice(0, 400), model };
       parsed = { error: 'api_error' };
     } else {
       const data = await r.json();
       const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       parsed = parseGeminiResponse(rawText);
+      if (!rawText) apiDiagnostic = { status: 200, body: '(empty text part)', model, raw: JSON.stringify(data).slice(0, 400) };
     }
   } catch (err) {
     if (err && err.name === 'AbortError') {
       console.error('[Lakkot/Gemini] timeout after 25s');
+      apiDiagnostic = { status: 0, body: 'timeout after 25s', model };
     } else {
       console.error('[Lakkot/Gemini] fetch failed:', err.message);
+      apiDiagnostic = { status: 0, body: 'fetch failed: ' + err.message, model };
     }
     parsed = { error: 'api_error' };
   }
@@ -2336,6 +2346,7 @@ app.post('/scan/gemini', async (req, res) => {
     verdict,
     quota,
     scanLogId: logId,
+    _geminiDiagnostic: apiDiagnostic, // temp: helps diagnose API failures from the response itself
   });
 });
 
