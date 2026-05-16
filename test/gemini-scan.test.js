@@ -42,3 +42,43 @@ test('buildGeminiRequest: throws when imageBase64 is missing', () => {
   assert.throws(() => buildGeminiRequest(null), /imageBase64 is required/);
   assert.throws(() => buildGeminiRequest(''),   /imageBase64 is required/);
 });
+
+const { parseGeminiResponse } = require('../gemini-scan');
+
+test('parseGeminiResponse: parses clean JSON', () => {
+  const raw = '{"game":"Pokemon","card_name":"Charizard","ebay_sold_avg_eur":120}';
+  assert.deepStrictEqual(parseGeminiResponse(raw),
+    { game: 'Pokemon', card_name: 'Charizard', ebay_sold_avg_eur: 120 });
+});
+
+test('parseGeminiResponse: strips ```json markdown fences', () => {
+  const raw = '```json\n{"card_name":"Pikachu","ebay_sold_avg_eur":15}\n```';
+  const out = parseGeminiResponse(raw);
+  assert.strictEqual(out.card_name, 'Pikachu');
+  assert.strictEqual(out.ebay_sold_avg_eur, 15);
+});
+
+test('parseGeminiResponse: strips ``` fences without language tag', () => {
+  const raw = '```\n{"card_name":"Mewtwo"}\n```';
+  assert.strictEqual(parseGeminiResponse(raw).card_name, 'Mewtwo');
+});
+
+test('parseGeminiResponse: extracts first JSON object when surrounded by prose', () => {
+  const raw = 'Here is the result:\n{"card_name":"Snorlax","ebay_sold_avg_eur":40}\nHope this helps.';
+  assert.strictEqual(parseGeminiResponse(raw).card_name, 'Snorlax');
+});
+
+test('parseGeminiResponse: returns parse_failed on invalid JSON', () => {
+  const out = parseGeminiResponse('not json at all');
+  assert.strictEqual(out.error, 'parse_failed');
+});
+
+test('parseGeminiResponse: handles null/empty input', () => {
+  assert.strictEqual(parseGeminiResponse('').error,   'parse_failed');
+  assert.strictEqual(parseGeminiResponse(null).error, 'parse_failed');
+});
+
+test('parseGeminiResponse: passes through {error:"unidentified"}', () => {
+  assert.deepStrictEqual(parseGeminiResponse('{"error":"unidentified"}'),
+    { error: 'unidentified' });
+});

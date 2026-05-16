@@ -61,4 +61,24 @@ function buildGeminiRequest(imageBase64, mimeType) {
   };
 }
 
-module.exports = { buildGeminiPrompt, buildGeminiRequest };
+// Parse Gemini's text reply into a JS object. Tolerates markdown code fences
+// and prose surrounding the JSON (some grounded-search responses wrap the
+// JSON in explanatory text). Returns { error: 'parse_failed' } on failure.
+function parseGeminiResponse(rawText) {
+  if (!rawText) return { error: 'parse_failed' };
+  let s = String(rawText).trim()
+    .replace(/^```(?:json)?\s*/i, '')   // strip opening ```json or ```
+    .replace(/\s*```$/, '')             // strip closing ```
+    .trim();
+  // Try direct parse first
+  try { return JSON.parse(s); } catch (_) { /* fall through */ }
+  // Fall back: extract the first balanced { ... } block
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(s.slice(start, end + 1)); } catch (_) { /* fall through */ }
+  }
+  return { error: 'parse_failed' };
+}
+
+module.exports = { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse };
