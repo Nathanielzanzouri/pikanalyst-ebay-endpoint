@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { buildGeminiPrompt, buildGeminiRequest } = require('../gemini-scan');
+const { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse } = require('../gemini-scan');
 
 test('buildGeminiPrompt: mentions all supported TCGs and the JSON contract', () => {
   const p = buildGeminiPrompt();
@@ -43,8 +43,6 @@ test('buildGeminiRequest: throws when imageBase64 is missing', () => {
   assert.throws(() => buildGeminiRequest(''),   /imageBase64 is required/);
 });
 
-const { parseGeminiResponse } = require('../gemini-scan');
-
 test('parseGeminiResponse: parses clean JSON', () => {
   const raw = '{"game":"Pokemon","card_name":"Charizard","ebay_sold_avg_eur":120}';
   assert.deepStrictEqual(parseGeminiResponse(raw),
@@ -65,7 +63,7 @@ test('parseGeminiResponse: strips ``` fences without language tag', () => {
 
 test('parseGeminiResponse: extracts first JSON object when surrounded by prose', () => {
   const raw = 'Here is the result:\n{"card_name":"Snorlax","ebay_sold_avg_eur":40}\nHope this helps.';
-  assert.strictEqual(parseGeminiResponse(raw).card_name, 'Snorlax');
+  assert.deepStrictEqual(parseGeminiResponse(raw), { card_name: 'Snorlax', ebay_sold_avg_eur: 40 });
 });
 
 test('parseGeminiResponse: returns parse_failed on invalid JSON', () => {
@@ -73,9 +71,10 @@ test('parseGeminiResponse: returns parse_failed on invalid JSON', () => {
   assert.strictEqual(out.error, 'parse_failed');
 });
 
-test('parseGeminiResponse: handles null/empty input', () => {
-  assert.strictEqual(parseGeminiResponse('').error,   'parse_failed');
-  assert.strictEqual(parseGeminiResponse(null).error, 'parse_failed');
+test('parseGeminiResponse: handles null/undefined/empty input', () => {
+  assert.strictEqual(parseGeminiResponse('').error,        'parse_failed');
+  assert.strictEqual(parseGeminiResponse(null).error,      'parse_failed');
+  assert.strictEqual(parseGeminiResponse(undefined).error, 'parse_failed');
 });
 
 test('parseGeminiResponse: passes through {error:"unidentified"}', () => {

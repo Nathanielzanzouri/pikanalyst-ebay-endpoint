@@ -66,17 +66,20 @@ function buildGeminiRequest(imageBase64, mimeType) {
 // JSON in explanatory text). Returns { error: 'parse_failed' } on failure.
 function parseGeminiResponse(rawText) {
   if (!rawText) return { error: 'parse_failed' };
-  let s = String(rawText).trim()
+  const cleaned = String(rawText).trim()
     .replace(/^```(?:json)?\s*/i, '')   // strip opening ```json or ```
     .replace(/\s*```$/, '')             // strip closing ```
     .trim();
   // Try direct parse first
-  try { return JSON.parse(s); } catch (_) { /* fall through */ }
-  // Fall back: extract the first balanced { ... } block
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
+  try { return JSON.parse(cleaned); } catch (_) { /* fall through */ }
+  // Fall back: extract from the first '{' to the last '}'. Known limitation:
+  // a bare '}' in trailing prose after the JSON block will mis-bound the slice
+  // and the parse will fail (the function then returns parse_failed, never a
+  // wrong object) — acceptable for our use case.
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
   if (start >= 0 && end > start) {
-    try { return JSON.parse(s.slice(start, end + 1)); } catch (_) { /* fall through */ }
+    try { return JSON.parse(cleaned.slice(start, end + 1)); } catch (_) { /* fall through */ }
   }
   return { error: 'parse_failed' };
 }
