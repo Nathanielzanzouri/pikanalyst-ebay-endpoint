@@ -11,6 +11,7 @@ const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
+const { buildGeminiRequest, parseGeminiResponse, mapToCardResult } = require('./gemini-scan');
 
 const app = express();
 
@@ -18,8 +19,10 @@ const app = express();
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
   res.json({
-    build: 'sneaker-pipeline-v4',
+    build: 'sneaker-pipeline-v4+gemini',
     sneakerIdLoaded: typeof buildIdentity === 'function',
+    geminiLoaded: typeof buildGeminiRequest === 'function',
+    geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -2223,6 +2226,106 @@ app.post('/scan/feedback', async (req, res) => {
     console.error('[Lakkot] feedback error:', err.message);
     return res.status(500).json({ error: 'feedback_failed' });
   }
+});
+
+// ─── /scan/gemini — experimental Gemini 3 Flash card path ────────────────────
+// Takes the image, calls Gemini with grounded web search, maps the strict-JSON
+// response into the existing CARD_RESULT shape so the current renderer handles
+// it unchanged. No fallback to the standard pipeline — failures are shown honestly.
+app.post('/scan/gemini', async (req, res) => {
+  const { imageBase64, askingPrice, streamCurrency, token } = req.body || {};
+
+  if (!token) return res.status(401).json({ error: 'missing_token' });
+  if (!imageBase64) return res.status(400).json({ error: 'missing_image' });
+  if (!process.env.GEMINI_API_KEY) {
+    console.error('[Lakkot/Gemini] GEMINI_API_KEY not set');
+    return res.status(500).json({ error: 'gemini_not_configured' });
+  }
+
+  // --- Quota: same shape as the unified scan path ---
+  const { data: user, error: userErr } = await supabase
+    .from('users')
+    .select('id, email, name, plan, scan_count, scan_reset_at, scan_limit_override')
+    .eq('token', token)
+    .single();
+  if (userErr || !user) return res.status(401).json({ error: 'invalid_token' });
+
+  const month = currentMonth();
+  if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
+    await supabase.from('users').update({ scan_count: 1, scan_reset_at: month }).eq('id', user.id);
+    user.scan_count = 1;
+  } else {
+    await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
+    user.scan_count += 1;
+  }
+  const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
+  const quota = { count: user.scan_count, remaining: Math.max(0, limit - user.scan_count), limit };
+  if (user.scan_count > limit) {
+    return res.json({ type: 'LIMIT_REACHED', quota });
+  }
+
+  // --- Call Gemini 3 Flash ---
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  let parsed;
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildGeminiRequest(imageBase64, 'image/jpeg')),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      console.error('[Lakkot/Gemini] API error', r.status, text.slice(0, 400));
+      parsed = { error: 'api_error' };
+    } else {
+      const data = await r.json();
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      parsed = parseGeminiResponse(rawText);
+    }
+  } catch (err) {
+    console.error('[Lakkot/Gemini] fetch failed:', err.message);
+    parsed = { error: 'api_error' };
+  }
+
+  // --- Map to CARD_RESULT and compute verdict ---
+  const result = mapToCardResult(parsed);
+  const mp = result.market_price;
+  const verdict = mp && askingPrice
+    ? (askingPrice / mp < 0.90 ? 'DEAL' : askingPrice / mp > 1.10 ? 'OVER' : 'FAIR')
+    : 'NO_DATA';
+
+  console.log(
+    '[Lakkot/Gemini]',
+    result.card_name || '(unidentified)',
+    '| game:', result.card_game,
+    '| eBay:', result.market_price, 'TCG:', result.tcg_player_price, 'PC:', result.cardmarket_price,
+    '| verdict:', verdict,
+  );
+
+  const logId = await logScan({
+    userEmail: user.email, userName: user.name,
+    route: 'gemini',
+    productName: result.card_name,
+    lensProductName: result.card_name,
+    resultType: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
+    marketPrice: mp,
+    askingPrice: askingPrice ?? null,
+    verdict,
+    ebaySalesCount: 0,
+    lensMatches: [JSON.stringify(parsed).slice(0, 800)],
+    lensSelected: result.card_name,
+    langToggle: result.language,
+  });
+
+  return res.json({
+    type: result.card_name ? 'CARD_RESULT' : 'NO_DATA',
+    ...result,
+    asking_price: askingPrice ?? null,
+    stream_currency: streamCurrency || 'EUR',
+    verdict,
+    quota,
+    scanLogId: logId,
+  });
 });
 
 app.post('/scan', async (req, res) => {
