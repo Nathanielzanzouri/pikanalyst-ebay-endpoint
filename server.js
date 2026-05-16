@@ -15,6 +15,47 @@ const { buildGeminiRequest, parseGeminiResponse, mapToCardResult } = require('./
 
 const app = express();
 
+// ─── Gemini diagnostic endpoints (temp, no auth) ─────────────────────────────
+// /diag/gemini-models — lists models the configured key can access.
+// /diag/gemini-ping   — sends a 1-line text prompt to confirm key + model work
+//                        end to end without involving images or grounded search.
+app.get('/diag/gemini-models', async (req, res) => {
+  if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'no_key' });
+  try {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await r.json().catch(() => ({ raw: 'not-json' }));
+    const flash = (data.models || []).filter((m) => /flash/i.test(m.name || ''));
+    return res.json({ status: r.status, total: (data.models || []).length, flashModels: flash.map((m) => ({ name: m.name, methods: m.supportedGenerationMethods })) });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/diag/gemini-ping', async (req, res) => {
+  if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'no_key' });
+  const model = req.query.model || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const grounded = req.query.grounded === '1';
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: 'Reply with the single word OK and nothing else.' }] }],
+  };
+  if (grounded) body.tools = [{ google_search: {} }];
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const text = await r.text();
+    return res.json({ status: r.status, model, grounded, body: text.slice(0, 800) });
+  } catch (err) {
+    return res.status(500).json({ error: err.message, model, grounded });
+  }
+});
+
 // Version probe — returns true only when sneaker-id is loaded, i.e. this build
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
