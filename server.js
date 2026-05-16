@@ -90,7 +90,13 @@ const ALLOWED_ORIGINS = [
 ];
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (!origin || ALLOWED_ORIGINS.includes(origin) || /^https:\/\/[a-z0-9-]+\.lovableproject\.com$/.test(origin)) {
+  if (
+    !origin ||
+    ALLOWED_ORIGINS.includes(origin) ||
+    /^https:\/\/[a-z0-9-]+\.lovableproject\.com$/.test(origin) ||
+    /^chrome-extension:\/\//.test(origin) ||
+    /^moz-extension:\/\//.test(origin)
+  ) {
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
