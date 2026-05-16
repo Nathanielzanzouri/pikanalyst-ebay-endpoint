@@ -23,6 +23,68 @@ let geminiLastError = null;
 // scan_log write failures without Render log access. Surfaced via /version.
 let lastLogScanError = null;
 
+// Module-scope copy of the scan-logging helper so endpoints OUTSIDE the
+// `app.post('/scan', ...)` handler can write to scan_logs. The nested copy
+// inside /scan stays untouched and shadows this one in its own scope. Body
+// is identical so /scan and /scan/gemini behave consistently.
+async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle }) {
+  try {
+    let imageUrl = null;
+    if (imageBase64) {
+      const buf = Buffer.from(imageBase64, 'base64');
+      const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.jpg`;
+      const { data: uploadData, error: uploadErr } = await supabase.storage
+        .from('scan-images').upload(fileName, buf, { contentType: 'image/jpeg', upsert: false });
+      if (!uploadErr && uploadData) {
+        const { data: urlData } = supabase.storage.from('scan-images').getPublicUrl(fileName);
+        imageUrl = urlData?.publicUrl ?? null;
+      }
+    }
+    let croppedImageUrl = null;
+    if (croppedImageBase64) {
+      const cropBuf = Buffer.from(croppedImageBase64, 'base64');
+      const cropFileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-crop.jpg`;
+      const { data: cropUpload, error: cropErr } = await supabase.storage
+        .from('scan-images').upload(cropFileName, cropBuf, { contentType: 'image/jpeg', upsert: false });
+      if (!cropErr && cropUpload) {
+        const { data: cropUrlData } = supabase.storage.from('scan-images').getPublicUrl(cropFileName);
+        croppedImageUrl = cropUrlData?.publicUrl ?? null;
+      }
+    }
+    const { data: logData, error: insertErr } = await supabase.from('scan_logs').insert({
+      user_email: userEmail ?? null,
+      user_name: userName ?? null,
+      platform: platform ?? null,
+      dom_title: domTitle ?? null,
+      image_url: imageUrl,
+      cropped_image_url: croppedImageUrl,
+      route: route ?? null,
+      product_name: productName ?? null,
+      lens_product_name: lensProductName ?? null,
+      ebay_query: ebayQuery ?? null,
+      result_type: resultType ?? null,
+      market_price: marketPrice ?? null,
+      asking_price: askingPrice ?? null,
+      verdict: verdict ?? null,
+      sources_count: sourcesCount ?? 0,
+      ebay_sales_count: ebaySalesCount ?? 0,
+      lens_matches: lensMatches ?? null,
+      lens_selected: lensSelected ?? null,
+      ebay_results: ebayResults ?? null,
+      lang_toggle: langToggle ?? null,
+    }).select('id').single();
+    if (insertErr) {
+      console.warn('[Lakkot] (global logScan) insert error:', insertErr.message, '| details:', insertErr.details || '');
+      lastLogScanError = (route || '?') + ' @ ' + new Date().toISOString() + ' insert: ' + insertErr.message + (insertErr.details ? ' | ' + insertErr.details : '');
+    }
+    return logData?.id ?? null;
+  } catch (err) {
+    console.warn('[Lakkot] (global logScan) threw:', err.message);
+    lastLogScanError = (route || '?') + ' @ ' + new Date().toISOString() + ' threw: ' + err.message;
+    return null;
+  }
+}
+
 // ─── Gemini diagnostic endpoints (temp, no auth) ─────────────────────────────
 // /diag/gemini-models — lists models the configured key can access.
 // /diag/gemini-ping   — sends a 1-line text prompt to confirm key + model work
