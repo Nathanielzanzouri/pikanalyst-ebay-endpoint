@@ -92,12 +92,29 @@ function parseGeminiResponse(rawText) {
 // where the renderer reads it as the canonical market price; we populate it
 // with the EUR value from Gemini so the existing UI keeps working. Renaming
 // it would require touching every consumer — out of scope here.
+// Build click-through search URLs from the identified card so the user can
+// verify it's the right product (eBay sold listings, TCGPlayer search,
+// PriceCharting search). Returns null when there's not enough identity.
+function buildSearchUrls(p) {
+  const name = String(p.card_name || '').trim();
+  if (!name) return { ebay_url: null, tcg_url: null, pricecharting_url: null };
+  const parts = [name, p.set_name, p.card_number].filter(Boolean).join(' ').trim();
+  const q = encodeURIComponent(parts);
+  return {
+    // eBay completed/sold listings, "Collectible Card Games" category
+    ebay_url:           `https://www.ebay.com/sch/i.html?_nkw=${q}&_sacat=183454&LH_Sold=1&LH_Complete=1`,
+    tcg_url:            `https://www.tcgplayer.com/search/all/product?q=${q}`,
+    pricecharting_url:  `https://www.pricecharting.com/search-products?q=${q}&type=prices`,
+  };
+}
+
 function mapToCardResult(parsed) {
   const p = parsed || {};
   const isError = !!p.error;
   const ebayEur = p.ebay_sold_avg_eur ?? null;
   const tcgEur  = p.tcgplayer_price_eur ?? null;
   const pcEur   = p.pricecharting_price_eur ?? null;
+  const urls = buildSearchUrls(p);
   return {
     card_name:         p.card_name ?? null,
     set_name:          p.set_name ?? null,
@@ -110,13 +127,16 @@ function mapToCardResult(parsed) {
     market_price:      ebayEur,
     market_price_usd:  ebayEur,
     ebay_market_price: ebayEur,
-    // TCGPlayer — same duality. Renderer reads `tcg_market_price`.
+    ebay_url:          urls.ebay_url,
+    // TCGPlayer — same duality. Renderer reads `tcg_market_price` + `tcg_url`.
     tcg_player_price:  tcgEur,
     tcg_market_price:  tcgEur,
+    tcg_url:           urls.tcg_url,
     // PriceCharting — placed in the Cardmarket slot; renderer relabels it and
     // unhides the slot when _engine === 'gemini'.
     cardmarket_price:  pcEur,
     pricecharting_price: pcEur,
+    pricecharting_url:   urls.pricecharting_url,
     listings:          [],
     ebay_sales_count:  isError ? null : 0,
     _engine:           'gemini',

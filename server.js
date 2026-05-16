@@ -19,6 +19,9 @@ const app = express();
 let geminiHitCount = 0;
 let geminiLastHit = null;
 let geminiLastError = null;
+// Captures the last logScan failure (any route) so we can diagnose silent
+// scan_log write failures without Render log access. Surfaced via /version.
+let lastLogScanError = null;
 
 // ─── Gemini diagnostic endpoints (temp, no auth) ─────────────────────────────
 // /diag/gemini-models — lists models the configured key can access.
@@ -117,6 +120,7 @@ app.get('/version', (req, res) => {
     geminiHitCount,
     geminiLastHit,
     geminiLastError,
+    lastLogScanError,
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -2552,7 +2556,7 @@ app.post('/scan', async (req, res) => {
         }
       }
       // Insert log
-      const { data: logData } = await supabase.from('scan_logs').insert({
+      const { data: logData, error: insertErr } = await supabase.from('scan_logs').insert({
         user_email: userEmail ?? null,
         user_name: userName ?? null,
         platform: platform ?? null,
@@ -2574,9 +2578,14 @@ app.post('/scan', async (req, res) => {
         ebay_results: ebayResults ?? null,
         lang_toggle: langToggle ?? null,
       }).select('id').single();
+      if (insertErr) {
+        console.warn('[Lakkot] scan log insert error:', insertErr.message, '| details:', insertErr.details || '');
+        lastLogScanError = (route || '?') + ' @ ' + new Date().toISOString() + ' insert: ' + insertErr.message + (insertErr.details ? ' | ' + insertErr.details : '');
+      }
       return logData?.id ?? null;
     } catch (err) {
       console.warn('[Lakkot] scan log failed:', err.message);
+      lastLogScanError = (route || '?') + ' @ ' + new Date().toISOString() + ': ' + err.message;
       return null;
     }
   }
