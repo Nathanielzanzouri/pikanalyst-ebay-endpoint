@@ -2322,16 +2322,20 @@ app.post('/scan/cardmarket', async (req, res) => {
 
 // ─── Scan history per user ───────────────────────────────────────────────────
 app.post('/scan/history', async (req, res) => {
-  const { token } = req.body;
+  const { token, route } = req.body;
   if (!token) return res.status(400).json({ error: 'missing token' });
   const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
   if (!user) return res.status(401).json({ error: 'unauthorized' });
   try {
-    const { data: scans } = await supabase
+    let q = supabase
       .from('scan_logs')
       .select('id, created_at, image_url, cropped_image_url, product_name, market_price, asking_price, sold_price, ebay_sales_count, lang_toggle, route, result_type')
       .eq('user_email', user.email)
-      .not('product_name', 'is', null)
+      .not('product_name', 'is', null);
+    // Optional route filter — used by the extension to show only Gemini scans
+    // in history when the Gemini toggle is on.
+    if (typeof route === 'string' && route.trim()) q = q.eq('route', route.trim());
+    const { data: scans } = await q
       .order('created_at', { ascending: false })
       .limit(50);
     return res.json({ history: scans ?? [] });
