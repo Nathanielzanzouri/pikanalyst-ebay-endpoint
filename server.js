@@ -22,6 +22,8 @@ let geminiLastError = null;
 // Captures the last logScan failure (any route) so we can diagnose silent
 // scan_log write failures without Render log access. Surfaced via /version.
 let lastLogScanError = null;
+// Last Gemini API error so we can tell which call type/status caused api_error.
+let lastGeminiApiError = null;
 
 // Module-scope copy of the scan-logging helper so endpoints OUTSIDE the
 // `app.post('/scan', ...)` handler can write to scan_logs. The nested copy
@@ -183,6 +185,7 @@ app.get('/version', (req, res) => {
     geminiLastHit,
     geminiLastError,
     lastLogScanError,
+    lastGeminiApiError,
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -2479,26 +2482,34 @@ app.post('/scan/gemini', async (req, res) => {
         'x-goog-api-key': process.env.GEMINI_API_KEY,
       },
       body: JSON.stringify(buildGeminiRequest(imageBase64, 'image/jpeg')),
-      signal: AbortSignal.timeout(25_000),
+      signal: AbortSignal.timeout(55_000),  // bumped from 25s — the multi-step
+                                            // grounded search (per-grade prices +
+                                            // 12-month history) genuinely takes longer
     });
     if (!r.ok) {
       const text = await r.text().catch(() => '');
       console.error('[Lakkot/Gemini] API error', r.status, text.slice(0, 400));
       apiDiagnostic = { status: r.status, body: text.slice(0, 400), model };
+      lastGeminiApiError = `HTTP ${r.status}: ${text.slice(0, 300)} @ ${new Date().toISOString()}`;
       parsed = { error: 'api_error' };
     } else {
       const data = await r.json();
       const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       parsed = parseGeminiResponse(rawText);
-      if (!rawText) apiDiagnostic = { status: 200, body: '(empty text part)', model, raw: JSON.stringify(data).slice(0, 400) };
+      if (!rawText) {
+        apiDiagnostic = { status: 200, body: '(empty text part)', model, raw: JSON.stringify(data).slice(0, 400) };
+        lastGeminiApiError = `200 empty text part. raw=${JSON.stringify(data).slice(0, 300)} @ ${new Date().toISOString()}`;
+      }
     }
   } catch (err) {
     if (err && err.name === 'AbortError') {
-      console.error('[Lakkot/Gemini] timeout after 25s');
-      apiDiagnostic = { status: 0, body: 'timeout after 25s', model };
+      console.error('[Lakkot/Gemini] timeout after 55s');
+      apiDiagnostic = { status: 0, body: 'timeout after 55s', model };
+      lastGeminiApiError = `timeout 55s @ ${new Date().toISOString()}`;
     } else {
       console.error('[Lakkot/Gemini] fetch failed:', err.message);
       apiDiagnostic = { status: 0, body: 'fetch failed: ' + err.message, model };
+      lastGeminiApiError = `fetch threw: ${err.message} @ ${new Date().toISOString()}`;
     }
     parsed = { error: 'api_error' };
   }
