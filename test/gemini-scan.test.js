@@ -12,7 +12,7 @@ test('buildGeminiPrompt: mentions all supported TCGs and the JSON contract', () 
     assert.ok(p.includes(field), `prompt missing JSON field: ${field}`);
   }
   assert.ok(/grounded\s+(web\s+)?search/i.test(p), 'prompt should require grounded search');
-  assert.ok(/do not guess prices/i.test(p),       'prompt should forbid guessing');
+  assert.ok(/not\s+prices\s+from\s+your\s+training\s+data|do not guess prices/i.test(p), 'prompt should disallow training-data prices');
 });
 
 test('buildGeminiRequest: wraps image + prompt and enables grounded search', () => {
