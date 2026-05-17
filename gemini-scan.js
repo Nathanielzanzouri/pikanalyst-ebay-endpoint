@@ -55,6 +55,16 @@ function buildGeminiPrompt() {
     '       ordered oldest -> newest. Use null array if not available. */',
     '    { "month": "YYYY-MM", "price": number }',
     '  ],',
+    '  "source_urls": {',
+    '    /* The EXACT URLs you actually visited during grounded search to get',
+    '       each price, so the user can click through and verify. Use the direct',
+    '       product page when possible (e.g. https://www.pricecharting.com/game/...',
+    '       or a specific eBay sold-listings search URL), not a generic search.',
+    '       Use null for any source you could not find. */',
+    '    "ebay":          "https://...   or null",',
+    '    "tcgplayer":     "https://...   or null",',
+    '    "pricecharting": "https://...   or null"',
+    '  },',
     '  "notes": "anything noteworthy, including sample size or source URLs"',
     '}',
     '',
@@ -109,19 +119,27 @@ function parseGeminiResponse(rawText) {
 // where the renderer reads it as the canonical market price; we populate it
 // with the EUR value from Gemini so the existing UI keeps working. Renaming
 // it would require touching every consumer — out of scope here.
-// Build click-through search URLs from the identified card so the user can
-// verify it's the right product (eBay sold listings, TCGPlayer search,
-// PriceCharting search). Returns null when there's not enough identity.
+// Click-through URLs for verification. We PREFER the exact URLs Gemini
+// actually visited during grounded search (more accurate — direct product
+// pages with the real prices). Fall back to constructed search URLs only
+// when Gemini didn't provide one for a given source.
 function buildSearchUrls(p) {
   const name = String(p.card_name || '').trim();
-  if (!name) return { ebay_url: null, tcg_url: null, pricecharting_url: null };
-  const parts = [name, p.set_name, p.card_number].filter(Boolean).join(' ').trim();
-  const q = encodeURIComponent(parts);
+  const supplied = p.source_urls || {};
+  const safe = (u) => {
+    if (!u || typeof u !== 'string') return null;
+    if (!/^https?:\/\//i.test(u)) return null; // reject relative / invalid
+    return u;
+  };
+  // Fallback search queries when Gemini didn't supply a direct URL.
+  // Keep the fallback intentionally simple — just card_name + number,
+  // dropping set fragments that often duplicate the number (e.g. "208/SM-P"
+  // combined with "SM-P Promotional cards") and confuse search engines.
+  const q = encodeURIComponent([name, p.card_number].filter(Boolean).join(' ').trim());
   return {
-    // eBay completed/sold listings, "Collectible Card Games" category
-    ebay_url:           `https://www.ebay.com/sch/i.html?_nkw=${q}&_sacat=183454&LH_Sold=1&LH_Complete=1`,
-    tcg_url:            `https://www.tcgplayer.com/search/all/product?q=${q}`,
-    pricecharting_url:  `https://www.pricecharting.com/search-products?q=${q}&type=prices`,
+    ebay_url:           safe(supplied.ebay)          || (name ? `https://www.ebay.com/sch/i.html?_nkw=${q}&_sacat=183454&LH_Sold=1&LH_Complete=1` : null),
+    tcg_url:            safe(supplied.tcgplayer)     || (name ? `https://www.tcgplayer.com/search/all/product?q=${q}` : null),
+    pricecharting_url:  safe(supplied.pricecharting) || (name ? `https://www.pricecharting.com/search-products?q=${q}&type=prices` : null),
   };
 }
 
