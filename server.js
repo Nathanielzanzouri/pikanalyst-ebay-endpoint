@@ -2384,12 +2384,26 @@ app.post('/scan/reprice', async (req, res) => {
 });
 
 app.post('/scan/feedback', async (req, res) => {
-  const { scanLogId, feedback } = req.body;
+  const { scanLogId, feedback, reason } = req.body;
   if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
     return res.status(400).json({ error: 'invalid_feedback' });
   }
   try {
-    await supabase.from('scan_logs').update({ user_feedback: feedback, feedback_at: new Date().toISOString() }).eq('id', scanLogId);
+    // Always update the core feedback fields — works regardless of whether the
+    // feedback_reason column has been added to scan_logs yet.
+    await supabase.from('scan_logs')
+      .update({ user_feedback: feedback, feedback_at: new Date().toISOString() })
+      .eq('id', scanLogId);
+    // Optionally store the reason in a separate update so a missing column
+    // doesn't fail the whole feedback save.
+    if (typeof reason === 'string' && reason.trim()) {
+      const trimmed = reason.trim().slice(0, 2000);
+      const { error: reasonErr } = await supabase.from('scan_logs')
+        .update({ feedback_reason: trimmed }).eq('id', scanLogId);
+      if (reasonErr) {
+        console.warn('[Lakkot] feedback_reason save failed (column may not exist yet):', reasonErr.message);
+      }
+    }
     return res.json({ success: true });
   } catch (err) {
     console.error('[Lakkot] feedback error:', err.message);
