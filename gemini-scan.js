@@ -450,6 +450,56 @@ function buildGoatPrompt(identity) {
   ].join('\n');
 }
 
+// ─── Grade detection (visual classifier, no grounding) ──────────────────────
+// Used by the non-Gemini Lens route's optional "grading" feature flag. Detects
+// whether the scanned card is encased in a grading slab and which company/grade.
+// Lightweight — runs on flash-lite, no thinking, no tools. ~€0.0002 per call.
+// When a grade is detected, the Lens route appends "{company} {grade}" to the
+// eBay search query so the user sees sold prices for THEIR specific grade.
+
+function buildGradeDetectionPrompt() {
+  return [
+    'Look at this trading card image.',
+    'Is the card encased in a GRADING SLAB (a hard plastic case with a label at the top)?',
+    '',
+    'Common slabs you might see:',
+    '  - PSA: red/blue/gold cert label, white center',
+    '  - BGS (Beckett): silver label, often with subgrades',
+    '  - CGC: blue label, grade prominently shown',
+    '  - SGC: black label with gold border',
+    '  - ACE: French company, dark gradient label',
+    '  - TAG: thin colored label, AI-graded',
+    '',
+    'If you see a slab AND can read the grade clearly, return both.',
+    'If uncertain about either, prefer is_graded:false — wrong info is worse than no info.',
+    '',
+    'Return STRICT JSON, no markdown:',
+    '{',
+    '  "is_graded": true | false,',
+    '  "company":   "PSA" | "BGS" | "CGC" | "SGC" | "ACE" | "TAG" | null,',
+    '  "grade":     "10" | "9.5" | "9" | "8.5" | "8" | "7" | "6" | "5" | "4" | "3" | "2" | "1" | null',
+    '}',
+  ].join('\n');
+}
+
+function buildGradeDetectionRequest(imageBase64, mimeType) {
+  if (!imageBase64) throw new TypeError('buildGradeDetectionRequest: imageBase64 is required');
+  return {
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: buildGradeDetectionPrompt() },
+        { inline_data: { mime_type: mimeType || 'image/jpeg', data: imageBase64 } },
+      ],
+    }],
+    generationConfig: {
+      // No thinking, no grounding — pure visual classification.
+      thinkingConfig: { thinkingBudget: 0 },
+      responseMimeType: 'application/json',
+    },
+  };
+}
+
 function buildTextOnlyRequest(prompt, withGrounding) {
   return {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -644,4 +694,5 @@ module.exports = {
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
   mapStockxToCardResult, mapGoatToCardResult,
   buildStockxPrompt, buildGoatPrompt,
+  buildGradeDetectionPrompt, buildGradeDetectionRequest,
 };

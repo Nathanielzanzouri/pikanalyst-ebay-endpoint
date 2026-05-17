@@ -15,6 +15,7 @@ const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
   mapStockxToCardResult, mapGoatToCardResult, buildStockxPrompt, buildGoatPrompt,
+  buildGradeDetectionRequest,
 } = require('./gemini-scan');
 
 const app = express();
@@ -376,6 +377,28 @@ const GRADING_KEYWORDS = [
 function isGradedCard(title) {
   const lower = title.toLowerCase();
   return GRADING_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+// When the "grading" feature flag is on and Gemini detected the user's card
+// is in a slab (e.g. PSA 10), we want to RETAIN graded listings that match the
+// target grade and reject everything else (raw + other grades). This function
+// returns the filter predicate to use for the title-keep decision.
+//   gradeFilter = null      → raw mode, existing behavior (reject all graded)
+//   gradeFilter = {company, grade} → graded mode, require "<company> <grade>" in title
+function makeGradedTitleFilter(gradeFilter) {
+  if (!gradeFilter || !gradeFilter.company || !gradeFilter.grade) {
+    // Raw mode: keep only non-graded listings (existing behavior)
+    return (title) => !isGradedCard(title);
+  }
+  // Graded mode: require the target grade keyword. Accept common formats:
+  //   "PSA 10" / "PSA10" / "PSA-10"  → all match
+  const target = (gradeFilter.company + ' ' + gradeFilter.grade).toLowerCase();
+  const compact = (gradeFilter.company + gradeFilter.grade).toLowerCase();
+  const hyphen  = (gradeFilter.company + '-' + gradeFilter.grade).toLowerCase();
+  return (title) => {
+    const lower = title.toLowerCase();
+    return lower.includes(target) || lower.includes(compact) || lower.includes(hyphen);
+  };
 }
 
 function isLot(title) {
@@ -1111,10 +1134,14 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
 
   if (sold.length === 0) throw new Error('Finding: 0 sold results');
 
+  // When card._gradeFilter is set (e.g. {company:'PSA', grade:'10'}), we INVERT
+  // the graded filter — keep ONLY listings whose title matches the target grade.
+  // Otherwise, existing behavior: reject all graded listings as noise.
+  const titleFilter = makeGradedTitleFilter(card._gradeFilter);
   let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0;
   const clean = sold.filter(i => {
     const t = i?.title?.[0] ?? '';
-    if (isGradedCard(t))   { gradedOut++;     return false; }
+    if (!titleFilter(t)) { gradedOut++;     return false; }
     if (isLot(t))          { lotOut++;        return false; }
     if (isBooster(t))      { boostersOut++;   return false; }
     if (isFigurine(t))     { figuresOut++;    return false; }
@@ -1122,7 +1149,7 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
     if (isSpecialEdition(t)){ specialOut++;   return false; }
     return true;
   });
-  console.log(`[Yamo] Finding sold: ${sold.length} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | clean=${clean.length}`);
+  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
 
   if (clean.length === 0) throw new Error('Finding: 0 results after graded/lot filter');
 
@@ -1261,10 +1288,12 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
     const usCount = counts['EBAY_US'] ?? 0;
     const deCount = counts['EBAY_DE'] ?? 0;
 
+    // See Finding-API equivalent for the grading-filter inversion logic.
+    const titleFilter = makeGradedTitleFilter(card._gradeFilter);
     let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
-      if (isGradedCard(t))    { gradedOut++;     return false; }
+      if (!titleFilter(t))    { gradedOut++;     return false; }
       if (isLot(t))           { lotOut++;        return false; }
       if (isBooster(t))       { boostersOut++;   return false; }
       if (isFigurine(t))      { figuresOut++;    return false; }
@@ -1419,10 +1448,16 @@ async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90)
     if ((!priceData.ebay_sales_count || priceData.ebay_sales_count === 0) && retryNumber) {
       // Try multiple retry queries in order of specificity
       const name = (item.card_name || '').trim();
+      // When _gradeFilter is set, every retry query MUST include the grade
+      // suffix too — otherwise the title-filter rejects everything (raw titles
+      // don't contain "PSA 10" so they'd all be filtered out as wrong-grade).
+      const gradeSuffix = item._gradeFilter
+        ? ' ' + item._gradeFilter.company + ' ' + item._gradeFilter.grade
+        : '';
       const retryQueries = [
-        name ? `${name} ${retryNumber}` : null,                    // "Saquedeneu 218/217"
-        name ? `${name} pokemon card` : null,                      // "Saquedeneu pokemon card"
-        `${retryNumber} pokemon card`,                              // "218/217 pokemon card" (last resort)
+        name ? `${name} ${retryNumber}${gradeSuffix}` : null,
+        name ? `${name} pokemon card${gradeSuffix}` : null,
+        `${retryNumber} pokemon card${gradeSuffix}`,
       ].filter(Boolean);
 
       for (const retryQuery of retryQueries) {
@@ -1444,7 +1479,7 @@ async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90)
   return { ...item, ...priceData, seller_asking_price: sellerPrice ?? item.seller_asking_price ?? null };
 }
 
-async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90 }) {
+async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90, gradeFilter = null }) {
   const rawTitle = streamTitle?.trim() ?? '';
   const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
 
@@ -1506,6 +1541,18 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     } else {
       item.set_name = overrideStr;
     }
+  }
+
+  // Grading feature flag: when Gemini detected a slab, append the grade to the
+  // eBay query AND attach the filter so the result-filter keeps matching titles.
+  if (gradeFilter && gradeFilter.company && gradeFilter.grade) {
+    const suffix = ' ' + gradeFilter.company + ' ' + gradeFilter.grade;
+    if (item.ebay_search && !item.ebay_search.toLowerCase().includes(suffix.trim().toLowerCase())) {
+      item.ebay_search = (item.ebay_search + suffix).trim();
+    }
+    item._gradeFilter = gradeFilter;
+    item.graded = gradeFilter; // surface in response so panel can label "vs eBay PSA 10"
+    console.log('[Lakkot/grading] handleAnalyze using gradeFilter:', gradeFilter, '| query:', item.ebay_search);
   }
 
   return handleCard(item, sellerPrice, language, dateRange);
@@ -2635,6 +2682,34 @@ async function callGeminiText(prompt, withGrounding, timeoutMs) {
   return parseGeminiResponse(rawText);
 }
 
+// Grade detection helper — used by the Lens route when the user has the
+// "grading" feature flag toggled on. Returns { is_graded, company, grade } or
+// { is_graded: false } on any error/timeout (fail-safe → treat as raw card).
+async function callGeminiGradeDetect(imageBase64) {
+  const model = process.env.GEMINI_GRADING_MODEL || 'gemini-3.1-flash-lite';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify(buildGradeDetectionRequest(imageBase64, 'image/jpeg')),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!r.ok) {
+      console.warn('[Lakkot/grading] HTTP ' + r.status);
+      return { is_graded: false };
+    }
+    const data = await r.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const parsed = parseGeminiResponse(rawText);
+    if (parsed?.error) return { is_graded: false };
+    return parsed;
+  } catch (err) {
+    console.warn('[Lakkot/grading] detection failed:', err.message);
+    return { is_graded: false };
+  }
+}
+
 async function callGeminiIdentity(imageBase64, timeoutMs) {
   // Identity model. We tried gemini-3.1-flash-lite + thinkingBudget=0 for
   // speed (~2-3s), but single-digit OCR errors on tight variants (e.g. 067 vs
@@ -3233,7 +3308,22 @@ app.post('/scan', async (req, res) => {
 
       // All scans go through Google Lens — no DOM title route
       console.log('[Lakkot] Unified: non-card or no title, running Google Lens...');
-      const lensResult = await handleGoogleLens(imageBase64);
+      // Run Lens + (optionally) Gemini grade detection in PARALLEL. Grading is
+      // gated by the extension's "grading" feature flag (params.gradingEnabled).
+      // Grade detection is a small flash-lite vision call (~€0.0002, ~1-2s).
+      const gradingEnabled = params.gradingEnabled === true && !!process.env.GEMINI_API_KEY;
+      const [lensSettled, gradeSettled] = await Promise.allSettled([
+        handleGoogleLens(imageBase64),
+        gradingEnabled ? callGeminiGradeDetect(imageBase64) : Promise.resolve({ is_graded: false }),
+      ]);
+      const lensResult = lensSettled.status === 'fulfilled' ? lensSettled.value : null;
+      const gradeResult = gradeSettled.status === 'fulfilled' ? gradeSettled.value : { is_graded: false };
+      const detectedGrade = (gradeResult && gradeResult.is_graded && gradeResult.company && gradeResult.grade)
+        ? { company: String(gradeResult.company).toUpperCase(), grade: String(gradeResult.grade) }
+        : null;
+      if (gradingEnabled) {
+        console.log('[Lakkot/grading] enabled, detection:', detectedGrade ? `${detectedGrade.company} ${detectedGrade.grade}` : 'raw');
+      }
       const productName = lensResult?.productName ?? null;
 
       // === EN toggle: vote-based Pokemon identification ===
@@ -3246,7 +3336,7 @@ app.post('/scan', async (req, res) => {
           console.log(`[Lakkot] EN vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
           // eBay sold price
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange });
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange, gradeFilter: detectedGrade });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -3298,7 +3388,7 @@ app.post('/scan', async (req, res) => {
           console.log(`[Lakkot] JP vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
           // eBay sold price — search with JP language filter
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange });
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange, gradeFilter: detectedGrade });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -3337,7 +3427,7 @@ app.post('/scan', async (req, res) => {
           console.log(`[Lakkot] FR vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
           // eBay sold price — search with FR language filter
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange });
+          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange, gradeFilter: detectedGrade });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -3392,7 +3482,7 @@ app.post('/scan', async (req, res) => {
           .replace(/\s+/g, ' ')
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
-        const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language, dateRange });
+        const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language, dateRange, gradeFilter: detectedGrade });
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
