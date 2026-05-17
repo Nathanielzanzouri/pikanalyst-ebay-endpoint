@@ -2759,7 +2759,13 @@ app.post('/scan/gemini-stream', async (req, res) => {
     ]);
 
     // --- Compute final verdict ---
-    const mp = merged.ebay_market_price ?? merged.market_price ?? null;
+    // Source priority: eBay (live marketplace) → PriceCharting (catalog).
+    // The fallback handles Japanese cards, where eBay's sold-listing data is
+    // typically too thin to average. Mirrors the client-side verdict logic
+    // so the logged verdict always matches what the user sees in the panel.
+    const mp = (merged.ebay_market_price && merged.ebay_market_price > 0 ? merged.ebay_market_price : null)
+            ?? (merged.pricecharting_price && merged.pricecharting_price > 0 ? merged.pricecharting_price : null)
+            ?? (merged.cardmarket_price && merged.cardmarket_price > 0 ? merged.cardmarket_price : null);
     const verdict = mp && ask ? (ask / mp < 0.90 ? 'DEAL' : ask / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
     // --- Log row INSERT (fast: ~50-150ms) — must complete before `done` so
