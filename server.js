@@ -2758,27 +2758,66 @@ app.post('/scan/gemini-stream', async (req, res) => {
       runPrice('pricecharting', buildPriceChartingPrompt(identity),     mapPriceChartingToCardResult),
     ]);
 
-    // --- Compute final verdict + done event ---
+    // --- Compute final verdict ---
     const mp = merged.ebay_market_price ?? merged.market_price ?? null;
     const verdict = mp && ask ? (ask / mp < 0.90 ? 'DEAL' : ask / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
-    sse('done', { quota, verdict, asking_price: ask, stream_currency: streamCurrency || 'EUR', ms: Date.now() - t0 });
+    // --- Log row INSERT (fast: ~50-150ms) — must complete before `done` so
+    //     the client has a scanLogId to attach feedback to. Image upload
+    //     happens asynchronously below to keep this off the critical path. ---
+    let scanLogId = null;
+    try {
+      const { data: logRow, error: insertErr } = await supabase.from('scan_logs').insert({
+        user_email: user.email,
+        user_name: user.name,
+        dom_title: streamTitle ?? null,
+        image_url: null, // patched async after response (see setImmediate below)
+        route: 'gemini-stream',
+        product_name: merged.card_name,
+        lens_product_name: merged.card_name,
+        result_type: 'CARD_RESULT',
+        market_price: mp,
+        asking_price: ask,
+        verdict,
+        sources_count: 0,
+        ebay_sales_count: 0,
+        lens_matches: [JSON.stringify({ identity, merged }).slice(0, 1200)],
+        lens_selected: merged.card_name,
+        lang_toggle: language || 'WORLD',
+      }).select('id').single();
+      if (insertErr) {
+        console.warn('[Lakkot/Gemini-stream] log insert failed:', insertErr.message);
+        lastLogScanError = 'gemini-stream @ ' + new Date().toISOString() + ' insert: ' + insertErr.message;
+      }
+      scanLogId = logRow?.id ?? null;
+    } catch (e) {
+      console.warn('[Lakkot/Gemini-stream] log insert threw:', e.message);
+      lastLogScanError = 'gemini-stream @ ' + new Date().toISOString() + ' threw: ' + e.message;
+    }
+
+    sse('done', { quota, verdict, asking_price: ask, stream_currency: streamCurrency || 'EUR', scanLogId, ms: Date.now() - t0 });
     res.end();
 
-    // --- Async log (fire and forget, off critical path) ---
-    setImmediate(() => {
-      logScan({
-        userEmail: user.email, userName: user.name,
-        domTitle: streamTitle ?? null, imageBase64,
-        route: 'gemini-stream', productName: merged.card_name,
-        lensProductName: merged.card_name,
-        resultType: 'CARD_RESULT',
-        marketPrice: mp, askingPrice: ask, verdict,
-        lensMatches: [JSON.stringify({ identity, merged }).slice(0, 1200)],
-        lensSelected: merged.card_name,
-        langToggle: language || 'WORLD',
-      }).catch((err) => console.warn('[Lakkot/Gemini-stream] async log fail:', err.message));
-    });
+    // --- Async image upload — patches the row with image_url after response.
+    //     Keeps the slow Supabase Storage write off the user-visible path. ---
+    if (scanLogId && imageBase64) {
+      setImmediate(async () => {
+        try {
+          const buf = Buffer.from(imageBase64, 'base64');
+          const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.jpg`;
+          const { data: up, error: upErr } = await supabase.storage
+            .from('scan-images').upload(fileName, buf, { contentType: 'image/jpeg', upsert: false });
+          if (upErr) { console.warn('[Lakkot/Gemini-stream] image upload fail:', upErr.message); return; }
+          const { data: urlData } = supabase.storage.from('scan-images').getPublicUrl(fileName);
+          const publicUrl = urlData?.publicUrl ?? null;
+          if (publicUrl) {
+            await supabase.from('scan_logs').update({ image_url: publicUrl }).eq('id', scanLogId);
+          }
+        } catch (err) {
+          console.warn('[Lakkot/Gemini-stream] image patch threw:', err.message);
+        }
+      });
+    }
   } catch (err) {
     console.error('[Lakkot/Gemini-stream] UNCAUGHT:', err && err.stack || err);
     geminiLastError = 'stream_uncaught: ' + (err && err.message);
