@@ -2761,23 +2761,46 @@ app.post('/scan/gemini-stream', async (req, res) => {
     const runEbayApi = async () => {
       const tStart = Date.now();
       try {
-        // Build a `card` shape compatible with the non-Gemini route helpers.
-        // English/romanized names always — eBay search doesn't index Japanese.
-        const card = {
+        // Build an `item` shape compatible with handleCard (the non-Gemini
+        // helper). handleCard already has the proven retry cascade: if the
+        // strict query returns 0 sold listings, it falls back to broader
+        // queries (name+number, name+pokemon-card, number+pokemon-card) and
+        // keeps the best one. It also caches by card key.
+        const item = {
+          item_type:   'card',
           card_name:   identity.card_name_en || identity.card_name || '',
           card_number: identity.card_number || '',
           set_name:    identity.set_name_en || identity.set_name || '',
           condition:   'Near Mint',
+          condition_score: 85,
+          confidence:  100,
+          ebay_search: undefined, // let buildSearchQuery construct it from name+number
         };
         const cardLang = identity.language || language || 'WORLD';
-        const ebay = await fetchEbayAny(card, cardLang, 90);
+        let result = await handleCard(item, ask, cardLang, 90);
+
+        // JP-specific fallback: if still 0 sales after handleCard's retries,
+        // try the same query with " japanese" appended. JP listings on eBay
+        // are usually tagged that way in the title; including the word filters
+        // out the English-name collisions and surfaces the few JP sellers.
+        if ((!result.ebay_sales_count || result.ebay_sales_count === 0) && cardLang === 'JP') {
+          const jpItem = { ...item, ebay_search: `${item.card_name} ${item.card_number} japanese`.trim() };
+          try {
+            const jpResult = await handleCard(jpItem, ask, cardLang, 90);
+            if (jpResult.ebay_sales_count > 0) {
+              console.log('[Lakkot/Gemini-stream] ebay JP-fallback hit:', jpResult.ebay_sales_count, 'sales');
+              result = jpResult;
+            }
+          } catch (_) {}
+        }
+
         const mapped = {
-          ebay_market_price: ebay?.market_price_usd ?? null,
-          market_price:      ebay?.market_price_usd ?? null,
-          market_price_usd:  ebay?.market_price_usd ?? null,
-          ebay_url:          ebay?.ebay_url ?? null,
-          ebay_sales_count:  ebay?.ebay_sales_count ?? 0,
-          listings:          ebay?.listings ?? [],
+          ebay_market_price: result.market_price_usd ?? null,
+          market_price:      result.market_price_usd ?? null,
+          market_price_usd:  result.market_price_usd ?? null,
+          ebay_url:          result.ebay_url ?? null,
+          ebay_sales_count:  result.ebay_sales_count ?? 0,
+          listings:          result.listings ?? [],
         };
         Object.assign(merged, mapped);
         const elapsed = Date.now() - tStart;
