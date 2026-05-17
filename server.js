@@ -2958,12 +2958,46 @@ app.post('/scan/gemini-stream', async (req, res) => {
       }
     };
 
+    // ─── Compare-on-the-web listings (sneakers/other only) ──────────────────
+    // Same data SerpAPI google_shopping returns for the non-Gemini Lens path:
+    // 5-8 retailer cards (image/title/price/source-icon) below the headline
+    // price slots. Reuses the existing renderer in finalizeWebResult.
+    // Skipped for cards — eBay/TCG/PC already cover the card marketplace.
+    const runShoppingListings = async () => {
+      const tStart = Date.now();
+      try {
+        const query = mappedIdentity.item_type === 'sneaker'
+          ? buildSneakerQuery(identity)
+          : (identity.card_name_en || identity.card_name || '');
+        if (!query || !process.env.SERPAPI_KEY) {
+          sse('listings', { cards: [], medianPrice: null, totalFound: 0 });
+          return;
+        }
+        const result = await handleGoogleShopping(query);
+        const elapsed = Date.now() - tStart;
+        sse('listings', {
+          cards: result.cards || [],
+          medianPrice: result.medianPrice ?? null,
+          totalFound: result.totalFound ?? 0,
+          _ms: elapsed,
+        });
+        // Stash on merged so the final scan_log + verdict have access
+        merged.shopping_cards = result.cards || [];
+        merged.shopping_median = result.medianPrice ?? null;
+        console.log('[Lakkot/Gemini-stream] shopping at +' + (Date.now() - t0) + 'ms (' + elapsed + 'ms) — found:', (result.cards || []).length, '| median:', result.medianPrice);
+      } catch (e) {
+        console.error('[Lakkot/Gemini-stream] shopping failed:', e.message);
+        sse('listings', { error: e.message });
+      }
+    };
+
     // ─── Route by item_type ─────────────────────────────────────────────────
     if (mappedIdentity.item_type === 'sneaker') {
       await Promise.allSettled([
         runEbayApiSneaker(),
         runStockx(),
         runGoat(),
+        runShoppingListings(),
       ]);
     } else {
       // Default: card. Three parallel calls: real eBay API + TCG + PC grounded.
