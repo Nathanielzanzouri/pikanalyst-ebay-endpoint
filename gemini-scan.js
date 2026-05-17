@@ -193,11 +193,22 @@ function buildIdentityPrompt() {
     '    (SR / SAR / HR / Rainbow).',
     '  - NEVER default to the higher-rarity (more expensive) variant.',
     '',
+    '',
+    'ENGLISH NAMES — REQUIRED for Japanese cards:',
+    'eBay, TCGPlayer, and PriceCharting are Western sites that index cards by',
+    'English/romanized name. Japanese script (フシギダネ, プラズマゲイル) returns',
+    'zero results on those sites — every price lookup will fail.',
+    'For non-English cards, ALSO return the standard English name of the',
+    'Pokemon/character (e.g. フシギダネ → "Bulbasaur") and the English set name',
+    '(e.g. プラズマゲイル → "Plasma Gale"). For English cards, just copy them.',
+    '',
     'Return STRICT JSON, no markdown, no prose:',
     '{',
     '  "game": "Pokemon" | "OnePiece" | "YuGiOh" | "MTG" | "Other",',
-    '  "card_name": "...",',
-    '  "set_name": "...",',
+    '  "card_name": "...",            /* as printed on the card (may be JP) */',
+    '  "card_name_en": "...",         /* English/romanized — for price lookups */',
+    '  "set_name": "...",             /* as printed (may be JP) */',
+    '  "set_name_en": "...",          /* English set name (e.g. "Plasma Gale") */',
     '  "card_number": "...",',
     '  "language": "EN" | "FR" | "JP" | etc.,',
     '  "rarity": "..."',
@@ -235,7 +246,12 @@ function buildIdentityRequest(imageBase64, mimeType) {
 // ONE focused grounded search. Smaller scope = faster completion.
 function _identityLine(identity) {
   const i = identity || {};
-  return [i.card_name, i.set_name && '(' + i.set_name + ')', i.card_number, i.language && '[' + i.language + ']', i.rarity].filter(Boolean).join(' ');
+  // Always prefer the English/romanized name for price lookups — eBay,
+  // TCGPlayer, and PriceCharting don't index Japanese script. Fall back to
+  // card_name when the model didn't provide an EN variant (older responses).
+  const name = i.card_name_en || i.card_name;
+  const setName = i.set_name_en || i.set_name;
+  return [name, setName && '(' + setName + ')', i.card_number, i.language && '[' + i.language + ']', i.rarity].filter(Boolean).join(' ');
 }
 
 function buildEbayPricePrompt(identity) {
@@ -333,15 +349,22 @@ function mapPriceChartingToCardResult(p) {
 }
 function mapIdentityToCardResult(p) {
   const i = p || {};
+  // For display we prefer the English/romanized name (clearer for the user
+  // and matches what eBay/TCG/PC lookups used). The as-printed JP name is
+  // kept under card_name_native so the panel can show it as a secondary line.
+  const enName = i.card_name_en || i.card_name || null;
+  const enSet = i.set_name_en || i.set_name || null;
   return {
-    card_name:   i.card_name ?? null,
-    set_name:    i.set_name ?? null,
-    card_number: i.card_number ?? null,
-    language:    i.language ?? null,
-    card_game:   i.game ?? null,
-    rarity:      i.rarity ?? null,
-    _engine:     'gemini',
-    _geminiError: i.error ?? null,
+    card_name:        enName,
+    card_name_native: i.card_name && i.card_name_en && i.card_name !== i.card_name_en ? i.card_name : null,
+    set_name:         enSet,
+    set_name_native:  i.set_name && i.set_name_en && i.set_name !== i.set_name_en ? i.set_name : null,
+    card_number:      i.card_number ?? null,
+    language:         i.language ?? null,
+    card_game:        i.game ?? null,
+    rarity:           i.rarity ?? null,
+    _engine:          'gemini',
+    _geminiError:     i.error ?? null,
   };
 }
 
