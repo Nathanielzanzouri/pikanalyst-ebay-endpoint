@@ -254,23 +254,44 @@ function _identityLine(identity) {
   return [name, setName && '(' + setName + ')', i.card_number, i.language && '[' + i.language + ']', i.rarity].filter(Boolean).join(' ');
 }
 
+// Shared pricing policy — applied to every per-source prompt so each call is
+// as permissive as the original omnibus. The split prompts I wrote earlier
+// returned null too eagerly (e.g. "only when no comparable sales") which
+// produced scan after scan with NO_DATA even when the source pages existed.
+// Mirrors the omnibus PRICING POLICY language verbatim.
+const _PRICING_POLICY = [
+  'PRICING POLICY — important: do not be over-conservative. For live auctions a',
+  'best-effort estimate is more useful to the user than null.',
+  '  - If exact-match listings exist, use their average.   confidence = "high".',
+  '  - If only close variants exist (different language / similar set / similar',
+  '    rarity), pick the most relevant comparable, note it in `notes`, and report',
+  '    the estimate with confidence = "medium".',
+  '  - If you have only loosely-related data, give your best educated estimate',
+  '    based on the comparable Pokemon-card market and confidence = "low".',
+  '  - Only return null when you genuinely have NOTHING to base an estimate on.',
+  'Always include a confidence value.',
+].join('\n');
+
 function buildEbayPricePrompt(identity) {
   return [
-    'You are looking up the eBay sold-listings average price for this exact card:',
+    'You are looking up the eBay sold-listings price for this exact card:',
     '  ' + _identityLine(identity),
     '',
     'Use grounded web search. Look at eBay completed/sold listings over the last 90',
     'days, single-card listings only, non-graded, no lots. Compute an average.',
     '',
-    'If you can only find loosely-comparable sales, return a best-effort estimate',
-    'with confidence "low". Only return null if no comparable sales found.',
+    _PRICING_POLICY,
+    '',
+    'Note: for Japanese cards, Western eBay has thin sold-listing data. If you',
+    'see any sold prices at all (even just 1-2) report them with confidence "low".',
+    'If you see only ACTIVE listings (not yet sold), use those with confidence "low".',
     '',
     'Return STRICT JSON, no markdown:',
     '{',
     '  "ebay_sold_avg_eur": number_or_null,',
     '  "ebay_url":          "https://... or null (direct sold-listings search URL you used)",',
     '  "confidence":        "high" | "medium" | "low" | null,',
-    '  "notes":             "anything noteworthy in 1 line"',
+    '  "notes":             "1-line: sample size, source, or why null"',
     '}',
   ].join('\n');
 }
@@ -281,17 +302,21 @@ function buildTcgplayerPricePrompt(identity) {
     '  ' + _identityLine(identity),
     '',
     'Use grounded web search on tcgplayer.com. Find the product page for this',
-    'exact variant (card number matters — see prompt above). Return the market',
-    'price in EUR.',
+    'exact variant (card number matters). If you find the product page, return',
+    'WHATEVER price the page shows (market price, mid price, lowest listing,',
+    'or last sold) — any number is more useful than null. Convert to EUR.',
     '',
-    'For Japanese-language cards, TCGPlayer often does not list a price — return',
-    'null with confidence null. Do not guess.',
+    _PRICING_POLICY,
+    '',
+    'Note: TCGPlayer DOES list many Japanese cards (e.g. /pokemon-japan-... URLs).',
+    'Do not return null just because the card is Japanese — visit the page.',
     '',
     'Return STRICT JSON, no markdown:',
     '{',
     '  "tcgplayer_price_eur": number_or_null,',
     '  "tcg_url":             "https://... or null (direct product page URL)",',
-    '  "confidence":          "high" | "medium" | "low" | null',
+    '  "confidence":          "high" | "medium" | "low" | null,',
+    '  "notes":               "1-line: which price field on the page, or why null"',
     '}',
   ].join('\n');
 }
@@ -302,11 +327,16 @@ function buildPriceChartingPrompt(identity) {
     '  ' + _identityLine(identity),
     '',
     'Use grounded web search on pricecharting.com. Find the card\'s product page.',
-    'Read the grade ladder (ungraded, PSA 7-10). All prices in EUR.',
+    'If the page has a grade ladder (ungraded, PSA 7, 8, 9, 9.5, 10) read it.',
+    'If the page only shows an ungraded loose price (common for less-popular',
+    'cards), STILL return that ungraded price — do not require a full ladder.',
+    'All prices in EUR.',
+    '',
+    _PRICING_POLICY,
     '',
     'Return STRICT JSON, no markdown:',
     '{',
-    '  "pricecharting_price_eur":   number_or_null,        /* ungraded headline */',
+    '  "pricecharting_price_eur":   number_or_null,        /* ungraded headline — ALWAYS populate if any price is on the page */',
     '  "pricecharting_url":         "https://... or null", /* direct product page */',
     '  "pricecharting_grades_eur": {',
     '    "ungraded":   number_or_null,',
@@ -316,7 +346,8 @@ function buildPriceChartingPrompt(identity) {
     '    "psa_9_5":    number_or_null,',
     '    "psa_10":     number_or_null',
     '  },',
-    '  "confidence": "high" | "medium" | "low" | null',
+    '  "confidence": "high" | "medium" | "low" | null,',
+    '  "notes":      "1-line: which fields were available on the page, or why null"',
     '}',
   ].join('\n');
 }
