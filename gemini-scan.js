@@ -148,6 +148,183 @@ function buildGeminiRequest(imageBase64, mimeType) {
   };
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Streaming pipeline (sub-6s perceived response).
+// We split the omnibus call into 4 focused calls so each finishes faster and
+// the extension can stream results to the side panel as each completes.
+//   1. Identity call    — vision only, no grounded search (~2-3s)
+//   2. eBay price       — single-source grounded search (~3-6s)
+//   3. TCGPlayer price  — single-source grounded search (~3-5s)
+//   4. PriceCharting    — single-source grounded search incl. grades (~4-7s)
+// ───────────────────────────────────────────────────────────────────────────
+
+// Identity-only prompt — no grounded search needed, just visual reading.
+// Returns ONLY the card identity fields so this call completes in ~2-3s
+// and the user sees the card name appear in the panel almost instantly.
+function buildIdentityPrompt() {
+  return [
+    'You are analyzing an image of a trading card game (TCG) card.',
+    'Pokemon, OnePiece, YuGiOh, MTG, or another TCG.',
+    '',
+    'IDENTIFY the card by READING what is printed on the card. Do not search the web.',
+    '',
+    'CRITICAL — variant disambiguation:',
+    'Modern Pokemon cards have MANY VARIANTS of the same name with different prices.',
+    'Examples: "Blastoise ex" 009/165 (Double Rare) vs 202/165 (Special Art Rare).',
+    'Examples: "Gardevoir & Sylveon GX" 031/055 vs 061/055 vs 260/173.',
+    '',
+    'READ THE CARD NUMBER printed at the bottom (format "031/055", "202/165").',
+    'The card number IS the variant identifier — use exactly what you read.',
+    '',
+    'If the card number is not visible:',
+    '  - If you see a text/moves/HP box at the bottom → standard framed variant',
+    '    (pick the BASE-numbered variant, e.g. 031/055 not 061/055).',
+    '  - If the artwork bleeds to all edges with no text box → alt-art variant',
+    '    (SR / SAR / HR / Rainbow).',
+    '  - NEVER default to the higher-rarity (more expensive) variant.',
+    '',
+    'Return STRICT JSON, no markdown, no prose:',
+    '{',
+    '  "game": "Pokemon" | "OnePiece" | "YuGiOh" | "MTG" | "Other",',
+    '  "card_name": "...",',
+    '  "set_name": "...",',
+    '  "card_number": "...",',
+    '  "language": "EN" | "FR" | "JP" | etc.,',
+    '  "rarity": "..."',
+    '}',
+    '',
+    'If the image is unreadable, return {"error":"unidentified"}.',
+  ].join('\n');
+}
+
+function buildIdentityRequest(imageBase64, mimeType) {
+  if (!imageBase64) throw new TypeError('buildIdentityRequest: imageBase64 is required');
+  return {
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: buildIdentityPrompt() },
+        { inline_data: { mime_type: mimeType || 'image/jpeg', data: imageBase64 } },
+      ],
+    }],
+    // No tools — visual ID only, no web search. Much faster.
+  };
+}
+
+// Per-source price prompts. Each takes the confident identity as text and runs
+// ONE focused grounded search. Smaller scope = faster completion.
+function _identityLine(identity) {
+  const i = identity || {};
+  return [i.card_name, i.set_name && '(' + i.set_name + ')', i.card_number, i.language && '[' + i.language + ']', i.rarity].filter(Boolean).join(' ');
+}
+
+function buildEbayPricePrompt(identity) {
+  return [
+    'You are looking up the eBay sold-listings average price for this exact card:',
+    '  ' + _identityLine(identity),
+    '',
+    'Use grounded web search. Look at eBay completed/sold listings over the last 90',
+    'days, single-card listings only, non-graded, no lots. Compute an average.',
+    '',
+    'If you can only find loosely-comparable sales, return a best-effort estimate',
+    'with confidence "low". Only return null if no comparable sales found.',
+    '',
+    'Return STRICT JSON, no markdown:',
+    '{',
+    '  "ebay_sold_avg_eur": number_or_null,',
+    '  "ebay_url":          "https://... or null (direct sold-listings search URL you used)",',
+    '  "confidence":        "high" | "medium" | "low" | null,',
+    '  "notes":             "anything noteworthy in 1 line"',
+    '}',
+  ].join('\n');
+}
+
+function buildTcgplayerPricePrompt(identity) {
+  return [
+    'You are looking up the TCGPlayer market price for this exact card:',
+    '  ' + _identityLine(identity),
+    '',
+    'Use grounded web search on tcgplayer.com. Find the product page for this',
+    'exact variant (card number matters — see prompt above). Return the market',
+    'price in EUR.',
+    '',
+    'For Japanese-language cards, TCGPlayer often does not list a price — return',
+    'null with confidence null. Do not guess.',
+    '',
+    'Return STRICT JSON, no markdown:',
+    '{',
+    '  "tcgplayer_price_eur": number_or_null,',
+    '  "tcg_url":             "https://... or null (direct product page URL)",',
+    '  "confidence":          "high" | "medium" | "low" | null',
+    '}',
+  ].join('\n');
+}
+
+function buildPriceChartingPrompt(identity) {
+  return [
+    'You are looking up the PriceCharting prices for this exact card:',
+    '  ' + _identityLine(identity),
+    '',
+    'Use grounded web search on pricecharting.com. Find the card\'s product page.',
+    'Read the grade ladder (ungraded, PSA 7-10). All prices in EUR.',
+    '',
+    'Return STRICT JSON, no markdown:',
+    '{',
+    '  "pricecharting_price_eur":   number_or_null,        /* ungraded headline */',
+    '  "pricecharting_url":         "https://... or null", /* direct product page */',
+    '  "pricecharting_grades_eur": {',
+    '    "ungraded":   number_or_null,',
+    '    "psa_7":      number_or_null,',
+    '    "psa_8":      number_or_null,',
+    '    "psa_9":      number_or_null,',
+    '    "psa_9_5":    number_or_null,',
+    '    "psa_10":     number_or_null',
+    '  },',
+    '  "confidence": "high" | "medium" | "low" | null',
+    '}',
+  ].join('\n');
+}
+
+function buildTextOnlyRequest(prompt, withGrounding) {
+  return {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    ...(withGrounding ? { tools: [{ google_search: {} }] } : {}),
+  };
+}
+
+// Map a per-source price response into the field names the existing CARD_RESULT
+// renderer expects, so partial price events flow straight into the side panel.
+function mapEbayPriceToCardResult(p) {
+  const v = p && typeof p.ebay_sold_avg_eur === 'number' ? p.ebay_sold_avg_eur : null;
+  return { ebay_market_price: v, market_price: v, market_price_usd: v, ebay_url: (p && p.ebay_url) || null };
+}
+function mapTcgplayerPriceToCardResult(p) {
+  const v = p && typeof p.tcgplayer_price_eur === 'number' ? p.tcgplayer_price_eur : null;
+  return { tcg_market_price: v, tcg_player_price: v, tcg_url: (p && p.tcg_url) || null };
+}
+function mapPriceChartingToCardResult(p) {
+  const v = p && typeof p.pricecharting_price_eur === 'number' ? p.pricecharting_price_eur : null;
+  return {
+    cardmarket_price: v,
+    pricecharting_price: v,
+    pricecharting_url: (p && p.pricecharting_url) || null,
+    pricecharting_grades_eur: (p && p.pricecharting_grades_eur) || null,
+  };
+}
+function mapIdentityToCardResult(p) {
+  const i = p || {};
+  return {
+    card_name:   i.card_name ?? null,
+    set_name:    i.set_name ?? null,
+    card_number: i.card_number ?? null,
+    language:    i.language ?? null,
+    card_game:   i.game ?? null,
+    rarity:      i.rarity ?? null,
+    _engine:     'gemini',
+    _geminiError: i.error ?? null,
+  };
+}
+
 // Parse Gemini's text reply into a JS object. Tolerates markdown code fences
 // and prose surrounding the JSON (some grounded-search responses wrap the
 // JSON in explanatory text). Returns { error: 'parse_failed' } on failure.
@@ -243,4 +420,11 @@ function mapToCardResult(parsed) {
   };
 }
 
-module.exports = { buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse, mapToCardResult };
+module.exports = {
+  buildGeminiPrompt, buildGeminiRequest, parseGeminiResponse, mapToCardResult,
+  // Streaming pipeline:
+  buildIdentityPrompt, buildIdentityRequest,
+  buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt,
+  buildTextOnlyRequest,
+  mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
+};

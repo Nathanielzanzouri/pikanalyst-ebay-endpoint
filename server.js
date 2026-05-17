@@ -11,7 +11,10 @@ const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
-const { buildGeminiRequest, parseGeminiResponse, mapToCardResult } = require('./gemini-scan');
+const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
+  buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
+  mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
+} = require('./gemini-scan');
 
 const app = express();
 
@@ -2601,6 +2604,180 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('uncaughtException', (err) => {
   console.error('[Lakkot] uncaughtException:', err && err.stack ? err.stack : err);
+});
+
+// ─── /scan/gemini-stream — sub-6s perceived response ─────────────────────────
+// Streams partial results via Server-Sent Events:
+//   event: identity   — card identity (after ~2-3s vision call, no grounded search)
+//   event: price      — one per source as it returns (ebay / tcgplayer / pricecharting)
+//   event: done       — final merged scan_log id + quota
+//   event: error      — fatal error in the pipeline (won't terminate price stream)
+//
+// Architecture: 1 identity call (no search) + 3 parallel price calls (each
+// single-source grounded search) instead of 1 omnibus call. Faster identity,
+// faster individual prices, progressive UI.
+async function callGeminiText(prompt, withGrounding, timeoutMs) {
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+    body: JSON.stringify(buildTextOnlyRequest(prompt, withGrounding)),
+    signal: AbortSignal.timeout(timeoutMs || 45_000),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 200));
+  }
+  const data = await r.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  return parseGeminiResponse(rawText);
+}
+
+async function callGeminiIdentity(imageBase64, timeoutMs) {
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+    body: JSON.stringify(buildIdentityRequest(imageBase64, 'image/jpeg')),
+    signal: AbortSignal.timeout(timeoutMs || 20_000),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 200));
+  }
+  const data = await r.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  return parseGeminiResponse(rawText);
+}
+
+app.post('/scan/gemini-stream', async (req, res) => {
+  geminiHitCount++;
+  geminiLastHit = new Date().toISOString();
+  const t0 = Date.now();
+  console.log('[Lakkot/Gemini-stream] HIT #' + geminiHitCount, geminiLastHit);
+
+  // --- SSE headers (must be sent before first event) ---
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable proxy buffering
+  res.flushHeaders?.();
+
+  const sse = (event, dataObj) => {
+    try {
+      res.write('event: ' + event + '\n');
+      res.write('data: ' + JSON.stringify(dataObj) + '\n\n');
+    } catch (e) { /* client disconnected */ }
+  };
+
+  try {
+    const { imageBase64, askingPrice, sellerPrice, streamCurrency, streamTitle, language, token } = req.body || {};
+    const ask = askingPrice ?? sellerPrice ?? null;
+
+    if (!token)       { sse('error', { error: 'missing_token' });           return res.end(); }
+    if (!imageBase64) { sse('error', { error: 'missing_image' });           return res.end(); }
+    if (!process.env.GEMINI_API_KEY) { sse('error', { error: 'gemini_not_configured' }); return res.end(); }
+
+    // --- Quota (inline; mirrors /scan/gemini) ---
+    const { data: user, error: userErr } = await supabase.from('users')
+      .select('id, email, name, plan, scan_count, scan_reset_at, scan_limit_override')
+      .eq('token', token).single();
+    if (userErr || !user) { sse('error', { error: 'invalid_token' }); return res.end(); }
+    const month = currentMonth();
+    if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
+      await supabase.from('users').update({ scan_count: 1, scan_reset_at: month }).eq('id', user.id);
+      user.scan_count = 1;
+    } else {
+      await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
+      user.scan_count += 1;
+    }
+    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
+    const quota = { count: user.scan_count, remaining: Math.max(0, limit - user.scan_count), limit };
+    sse('quota', quota);
+    if (user.scan_count > limit) { sse('error', { error: 'limit_reached', quota }); return res.end(); }
+
+    // --- Stage 1: identity (no grounded search) ---
+    let identity = null;
+    try {
+      identity = await callGeminiIdentity(imageBase64, 20_000);
+    } catch (e) {
+      console.error('[Lakkot/Gemini-stream] identity failed:', e.message);
+      sse('identity', { _engine: 'gemini', _geminiError: 'identity_failed', error: e.message });
+      sse('done', { quota, scanLogId: null, ms: Date.now() - t0 });
+      return res.end();
+    }
+    const mappedIdentity = mapIdentityToCardResult(identity);
+    sse('identity', mappedIdentity);
+    console.log('[Lakkot/Gemini-stream] identity at +' + (Date.now() - t0) + 'ms:', mappedIdentity.card_name);
+
+    if (!mappedIdentity.card_name) {
+      // No usable identity → no point fetching prices
+      sse('done', { quota, scanLogId: null, ms: Date.now() - t0 });
+      // Log the failed-identification attempt async (don't block response)
+      setImmediate(() => {
+        logScan({
+          userEmail: user.email, userName: user.name,
+          domTitle: streamTitle ?? null, imageBase64,
+          route: 'gemini-stream', productName: null, resultType: 'NO_DATA',
+          marketPrice: null, askingPrice: ask, verdict: 'NO_DATA',
+          lensMatches: [JSON.stringify(identity).slice(0, 800)],
+          langToggle: language || 'WORLD',
+        }).catch((err) => console.warn('[Lakkot/Gemini-stream] async log fail:', err.message));
+      });
+      return res.end();
+    }
+
+    // --- Stage 2: 3 parallel price calls ---
+    const merged = { ...mappedIdentity };
+    const runPrice = async (sourceName, prompt, mapper) => {
+      const tStart = Date.now();
+      try {
+        const parsed = await callGeminiText(prompt, true, 45_000);
+        const mapped = mapper(parsed);
+        Object.assign(merged, mapped);
+        const elapsed = Date.now() - tStart;
+        sse('price', { source: sourceName, ...mapped, _ms: elapsed });
+        console.log('[Lakkot/Gemini-stream] ' + sourceName + ' at +' + (Date.now() - t0) + 'ms (' + elapsed + 'ms call)');
+      } catch (e) {
+        console.error('[Lakkot/Gemini-stream] ' + sourceName + ' failed:', e.message);
+        sse('price', { source: sourceName, error: e.message });
+      }
+    };
+    await Promise.allSettled([
+      runPrice('ebay',          buildEbayPricePrompt(identity),         mapEbayPriceToCardResult),
+      runPrice('tcgplayer',     buildTcgplayerPricePrompt(identity),    mapTcgplayerPriceToCardResult),
+      runPrice('pricecharting', buildPriceChartingPrompt(identity),     mapPriceChartingToCardResult),
+    ]);
+
+    // --- Compute final verdict + done event ---
+    const mp = merged.ebay_market_price ?? merged.market_price ?? null;
+    const verdict = mp && ask ? (ask / mp < 0.90 ? 'DEAL' : ask / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+
+    sse('done', { quota, verdict, asking_price: ask, stream_currency: streamCurrency || 'EUR', ms: Date.now() - t0 });
+    res.end();
+
+    // --- Async log (fire and forget, off critical path) ---
+    setImmediate(() => {
+      logScan({
+        userEmail: user.email, userName: user.name,
+        domTitle: streamTitle ?? null, imageBase64,
+        route: 'gemini-stream', productName: merged.card_name,
+        lensProductName: merged.card_name,
+        resultType: 'CARD_RESULT',
+        marketPrice: mp, askingPrice: ask, verdict,
+        lensMatches: [JSON.stringify({ identity, merged }).slice(0, 1200)],
+        lensSelected: merged.card_name,
+        langToggle: language || 'WORLD',
+      }).catch((err) => console.warn('[Lakkot/Gemini-stream] async log fail:', err.message));
+    });
+  } catch (err) {
+    console.error('[Lakkot/Gemini-stream] UNCAUGHT:', err && err.stack || err);
+    geminiLastError = 'stream_uncaught: ' + (err && err.message);
+    try { sse('error', { error: 'pipeline_failed', detail: err && err.message }); } catch (_) {}
+    try { res.end(); } catch (_) {}
+  }
 });
 
 app.post('/scan', async (req, res) => {
