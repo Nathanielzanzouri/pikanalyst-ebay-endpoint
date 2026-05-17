@@ -2635,7 +2635,10 @@ async function callGeminiText(prompt, withGrounding, timeoutMs) {
 }
 
 async function callGeminiIdentity(imageBase64, timeoutMs) {
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  // Identity uses a faster/smaller model than the price-lookup calls. It does
+  // visual-only ID (no grounded search), so a lighter model is sufficient and
+  // shaves ~2-3s vs gemini-2.5-flash. Override via GEMINI_IDENTITY_MODEL.
+  const model = process.env.GEMINI_IDENTITY_MODEL || 'gemini-2.5-flash-lite';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const r = await fetch(url, {
     method: 'POST',
@@ -2700,8 +2703,11 @@ app.post('/scan/gemini-stream', async (req, res) => {
 
     // --- Stage 1: identity (no grounded search) ---
     let identity = null;
+    const identityModel = process.env.GEMINI_IDENTITY_MODEL || 'gemini-2.5-flash-lite';
+    const identityT0 = Date.now();
     try {
       identity = await callGeminiIdentity(imageBase64, 20_000);
+      console.log('[Lakkot/Gemini-stream] identity model=' + identityModel + ' took ' + (Date.now() - identityT0) + 'ms');
     } catch (e) {
       console.error('[Lakkot/Gemini-stream] identity failed:', e.message);
       sse('identity', { _engine: 'gemini', _geminiError: 'identity_failed', error: e.message });
