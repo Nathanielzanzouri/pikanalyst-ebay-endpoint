@@ -208,6 +208,13 @@ function buildIdentityRequest(imageBase64, mimeType) {
       ],
     }],
     // No tools — visual ID only, no web search. Much faster.
+    // Disable thinking on Gemini 3.x — for a constrained visual classification
+    // with a strict JSON contract, extended reasoning is pure overhead. This
+    // typically cuts identity latency by ~40-60% on 3.1-flash-lite.
+    generationConfig: {
+      thinkingConfig: { thinkingBudget: 0 },
+      responseMimeType: 'application/json',
+    },
   };
 }
 
