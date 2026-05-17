@@ -2535,7 +2535,7 @@ app.post('/scan/gemini', async (req, res) => {
     logId = await logScan({
       userEmail: user.email, userName: user.name,
       domTitle: streamTitle ?? null,                       // seller's DOM listing title
-      imageBase64: null,                                   // not stored for Gemini path (image is consumed inline)
+      imageBase64: imageBase64 ?? null,                    // store the scanned image so the admin dashboard + scan history can show a thumbnail
       croppedImageBase64: null,
       route: 'gemini',
       productName: result.card_name,
