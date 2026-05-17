@@ -389,6 +389,67 @@ function buildPriceChartingPrompt(identity) {
   ].join('\n');
 }
 
+// ─── Sneaker source prompts (Gemini grounded search) ────────────────────────
+// The original plan was direct StockX/GOAT Algolia APIs, but their public
+// Algolia keys are dead (StockX: silent empty, GOAT: 403). Reliable path is
+// Gemini grounded search — same approach as TCG/PriceCharting for cards.
+
+function _sneakerIdentLine(identity) {
+  const i = identity || {};
+  const parts = [i.brand, i.model, i.colorway];
+  if (i.style_code) parts.push('[' + i.style_code + ']');
+  return parts.filter(Boolean).join(' ');
+}
+
+function buildStockxPrompt(identity) {
+  return [
+    'You are looking up the StockX price for this sneaker:',
+    '  ' + _sneakerIdentLine(identity),
+    '',
+    'Use grounded web search on stockx.com. Find the product page for this',
+    'exact model + colorway. If a style code is provided, that is the most',
+    'reliable identifier — search for it directly.',
+    'Read the LAST SALE price (more honest than current asking). If no recent',
+    'sale, fall back to the LOWEST ASK. All prices in EUR.',
+    '',
+    _PRICING_POLICY,
+    '',
+    'Return STRICT JSON, no markdown:',
+    '{',
+    '  "stockx_price_eur": number_or_null,        /* headline: last sale > lowest ask */',
+    '  "stockx_last_sale_eur":  number_or_null,',
+    '  "stockx_lowest_ask_eur": number_or_null,',
+    '  "stockx_url":      "https://stockx.com/... or null",',
+    '  "confidence":      "high" | "medium" | "low" | null,',
+    '  "notes":           "1-line: which price was used, or why null"',
+    '}',
+  ].join('\n');
+}
+
+function buildGoatPrompt(identity) {
+  return [
+    'You are looking up the GOAT price for this sneaker:',
+    '  ' + _sneakerIdentLine(identity),
+    '',
+    'Use grounded web search on goat.com. Find the product page for this',
+    'exact model + colorway. If a style code is provided, search for it directly.',
+    'Read the LAST SOLD price (more honest than current asking). If no recent',
+    'sale, fall back to the LOWEST ASK. All prices in EUR.',
+    '',
+    _PRICING_POLICY,
+    '',
+    'Return STRICT JSON, no markdown:',
+    '{',
+    '  "goat_price_eur":     number_or_null,        /* headline: last sale > lowest ask */',
+    '  "goat_last_sold_eur": number_or_null,',
+    '  "goat_lowest_ask_eur": number_or_null,',
+    '  "goat_url":           "https://www.goat.com/... or null",',
+    '  "confidence":         "high" | "medium" | "low" | null,',
+    '  "notes":              "1-line: which price was used, or why null"',
+    '}',
+  ].join('\n');
+}
+
 function buildTextOnlyRequest(prompt, withGrounding) {
   return {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -451,25 +512,31 @@ function mapIdentityToCardResult(p) {
 // Headline price: prefer last sold (more honest than asking) but fall back to
 // lowest ask if no recent sale — same logic for both sources.
 function mapStockxToCardResult(s) {
-  const v = s && (typeof s.lastSale === 'number' ? s.lastSale
-              : typeof s.lowestAsk === 'number' ? s.lowestAsk : null);
+  // Accepts both Gemini-grounded shape (stockx_price_eur) and legacy Algolia
+  // shape (lastSale/lowestAsk) for forward compat.
+  const v = typeof s?.stockx_price_eur === 'number' ? s.stockx_price_eur
+        : typeof s?.lastSale === 'number' ? s.lastSale
+        : typeof s?.lowestAsk === 'number' ? s.lowestAsk
+        : null;
   return {
     tcg_market_price: v,
     tcg_player_price: v,
-    tcg_url: (s && s.url) || null,
-    _stockx_last_sale:  s?.lastSale ?? null,
-    _stockx_lowest_ask: s?.lowestAsk ?? null,
+    tcg_url: s?.stockx_url || s?.url || null,
+    _stockx_last_sale:  s?.stockx_last_sale_eur ?? s?.lastSale ?? null,
+    _stockx_lowest_ask: s?.stockx_lowest_ask_eur ?? s?.lowestAsk ?? null,
   };
 }
 function mapGoatToCardResult(g) {
-  const v = g && (typeof g.lastSale === 'number' ? g.lastSale
-              : typeof g.lowestAsk === 'number' ? g.lowestAsk : null);
+  const v = typeof g?.goat_price_eur === 'number' ? g.goat_price_eur
+        : typeof g?.lastSale === 'number' ? g.lastSale
+        : typeof g?.lowestAsk === 'number' ? g.lowestAsk
+        : null;
   return {
     cardmarket_price:    v,
     pricecharting_price: v,
-    pricecharting_url:   (g && g.url) || null,
-    _goat_last_sale:     g?.lastSale ?? null,
-    _goat_lowest_ask:    g?.lowestAsk ?? null,
+    pricecharting_url:   g?.goat_url || g?.url || null,
+    _goat_last_sale:     g?.goat_last_sold_eur ?? g?.lastSale ?? null,
+    _goat_lowest_ask:    g?.goat_lowest_ask_eur ?? g?.lowestAsk ?? null,
   };
 }
 
@@ -576,4 +643,5 @@ module.exports = {
   buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
   mapStockxToCardResult, mapGoatToCardResult,
+  buildStockxPrompt, buildGoatPrompt,
 };

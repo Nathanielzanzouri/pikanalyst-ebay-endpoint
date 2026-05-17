@@ -14,7 +14,7 @@ const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace,
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
-  mapStockxToCardResult, mapGoatToCardResult,
+  mapStockxToCardResult, mapGoatToCardResult, buildStockxPrompt, buildGoatPrompt,
 } = require('./gemini-scan');
 
 const app = express();
@@ -2792,9 +2792,13 @@ app.post('/scan/gemini-stream', async (req, res) => {
     }
     const mappedIdentity = mapIdentityToCardResult(identity);
     sse('identity', mappedIdentity);
-    console.log('[Lakkot/Gemini-stream] identity at +' + (Date.now() - t0) + 'ms:', mappedIdentity.card_name);
+    // Identity is "usable" if EITHER a card name OR a sneaker model came back.
+    // Earlier check was card-only and broke the sneaker path entirely.
+    const usableIdentity = mappedIdentity.card_name || mappedIdentity.model || mappedIdentity.brand;
+    console.log('[Lakkot/Gemini-stream] identity at +' + (Date.now() - t0) + 'ms:',
+      mappedIdentity.item_type || 'card', '→', usableIdentity);
 
-    if (!mappedIdentity.card_name) {
+    if (!usableIdentity) {
       // No usable identity → no point fetching prices
       sse('done', { quota, scanLogId: null, ms: Date.now() - t0 });
       // Log the failed-identification attempt async (don't block response)
@@ -2889,11 +2893,14 @@ app.post('/scan/gemini-stream', async (req, res) => {
     // works as-is (spinners, "—", click-through). Sidepanel relabels the
     // slot headers when item_type=sneaker.
     const sneakerQuery = buildSneakerQuery(identity);
+    // StockX + GOAT via Gemini grounded search (Algolia keys are dead — silently
+    // empty / 403). Each call hits the source's public site through Gemini's
+    // search and extracts last-sale > lowest-ask.
     const runStockx = async () => {
       const tStart = Date.now();
       try {
-        const s = await fetchStockxPrice(sneakerQuery);
-        const mapped = mapStockxToCardResult(s);
+        const parsed = await callGeminiText(buildStockxPrompt(identity), true, 45_000);
+        const mapped = mapStockxToCardResult(parsed);
         Object.assign(merged, mapped);
         const elapsed = Date.now() - tStart;
         sse('price', { source: 'stockx', ...mapped, _ms: elapsed });
@@ -2906,8 +2913,8 @@ app.post('/scan/gemini-stream', async (req, res) => {
     const runGoat = async () => {
       const tStart = Date.now();
       try {
-        const g = await fetchGoatPrice(sneakerQuery);
-        const mapped = mapGoatToCardResult(g);
+        const parsed = await callGeminiText(buildGoatPrompt(identity), true, 45_000);
+        const mapped = mapGoatToCardResult(parsed);
         Object.assign(merged, mapped);
         const elapsed = Date.now() - tStart;
         sse('price', { source: 'goat', ...mapped, _ms: elapsed });
@@ -2981,6 +2988,10 @@ app.post('/scan/gemini-stream', async (req, res) => {
     //     the client has a scanLogId to attach feedback to. Image upload
     //     happens asynchronously below to keep this off the critical path. ---
     let scanLogId = null;
+    // For sneakers product_name is "{brand} {model}", for cards it's card_name.
+    const displayName = merged.card_name
+      || [merged.brand, merged.model].filter(Boolean).join(' ')
+      || null;
     try {
       const { data: logRow, error: insertErr } = await supabase.from('scan_logs').insert({
         user_email: user.email,
@@ -2988,8 +2999,8 @@ app.post('/scan/gemini-stream', async (req, res) => {
         dom_title: streamTitle ?? null,
         image_url: null, // patched async after response (see setImmediate below)
         route: 'gemini-stream',
-        product_name: merged.card_name,
-        lens_product_name: merged.card_name,
+        product_name: displayName,
+        lens_product_name: displayName,
         result_type: 'CARD_RESULT',
         market_price: mp,
         asking_price: ask,
@@ -2997,7 +3008,7 @@ app.post('/scan/gemini-stream', async (req, res) => {
         sources_count: 0,
         ebay_sales_count: 0,
         lens_matches: [JSON.stringify({ identity, merged }).slice(0, 1200)],
-        lens_selected: merged.card_name,
+        lens_selected: displayName,
         lang_toggle: language || 'WORLD',
       }).select('id').single();
       if (insertErr) {
