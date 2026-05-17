@@ -14,6 +14,7 @@ const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace,
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
+  mapStockxToCardResult, mapGoatToCardResult,
 } = require('./gemini-scan');
 
 const app = express();
@@ -2658,6 +2659,78 @@ async function callGeminiIdentity(imageBase64, timeoutMs) {
   return parseGeminiResponse(rawText);
 }
 
+// ─── StockX + GOAT Algolia helpers (sneaker pricing) ─────────────────────────
+// Extracted from the existing /stockx endpoint so we can call them in parallel
+// from the Gemini-stream pipeline when item_type=sneaker. Same Algolia indices,
+// same keys. Returns { lowestAsk, lastSale, name, url } or null on no-hit/error.
+async function fetchStockxPrice(query) {
+  if (!query) return null;
+  for (const host of ['xw7sbct9ad-dsn.algolia.net', 'xw7sbct9ad.algolia.net']) {
+    try {
+      const r = await fetch(`https://${host}/1/indexes/products/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Algolia-Application-Id': 'XW7SBCT9AD',
+          'X-Algolia-API-Key': '6b5e76b49705eb9f51a06d3c82f7acee',
+        },
+        body: JSON.stringify({ params: `query=${encodeURIComponent(query)}&hitsPerPage=1` }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const hit = d?.hits?.[0];
+      if (!hit) continue;
+      const lowestAsk = hit?.market?.lowestAsk ?? hit?.lowest_ask ?? null;
+      const lastSale  = hit?.market?.lastSale  ?? hit?.last_sale  ?? null;
+      if (lowestAsk == null && lastSale == null) continue;
+      return {
+        lowestAsk, lastSale,
+        name: hit.name ?? hit.title ?? null,
+        url: hit.urlKey ? `https://stockx.com/${hit.urlKey}` : null,
+      };
+    } catch (e) { /* try next host */ }
+  }
+  return null;
+}
+
+async function fetchGoatPrice(query) {
+  if (!query) return null;
+  try {
+    const r = await fetch('https://2fwotdvm2o-dsn.algolia.net/1/indexes/product_variants_v2/query', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Algolia-Application-Id': '2FWOTDVM2O',
+        'X-Algolia-API-Key': 'ac96de6a3afb9236e994f9c3c9a5ab9d',
+      },
+      body: JSON.stringify({ params: `query=${encodeURIComponent(query)}&hitsPerPage=1` }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const hit = d?.hits?.[0];
+    if (!hit) return null;
+    const lowestAsk = hit?.lowest_listing_price_cents != null ? hit.lowest_listing_price_cents / 100 : null;
+    const lastSale  = hit?.last_sold_price_cents      != null ? hit.last_sold_price_cents / 100      : null;
+    if (lowestAsk == null && lastSale == null) return null;
+    return {
+      lowestAsk, lastSale,
+      name: hit.name ?? null,
+      url: hit.slug ? `https://www.goat.com/sneakers/${hit.slug}` : null,
+    };
+  } catch (e) { return null; }
+}
+
+// Build the search string used for StockX/GOAT Algolia + eBay sneaker lookups.
+// Style code is the most reliable single identifier (e.g. "DZ5485-612" is
+// unambiguous), so prefer it. Else combine brand+model+colorway.
+function buildSneakerQuery(identity) {
+  if (!identity) return '';
+  if (identity.style_code) return String(identity.style_code).trim();
+  return [identity.brand, identity.model, identity.colorway].filter(Boolean).join(' ').trim();
+}
+
 app.post('/scan/gemini-stream', async (req, res) => {
   geminiHitCount++;
   geminiLastHit = new Date().toISOString();
@@ -2811,11 +2884,88 @@ app.post('/scan/gemini-stream', async (req, res) => {
         sse('price', { source: 'ebay', error: e.message });
       }
     };
-    await Promise.allSettled([
-      runEbayApi(),
-      runPrice('tcgplayer',     buildTcgplayerPricePrompt(identity),    mapTcgplayerPriceToCardResult),
-      runPrice('pricecharting', buildPriceChartingPrompt(identity),     mapPriceChartingToCardResult),
-    ]);
+    // ─── Sneaker price runners (StockX + GOAT Algolia, direct APIs) ─────────
+    // Reuses the tcg_*/cardmarket_* field slots so the existing renderer
+    // works as-is (spinners, "—", click-through). Sidepanel relabels the
+    // slot headers when item_type=sneaker.
+    const sneakerQuery = buildSneakerQuery(identity);
+    const runStockx = async () => {
+      const tStart = Date.now();
+      try {
+        const s = await fetchStockxPrice(sneakerQuery);
+        const mapped = mapStockxToCardResult(s);
+        Object.assign(merged, mapped);
+        const elapsed = Date.now() - tStart;
+        sse('price', { source: 'stockx', ...mapped, _ms: elapsed });
+        console.log('[Lakkot/Gemini-stream] stockx at +' + (Date.now() - t0) + 'ms (' + elapsed + 'ms) — price:', mapped.tcg_market_price);
+      } catch (e) {
+        console.error('[Lakkot/Gemini-stream] stockx failed:', e.message);
+        sse('price', { source: 'stockx', error: e.message });
+      }
+    };
+    const runGoat = async () => {
+      const tStart = Date.now();
+      try {
+        const g = await fetchGoatPrice(sneakerQuery);
+        const mapped = mapGoatToCardResult(g);
+        Object.assign(merged, mapped);
+        const elapsed = Date.now() - tStart;
+        sse('price', { source: 'goat', ...mapped, _ms: elapsed });
+        console.log('[Lakkot/Gemini-stream] goat at +' + (Date.now() - t0) + 'ms (' + elapsed + 'ms) — price:', mapped.cardmarket_price);
+      } catch (e) {
+        console.error('[Lakkot/Gemini-stream] goat failed:', e.message);
+        sse('price', { source: 'goat', error: e.message });
+      }
+    };
+    // For sneakers we also do an eBay search, but the query/shape is different
+    // (brand + model + style_code, not card_name + card_number).
+    const runEbayApiSneaker = async () => {
+      const tStart = Date.now();
+      try {
+        const item = {
+          item_type: 'sneaker',
+          card_name: [identity.brand, identity.model].filter(Boolean).join(' '),
+          card_number: identity.style_code || '',
+          set_name: identity.colorway || '',
+          condition: 'Near Mint',
+          condition_score: 85,
+          confidence: 100,
+          ebay_search: sneakerQuery,
+        };
+        const result = await handleCard(item, ask, 'WORLD', 90);
+        const mapped = {
+          ebay_market_price: result.market_price_usd ?? null,
+          market_price:      result.market_price_usd ?? null,
+          market_price_usd:  result.market_price_usd ?? null,
+          ebay_url:          result.ebay_url ?? null,
+          ebay_sales_count:  result.ebay_sales_count ?? 0,
+          listings:          result.listings ?? [],
+        };
+        Object.assign(merged, mapped);
+        const elapsed = Date.now() - tStart;
+        sse('price', { source: 'ebay', ...mapped, _ms: elapsed });
+        console.log('[Lakkot/Gemini-stream] ebay (sneaker) at +' + (Date.now() - t0) + 'ms (' + elapsed + 'ms) — sales:', mapped.ebay_sales_count, '| avg:', mapped.ebay_market_price);
+      } catch (e) {
+        console.error('[Lakkot/Gemini-stream] ebay (sneaker) failed:', e.message);
+        sse('price', { source: 'ebay', error: e.message });
+      }
+    };
+
+    // ─── Route by item_type ─────────────────────────────────────────────────
+    if (mappedIdentity.item_type === 'sneaker') {
+      await Promise.allSettled([
+        runEbayApiSneaker(),
+        runStockx(),
+        runGoat(),
+      ]);
+    } else {
+      // Default: card. Three parallel calls: real eBay API + TCG + PC grounded.
+      await Promise.allSettled([
+        runEbayApi(),
+        runPrice('tcgplayer',     buildTcgplayerPricePrompt(identity),    mapTcgplayerPriceToCardResult),
+        runPrice('pricecharting', buildPriceChartingPrompt(identity),     mapPriceChartingToCardResult),
+      ]);
+    }
 
     // --- Compute final verdict ---
     // Source priority: eBay (live marketplace) → PriceCharting (catalog).

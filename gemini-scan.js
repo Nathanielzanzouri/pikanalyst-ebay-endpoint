@@ -163,8 +163,15 @@ function buildGeminiRequest(imageBase64, mimeType) {
 // and the user sees the card name appear in the panel almost instantly.
 function buildIdentityPrompt() {
   return [
-    'You are analyzing an image of a trading card game (TCG) card.',
-    'Pokemon, OnePiece, YuGiOh, MTG, or another TCG.',
+    'You are analyzing an image of a collectible item — either a trading card or a',
+    'sneaker. Decide which, then identify it from what is visible.',
+    '',
+    'FIRST: classify the item:',
+    '  - "card"    → a trading card (Pokemon, OnePiece, YuGiOh, MTG, etc.)',
+    '  - "sneaker" → athletic shoes (Nike, Adidas, Jordan, New Balance, Yeezy, etc.)',
+    '  - "other"   → anything else',
+    '',
+    '=== IF item_type = "card" ===',
     '',
     'IDENTIFY the card by READING what is printed on the card. Do not search the web.',
     '',
@@ -202,19 +209,49 @@ function buildIdentityPrompt() {
     'Pokemon/character (e.g. フシギダネ → "Bulbasaur") and the English set name',
     '(e.g. プラズマゲイル → "Plasma Gale"). For English cards, just copy them.',
     '',
-    'Return STRICT JSON, no markdown, no prose:',
+    '',
+    '=== IF item_type = "sneaker" ===',
+    '',
+    'IDENTIFY the sneaker by reading visible logos/tags/branding. Don\'t search the web.',
+    'Read these fields from the image:',
+    '  - brand      : "Nike", "Adidas", "Jordan", "New Balance", "Yeezy", "ASICS", etc.',
+    '  - model      : the model name (e.g. "Air Jordan 1 Retro High OG", "Dunk Low",',
+    '                 "Yeezy Boost 350 V2", "990v6"). Be SPECIFIC — include OG/Retro/',
+    '                 generation markers when present, they affect price 5x.',
+    '  - colorway   : the named colorway if recognizable ("Chicago Lost & Found",',
+    '                 "Bred", "Panda", "Triple Black"), else describe the color scheme.',
+    '  - style_code : the SKU printed on the box/tag if visible (e.g. "DZ5485-612"',
+    '                 for Nike, "M2002RDA" for New Balance). Most reliable price key.',
+    '                 null if not visible.',
+    '  - size       : US/EU size if visible on a tag/box, else null. Price varies',
+    '                 strongly by size.',
+    '',
+    '=== RETURN VALUE ===',
+    '',
+    'Return STRICT JSON, no markdown, no prose. Always include item_type and the',
+    'fields for that type; leave fields for the OTHER type as null.',
     '{',
-    '  "game": "Pokemon" | "OnePiece" | "YuGiOh" | "MTG" | "Other",',
-    '  "card_name": "...",            /* as printed on the card (may be JP) */',
-    '  "card_name_en": "...",         /* English/romanized — for price lookups */',
-    '  "set_name": "...",             /* as printed (may be JP) */',
-    '  "set_name_en": "...",          /* English set name (e.g. "Plasma Gale") */',
-    '  "card_number": "...",',
-    '  "language": "EN" | "FR" | "JP" | etc.,',
-    '  "rarity": "..."',
+    '  "item_type": "card" | "sneaker" | "other",',
+    '',
+    '  /* CARD fields (null if sneaker/other) */',
+    '  "game":         "Pokemon" | "OnePiece" | "YuGiOh" | "MTG" | "Other" | null,',
+    '  "card_name":    "...",            /* as printed (may be JP) */',
+    '  "card_name_en": "...",            /* English/romanized — for price lookups */',
+    '  "set_name":     "...",            /* as printed */',
+    '  "set_name_en":  "...",            /* English set name */',
+    '  "card_number":  "...",',
+    '  "language":     "EN" | "FR" | "JP" | etc.,',
+    '  "rarity":       "...",',
+    '',
+    '  /* SNEAKER fields (null if card/other) */',
+    '  "brand":      "...",',
+    '  "model":      "...",',
+    '  "colorway":   "...",',
+    '  "style_code": "..." | null,',
+    '  "size":       "..." | null',
     '}',
     '',
-    'If the image is unreadable, return {"error":"unidentified"}.',
+    'If the image is unreadable, return {"item_type":"other","error":"unidentified"}.',
   ].join('\n');
 }
 
@@ -386,6 +423,8 @@ function mapIdentityToCardResult(p) {
   const enName = i.card_name_en || i.card_name || null;
   const enSet = i.set_name_en || i.set_name || null;
   return {
+    item_type:        i.item_type || 'card', // default to card for backward compat
+    // Card fields
     card_name:        enName,
     card_name_native: i.card_name && i.card_name_en && i.card_name !== i.card_name_en ? i.card_name : null,
     set_name:         enSet,
@@ -394,8 +433,43 @@ function mapIdentityToCardResult(p) {
     language:         i.language ?? null,
     card_game:        i.game ?? null,
     rarity:           i.rarity ?? null,
+    // Sneaker fields
+    brand:            i.brand ?? null,
+    model:            i.model ?? null,
+    colorway:         i.colorway ?? null,
+    style_code:       i.style_code ?? null,
+    size:             i.size ?? null,
     _engine:          'gemini',
     _geminiError:     i.error ?? null,
+  };
+}
+
+// ─── Sneaker source mappers ──────────────────────────────────────────────────
+// Reuse the TCG/PC field slots so the existing sidepanel renderer works as-is
+// (spinners, "—" fallback, click-through). The sidepanel relabels the slot
+// headers (TCGPlayer → StockX, PriceCharting → GOAT) when item_type=sneaker.
+// Headline price: prefer last sold (more honest than asking) but fall back to
+// lowest ask if no recent sale — same logic for both sources.
+function mapStockxToCardResult(s) {
+  const v = s && (typeof s.lastSale === 'number' ? s.lastSale
+              : typeof s.lowestAsk === 'number' ? s.lowestAsk : null);
+  return {
+    tcg_market_price: v,
+    tcg_player_price: v,
+    tcg_url: (s && s.url) || null,
+    _stockx_last_sale:  s?.lastSale ?? null,
+    _stockx_lowest_ask: s?.lowestAsk ?? null,
+  };
+}
+function mapGoatToCardResult(g) {
+  const v = g && (typeof g.lastSale === 'number' ? g.lastSale
+              : typeof g.lowestAsk === 'number' ? g.lowestAsk : null);
+  return {
+    cardmarket_price:    v,
+    pricecharting_price: v,
+    pricecharting_url:   (g && g.url) || null,
+    _goat_last_sale:     g?.lastSale ?? null,
+    _goat_lowest_ask:    g?.lowestAsk ?? null,
   };
 }
 
@@ -501,4 +575,5 @@ module.exports = {
   buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt,
   buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
+  mapStockxToCardResult, mapGoatToCardResult,
 };
