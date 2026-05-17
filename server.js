@@ -2635,11 +2635,13 @@ async function callGeminiText(prompt, withGrounding, timeoutMs) {
 }
 
 async function callGeminiIdentity(imageBase64, timeoutMs) {
-  // Identity uses a faster/smaller model than the price-lookup calls. It does
-  // visual-only ID (no grounded search), so a lighter model is sufficient and
-  // shaves ~2-3s vs gemini-2.5-flash. Defaults to gemini-3.1-flash-lite (GA as
-  // of May 2026, newest small flash model). Override via GEMINI_IDENTITY_MODEL.
-  const model = process.env.GEMINI_IDENTITY_MODEL || 'gemini-3.1-flash-lite';
+  // Identity model. We tried gemini-3.1-flash-lite + thinkingBudget=0 for
+  // speed (~2-3s), but single-digit OCR errors on tight variants (e.g. 067 vs
+  // 068) made it unreliable for high-stakes auction picks. Switched to
+  // gemini-2.5-flash (more capable, proven OCR) WITH thinking enabled —
+  // identification is the most critical step in the pipeline. Override via
+  // GEMINI_IDENTITY_MODEL if regressing on speed.
+  const model = process.env.GEMINI_IDENTITY_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const r = await fetch(url, {
     method: 'POST',
@@ -2704,10 +2706,10 @@ app.post('/scan/gemini-stream', async (req, res) => {
 
     // --- Stage 1: identity (no grounded search) ---
     let identity = null;
-    const identityModel = process.env.GEMINI_IDENTITY_MODEL || 'gemini-3.1-flash-lite';
+    const identityModel = process.env.GEMINI_IDENTITY_MODEL || 'gemini-2.5-flash';
     const identityT0 = Date.now();
     try {
-      identity = await callGeminiIdentity(imageBase64, 20_000);
+      identity = await callGeminiIdentity(imageBase64, 35_000);
       console.log('[Lakkot/Gemini-stream] identity model=' + identityModel + ' took ' + (Date.now() - identityT0) + 'ms');
     } catch (e) {
       console.error('[Lakkot/Gemini-stream] identity failed:', e.message);

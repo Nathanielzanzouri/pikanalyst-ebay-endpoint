@@ -170,11 +170,21 @@ function buildIdentityPrompt() {
     '',
     'CRITICAL — variant disambiguation:',
     'Modern Pokemon cards have MANY VARIANTS of the same name with different prices.',
-    'Examples: "Blastoise ex" 009/165 (Double Rare) vs 202/165 (Special Art Rare).',
+    'A single-digit difference in the card number can mean a 10× price gap.',
+    'Examples: "Blastoise ex" 009/165 (Double Rare, ~€5) vs 202/165 (Special Art Rare, ~€100).',
     'Examples: "Gardevoir & Sylveon GX" 031/055 vs 061/055 vs 260/173.',
+    'Examples: "Charizard & Braixen GX" 067/064 (Tag Team, ~€40) vs 068/064 (SA, ~€300).',
     '',
     'READ THE CARD NUMBER printed at the bottom (format "031/055", "202/165").',
     'The card number IS the variant identifier — use exactly what you read.',
+    '',
+    'OCR VERIFICATION — REQUIRED FOR THE CARD NUMBER:',
+    '1. Locate the card number text on the bottom edge (usually corner).',
+    '2. Read it digit-by-digit, then RE-READ to verify.',
+    '3. Common OCR mistakes: 6↔8, 0↔9, 1↔7, 3↔8. Double-check these digits.',
+    '4. The denominator (after "/") is the set size — verify it matches a known set.',
+    '5. If unsure between two digits, examine the digit\'s shape directly in the image.',
+    'Getting this number wrong = wrong variant = wrong price = bad user outcome.',
     '',
     'If the card number is not visible:',
     '  - If you see a text/moves/HP box at the bottom → standard framed variant',
@@ -207,12 +217,15 @@ function buildIdentityRequest(imageBase64, mimeType) {
         { inline_data: { mime_type: mimeType || 'image/jpeg', data: imageBase64 } },
       ],
     }],
-    // No tools — visual ID only, no web search. Much faster.
-    // Disable thinking on Gemini 3.x — for a constrained visual classification
-    // with a strict JSON contract, extended reasoning is pure overhead. This
-    // typically cuts identity latency by ~40-60% on 3.1-flash-lite.
+    // No tools — visual ID only, no web search.
+    // Thinking ENABLED (dynamic budget): the model needs to deliberate to
+    // verify the card number digit-by-digit. We previously had thinkingBudget=0
+    // for speed (~2-3s), but that produced single-digit OCR errors (e.g. 067 vs
+    // 068) that cascaded into the wrong variant being priced. A wrong variant
+    // can be a 10× price miss — identification is the most critical step, so we
+    // accept ~2-3s extra latency to make it reliable.
     generationConfig: {
-      thinkingConfig: { thinkingBudget: 0 },
+      thinkingConfig: { thinkingBudget: -1 }, // -1 = dynamic, model picks
       responseMimeType: 'application/json',
     },
   };
