@@ -2739,6 +2739,10 @@ app.post('/scan/gemini-stream', async (req, res) => {
     }
 
     // --- Stage 2: 3 parallel price calls ---
+    // eBay: uses the REAL eBay Finding/Browse API (same as non-Gemini route),
+    //       not Gemini grounded search. Direct catalog access = reliable sold
+    //       price averages, sales count, listings, multi-market by language.
+    // TCG & PriceCharting: still Gemini grounded search (no direct APIs).
     const merged = { ...mappedIdentity };
     const runPrice = async (sourceName, prompt, mapper) => {
       const tStart = Date.now();
@@ -2754,8 +2758,38 @@ app.post('/scan/gemini-stream', async (req, res) => {
         sse('price', { source: sourceName, error: e.message });
       }
     };
+    const runEbayApi = async () => {
+      const tStart = Date.now();
+      try {
+        // Build a `card` shape compatible with the non-Gemini route helpers.
+        // English/romanized names always — eBay search doesn't index Japanese.
+        const card = {
+          card_name:   identity.card_name_en || identity.card_name || '',
+          card_number: identity.card_number || '',
+          set_name:    identity.set_name_en || identity.set_name || '',
+          condition:   'Near Mint',
+        };
+        const cardLang = identity.language || language || 'WORLD';
+        const ebay = await fetchEbayAny(card, cardLang, 90);
+        const mapped = {
+          ebay_market_price: ebay?.market_price_usd ?? null,
+          market_price:      ebay?.market_price_usd ?? null,
+          market_price_usd:  ebay?.market_price_usd ?? null,
+          ebay_url:          ebay?.ebay_url ?? null,
+          ebay_sales_count:  ebay?.ebay_sales_count ?? 0,
+          listings:          ebay?.listings ?? [],
+        };
+        Object.assign(merged, mapped);
+        const elapsed = Date.now() - tStart;
+        sse('price', { source: 'ebay', ...mapped, _ms: elapsed });
+        console.log('[Lakkot/Gemini-stream] ebay (REAL API) at +' + (Date.now() - t0) + 'ms (' + elapsed + 'ms) — sales:', mapped.ebay_sales_count, '| avg:', mapped.ebay_market_price);
+      } catch (e) {
+        console.error('[Lakkot/Gemini-stream] ebay (REAL API) failed:', e.message);
+        sse('price', { source: 'ebay', error: e.message });
+      }
+    };
     await Promise.allSettled([
-      runPrice('ebay',          buildEbayPricePrompt(identity),         mapEbayPriceToCardResult),
+      runEbayApi(),
       runPrice('tcgplayer',     buildTcgplayerPricePrompt(identity),    mapTcgplayerPriceToCardResult),
       runPrice('pricecharting', buildPriceChartingPrompt(identity),     mapPriceChartingToCardResult),
     ]);
