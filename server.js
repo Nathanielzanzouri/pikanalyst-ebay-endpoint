@@ -2093,13 +2093,30 @@ function detectCurrency(priceStr) {
   return '$';
 }
 
-async function handleGoogleShopping(productName) {
+// Map country code → host language for Google Shopping. Picks the locally
+// dominant language so Shopping returns retailers' native-language titles
+// (better keyword match) and the in-country listings rank higher.
+const COUNTRY_HL = {
+  us: 'en', gb: 'en', au: 'en', ca: 'en',
+  fr: 'fr', be: 'fr', de: 'de', it: 'it', es: 'es', nl: 'nl', jp: 'ja',
+};
+
+async function handleGoogleShopping(productName, country) {
   const params = new URLSearchParams({
     engine: 'google_shopping',
     q: productName,
     api_key: process.env.SERPAPI_KEY,
     num: '40',
   });
+  // Apply geo params when the caller passed a Tier-1 country. Without these
+  // SerpAPI defaults to US/English regardless of the user's actual locale,
+  // which produces US-flavoured retailer mixes (Academy Sports, DSW, Zappos)
+  // for users in France/UK/etc. Setting gl+hl steers Google's relevance
+  // toward in-country retailers (Zalando FR, JD Sports UK, Snipes DE, ...).
+  if (country && COUNTRY_HL[country]) {
+    params.set('gl', country);
+    params.set('hl', COUNTRY_HL[country]);
+  }
 
   const res = await fetch('https://serpapi.com/search.json?' + params);
   const data = await res.json();
@@ -3459,7 +3476,7 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90 } = params;
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90, country = null } = params;
       // If client sent a full frame (scan zone active), use it as the original for logging
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
@@ -3974,7 +3991,7 @@ app.post('/scan', async (req, res) => {
         // becomes the basket as-is. Keeps the AI's role tightly scoped.
         console.log('[Lakkot] Unified: AI identity →', JSON.stringify({ brand: aiIdentity.brand, model: aiIdentity.model, variant: aiIdentity.variant, sku: aiIdentity.sku, category: aiIdentity.category, conf: aiIdentity.confidence }));
         try {
-          const raw = await handleGoogleShopping(aiIdentity.query);
+          const raw = await handleGoogleShopping(aiIdentity.query, country);
           const basket = raw.cards || [];
           if (basket.length >= 1) {
             shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
@@ -3999,7 +4016,7 @@ app.post('/scan', async (req, res) => {
         loggedShoppingQuery = skuQuery;
         console.log('[Lakkot] Unified: style-code ID', identity.styleCode, '(score', identity.score + ') → query:', skuQuery);
         try {
-          const raw1 = await handleGoogleShopping(skuQuery);
+          const raw1 = await handleGoogleShopping(skuQuery, country);
           let basket = filterBySku(raw1.cards, identity.styleCode);
           // Fallback: if the precise query yielded too few SKU matches, retry with
           // a broader "brand + sku" query and pool the unique results. This is the
@@ -4007,7 +4024,7 @@ app.post('/scan', async (req, res) => {
           if (basket.length < 2 && identity.brand && identity.styleCode) {
             const fallbackQuery = `${identity.brand} ${identity.styleCode}`;
             console.log('[Lakkot] Unified: thin basket — fallback query →', fallbackQuery);
-            const raw2 = await handleGoogleShopping(fallbackQuery);
+            const raw2 = await handleGoogleShopping(fallbackQuery, country);
             const more = filterBySku(raw2.cards, identity.styleCode);
             const seen = new Set(basket.map((c) => c.title));
             for (const c of more) if (!seen.has(c.title)) { basket.push(c); seen.add(c.title); }
@@ -4024,7 +4041,7 @@ app.post('/scan', async (req, res) => {
             const nameQuery = `${identity.brand} ${phrase}`;
             console.log('[Lakkot] Unified: retailer-augment query →', nameQuery);
             try {
-              const raw3 = await handleGoogleShopping(nameQuery);
+              const raw3 = await handleGoogleShopping(nameQuery, country);
               const retailers = (raw3.cards || []).filter((c) => !isMarketplace(c.source));
               const seenTitles = new Set(basket.map((c) => c.title));
               let added = 0;
@@ -4051,7 +4068,7 @@ app.post('/scan', async (req, res) => {
         loggedShoppingQuery = shoppingQuery;
         if (shoppingQuery) {
           try {
-            shoppingResult = await handleGoogleShopping(shoppingQuery);
+            shoppingResult = await handleGoogleShopping(shoppingQuery, country);
             console.log('[Lakkot] Unified: Google Shopping (loose)', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
           } catch (err) {
             console.error('[Lakkot] Unified: Google Shopping error:', err.message);
@@ -4104,7 +4121,7 @@ app.post('/scan', async (req, res) => {
       let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
       if (productName) {
         try {
-          shoppingResult = await handleGoogleShopping(productName);
+          shoppingResult = await handleGoogleShopping(productName, params.country || null);
           console.log(`[Lakkot] google_shopping: ${shoppingResult.cards.length} priced cards, median=${shoppingResult.medianPrice}`);
         } catch (shErr) {
           console.error('[Lakkot] google_shopping error (falling back to lens):', shErr.message);
