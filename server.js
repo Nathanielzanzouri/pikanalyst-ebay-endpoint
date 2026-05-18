@@ -11,6 +11,7 @@ const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
+const { extractProductIdentity } = require('./ai-product-id');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
@@ -3973,9 +3974,43 @@ app.post('/scan', async (req, res) => {
       let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
       let lowConfidence = false;
       // Captured for scan_logs.shopping_query — the primary query we sent to
-      // Google Shopping (skuQuery on confident path, cleaned Lens name on loose).
-      // Lets us debug "what did Google see" without re-running the scan.
+      // Google Shopping. Lets us debug "what did Google see" without re-running
+      // the scan.
       let loggedShoppingQuery = null;
+
+      // AI-first product identification: one Gemini Flash Lite call reads the
+      // Lens titles and produces a clean Shopping query + structured identity
+      // for ANY product category (sneakers, bags, toys, watches, ...). Falls
+      // back to the legacy sneaker-specific regex/vote logic if Gemini fails
+      // or returns garbage. See ai-product-id.js for cost/latency rationale.
+      const aiIdentity = await extractProductIdentity(lensResult?.visualMatches || []);
+      if (aiIdentity && aiIdentity.query) {
+        loggedShoppingQuery = aiIdentity.query;
+        // brand/model/variant/sku/category are logged for diagnostics but we
+        // do NOT act on them downstream — by design, Gemini is used ONLY to
+        // build the Shopping query. Whatever Google returns for that query
+        // becomes the basket as-is. Keeps the AI's role tightly scoped.
+        console.log('[Lakkot] Unified: AI identity →', JSON.stringify({ brand: aiIdentity.brand, model: aiIdentity.model, variant: aiIdentity.variant, sku: aiIdentity.sku, category: aiIdentity.category, conf: aiIdentity.confidence }));
+        try {
+          const raw = await handleGoogleShopping(aiIdentity.query);
+          const basket = raw.cards || [];
+          if (basket.length >= 1) {
+            shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
+            console.log('[Lakkot] Unified: AI-path basket', basket.length, 'median=' + shoppingResult.medianPrice);
+          } else {
+            console.log('[Lakkot] Unified: AI query returned 0 Shopping results');
+          }
+        } catch (err) {
+          console.error('[Lakkot] Unified: AI-path shopping error:', err.message);
+        }
+      }
+
+      // Legacy regex/vote path — runs ONLY when the AI path didn't produce
+      // results (either AI failed entirely or its Shopping query returned 0
+      // cards). Skipped when the AI path succeeded, so we don't overwrite
+      // a good AI result with the noisier legacy query.
+      const aiSucceeded = shoppingResult.cards.length > 0;
+      if (!aiSucceeded) {
       const identity = buildIdentity(lensResult?.visualMatches || []);
       if (identity.confident) {
         const skuQuery = buildShoppingQuery(identity);
@@ -4041,6 +4076,7 @@ app.post('/scan', async (req, res) => {
           }
         }
       }
+      }   // end if (!aiSucceeded) — close the AI-fallback gate
 
       // Prefer Shopping (more results, better median) over Lens visual matches.
       // When a confident style code yielded too few SKU matches, do NOT fall
