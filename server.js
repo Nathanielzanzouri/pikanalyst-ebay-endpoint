@@ -472,6 +472,43 @@ function isBooster(title) {
   ].some(kw => lower.includes(kw));
 }
 
+// ─── One Piece-specific noise filters ────────────────────────────────────────
+// Bandai uses the same set-code conventions (ST01, ST02, OP01, EB01, P-001)
+// across MULTIPLE TCGs they publish — Gundam Card Game, Digimon, Dragon Ball
+// Super, Battle Spirits, Battle Spirits Saga, Union Arena, etc. So a query
+// like "ST01-001" returns results from ALL of these games, polluting the
+// average. For OP scans we REQUIRE the title to indicate One Piece AND we
+// reject titles that explicitly mention other Bandai games.
+const OP_CROSS_GAME_KEYWORDS = [
+  'gundam', 'digimon', 'dragon ball super', 'dragonball super',
+  'battle spirits', 'union arena', 'sword art online',
+];
+function isOnePieceCrossGame(title) {
+  const lower = (title || '').toLowerCase();
+  return OP_CROSS_GAME_KEYWORDS.some(kw => lower.includes(kw));
+}
+// Positive signal: must mention One Piece somewhere in the title.
+function hasOnePieceKeyword(title) {
+  const lower = (title || '').toLowerCase();
+  return lower.includes('one piece') || lower.includes('onepiece') || lower.includes('opcg');
+}
+// Sealed / collection products that share card numbers with single cards
+// (Premium Card Collections, Starter Decks sold whole, deck sets, etc.).
+// These often have wildly higher prices than the single card and skew averages.
+const OP_SEALED_KEYWORDS = [
+  'premium card collection', 'deck set', 'starter deck', 'start deck',
+  'family deck', 'special deck', 'awakening of the new era',
+  'jeu de cartes', // French generic "card game" usually indicates sealed product
+  'sealed', 'scellé', 'scelle',
+];
+function isOnePieceSealedProduct(title) {
+  const lower = (title || '').toLowerCase();
+  // Only flag as sealed if a sealed-keyword is present AND the title doesn't
+  // explicitly say "single card" or "carte unique" (rare but exists).
+  if (/\b(single card|carte unique|carte seule)\b/i.test(lower)) return false;
+  return OP_SEALED_KEYWORDS.some(kw => lower.includes(kw));
+}
+
 function isFigurine(title) {
   const lower = title.toLowerCase();
   return [
@@ -1196,7 +1233,8 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
   // the graded filter — keep ONLY listings whose title matches the target grade.
   // Otherwise, existing behavior: reject all graded listings as noise.
   const titleFilter = makeGradedTitleFilter(card._gradeFilter);
-  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0;
+  const isOpScan = card._tcgCategory === 'OnePiece';
+  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0;
   const clean = sold.filter(i => {
     const t = i?.title?.[0] ?? '';
     if (!titleFilter(t)) { gradedOut++;     return false; }
@@ -1205,9 +1243,14 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
     if (isFigurine(t))     { figuresOut++;    return false; }
     if (isMultiChoice(t))  { multichoiceOut++;return false; }
     if (isSpecialEdition(t)){ specialOut++;   return false; }
+    // One Piece-specific filters (only when category=OnePiece). Reject
+    // cross-game collisions (Gundam ST01-001 etc.) and sealed products.
+    if (isOpScan && isOnePieceCrossGame(t))   { opCrossGameOut++; return false; }
+    if (isOpScan && isOnePieceSealedProduct(t)){ opSealedOut++;    return false; }
+    if (isOpScan && !hasOnePieceKeyword(t))   { opNoKeywordOut++; return false; }
     return true;
   });
-  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
+  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
 
   if (clean.length === 0) throw new Error('Finding: 0 results after graded/lot filter');
 
@@ -1348,7 +1391,8 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
 
     // See Finding-API equivalent for the grading-filter inversion logic.
     const titleFilter = makeGradedTitleFilter(card._gradeFilter);
-    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0;
+    const isOpScan = card._tcgCategory === 'OnePiece';
+    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
       if (!titleFilter(t))    { gradedOut++;     return false; }
@@ -1357,10 +1401,15 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
       if (isFigurine(t))      { figuresOut++;    return false; }
       if (isMultiChoice(t))   { multichoiceOut++;return false; }
       if (isSpecialEdition(t)){ specialOut++;    return false; }
+      // OP-specific filters (only when category=OnePiece). See Finding-API
+      // equivalent above for full rationale.
+      if (isOpScan && isOnePieceCrossGame(t))   { opCrossGameOut++; return false; }
+      if (isOpScan && isOnePieceSealedProduct(t)){ opSealedOut++;    return false; }
+      if (isOpScan && !hasOnePieceKeyword(t))   { opNoKeywordOut++; return false; }
       return true;
     });
 
-    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | clean=${cleanItems.length} | query: "${query}"`);
+    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
 
     let identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
 
@@ -1537,7 +1586,7 @@ async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90)
   return { ...item, ...priceData, seller_asking_price: sellerPrice ?? item.seller_asking_price ?? null };
 }
 
-async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90, gradeFilter = null }) {
+async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90, gradeFilter = null, tcgCategory = null }) {
   const rawTitle = streamTitle?.trim() ?? '';
   const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
 
@@ -1600,6 +1649,12 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
       item.set_name = overrideStr;
     }
   }
+
+  // Attach TCG category to item so the eBay result filter can apply
+  // category-specific exclusions (e.g. reject Gundam/Digimon listings for
+  // OnePiece scans where the set codes collide). Null for Pokemon — no
+  // additional filtering needed.
+  if (tcgCategory) item._tcgCategory = tcgCategory;
 
   // Grade-only detection (ACE logo-only slabs, boutique graders without
   // readable company text): skip strict-match, go directly to peer-mode
@@ -3534,6 +3589,7 @@ app.post('/scan', async (req, res) => {
             imageBase64, streamTitle: opQuery, sellerPrice,
             mode: 'cards', manualCardOverride: opQuery,
             language, dateRange, gradeFilter: detectedGrade,
+            tcgCategory: 'OnePiece',
           });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice
