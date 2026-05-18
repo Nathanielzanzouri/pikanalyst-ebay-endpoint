@@ -2107,8 +2107,26 @@ async function handleGoogleShopping(productName) {
   const raw = data.shopping_results ?? [];
   console.log(`[Lakkot] google_shopping: ${raw.length} results for "${productName}"`);
 
+  // Trust Google's relevance order. The previous pipeline reordered by price
+  // ascending + dropped second-hand listings + applied a quartile outlier
+  // filter; with the AI-built query this destroyed Google's ranking and
+  // surfaced cheap lookalikes instead of the actual product (real case:
+  // "Converse Chuck Taylor Coca-Cola Black A18435C" → 8 cheapest were generic
+  // Chuck Taylors, not the Coca-Cola collab). Now we only drop items that
+  // are unusable (no price/thumb/link), obvious junk (counterfeit domains),
+  // or kids sizes (distort adult-product medians). Everything else stays in
+  // Google's order. The result median = median of what the user sees.
+  const COUNTERFEIT_DOMAINS = ['aliexpress', 'temu', 'dhgate', 'wish'];
+  const KIDS_RE = /\b(kids|enfant|enfants|junior|juniors|toddler|infant|pre.?school|grade.?school|little kid|big kid|bébé|bebe|ps|td|gs)\b/i;
+
   const cards = raw
     .filter(item => item.extracted_price && item.extracted_price > 0 && item.thumbnail && item.product_link)
+    .filter(item => {
+      const domain = (item.source || '').toLowerCase();
+      if (COUNTERFEIT_DOMAINS.some(d => domain.includes(d))) return false;
+      if (KIDS_RE.test(item.title || '')) return false;
+      return true;
+    })
     .map(item => ({
       title: item.title,
       retailer: item.source,
@@ -2122,53 +2140,17 @@ async function handleGoogleShopping(productName) {
       tag: item.tag ?? null,
     }));
 
-  if (cards.length < 2) {
-    return { cards, medianPrice: cards[0]?.price ?? null, totalFound: cards.length };
-  }
-
-  // Remove price outliers: keep Q1*0.5 to Q3*2
-  const prices = cards.map(c => c.price).sort((a, b) => a - b);
-  const q1 = prices[Math.floor(prices.length * 0.25)];
-  const q3 = prices[Math.floor(prices.length * 0.75)];
-  const filtered = cards.filter(c => c.price >= q1 * 0.5 && c.price <= q3 * 2);
-
-  // Sort by price ascending
-  filtered.sort((a, b) => a.price - b.price);
-
-  // Filter out secondhand/resale sources — retail price is the anchor for non-card items
-  // Remove counterfeit marketplaces (always)
-  const COUNTERFEIT_DOMAINS = [
-    'aliexpress', 'temu', 'dhgate', 'wish',
-  ];
-  const KIDS_RE = /\b(kids|enfant|enfants|junior|juniors|toddler|infant|pre.?school|grade.?school|little kid|big kid|bébé|bebe|ps|td|gs)\b/i;
-  const legitimate = filtered.filter(c => {
-    const domain = (c.retailer || c.domain || '').toLowerCase();
-    if (COUNTERFEIT_DOMAINS.some(r => domain.includes(r))) return false;
-    if (KIDS_RE.test(c.title || '')) return false;
-    return true;
-  });
-
-  // Trusted marketplaces — never filter these even if flagged as secondhand
-  const TRUSTED_MARKETPLACES = ['stockx', 'goat', 'klekt'];
-  // From legitimate results, prefer retail + trusted marketplaces over secondhand
-  const retailOnly = legitimate.filter(c => {
-    const domain = (c.retailer || c.domain || '').toLowerCase();
-    if (TRUSTED_MARKETPLACES.some(t => domain.includes(t))) return true;
-    return !c.isSecondHand;
-  });
-  const displaySource = retailOnly.length > 0 ? retailOnly : legitimate;
-  const displayCards = displaySource.slice(0, 8);
-
-  // Median from displayed results — so the number matches what the user sees
-  const displayPrices = displayCards.map(c => c.price);
+  const DISPLAY_N = 8;
+  const displayCards = cards.slice(0, DISPLAY_N);
+  const displayPrices = displayCards.map(c => c.price).sort((a, b) => a - b);
   const median = displayPrices.length > 0
     ? displayPrices[Math.floor(displayPrices.length / 2)]
     : null;
 
   return {
-    cards: displayCards,
+    cards: displayCards,    // Google's native relevance order — first is most relevant
     medianPrice: median,
-    totalFound: displaySource.length,
+    totalFound: cards.length,
   };
 }
 
