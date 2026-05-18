@@ -132,6 +132,95 @@ function descriptorMatchTerms(descriptor) {
   return [d]; // catch-all: match the descriptor literally
 }
 
+// Keywords that signal a listing is an alt-art reprint (25th Anniversary,
+// promo, event pack, etc.) — physically a different print but with the
+// SAME gameplay card number stamped on it, so eBay sellers (correctly)
+// use the base number in titles. optcgapi.com files these under different
+// card_numbers (e.g. EB-02 set for 25th Anniv reprints), so they never
+// show up when we look up the gameplay number. We split them out as a
+// synthetic picker tile so the user has something to tap that matches the
+// card they're actually scanning.
+const PROMO_KEYWORDS = [
+  '25th',
+  'anniversary',
+  'anniv',
+  'promo',
+  'promotion',
+  'event pack',
+  'one piece day',
+  'op day',
+];
+
+const MIN_PROMO_SPLIT = 2;   // need ≥2 to be a real variant, not a one-off mislisting
+
+function median(prices) {
+  if (!prices.length) return null;
+  const sorted = [...prices].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// Scan the Base bucket for promo/anniversary-keyword listings; if there are
+// enough of them AND removing them would still leave Base non-empty, split
+// them into a new synthetic variant inserted right after Base. Returns the
+// (possibly modified) bucket list. No-op when there's no Base bucket or
+// when the split criteria aren't met.
+function splitPromoFromBase(buckets) {
+  const baseIdx = buckets.findIndex(b => b.label === 'Base');
+  if (baseIdx < 0) return buckets;
+  const base = buckets[baseIdx];
+  const baseListings = base.listings || [];
+  const promoListings = [];
+  const remaining = [];
+  for (const l of baseListings) {
+    const title = ((l && l.title) || '').toLowerCase();
+    if (PROMO_KEYWORDS.some(kw => title.includes(kw))) promoListings.push(l);
+    else remaining.push(l);
+  }
+  if (promoListings.length < MIN_PROMO_SPLIT) return buckets;
+  // Don't strip Base into nothing — if every "base" listing was actually a
+  // promo, the user's API-reported Base price is more trustworthy than
+  // splitting on bad data. Leave buckets untouched in that case.
+  if (remaining.length === 0) return buckets;
+
+  // Label hints at the specific subtype where possible
+  const joinedTitles = promoListings.map(l => ((l && l.title) || '').toLowerCase()).join(' ');
+  const has25th = /25th|anniversary|anniv/.test(joinedTitles);
+  const label = has25th ? 'Promo / 25th Anniv' : 'Promo';
+
+  const promoPrices = promoListings.map(l => l.price).filter(p => typeof p === 'number' && p > 0);
+  const firstWithImg = promoListings.find(l => l && l.imageUrl);
+  const synthetic = {
+    id: 'syn-promo',
+    label,
+    price: median(promoPrices),
+    priceMin: promoPrices.length ? Math.min(...promoPrices) : null,
+    priceMax: promoPrices.length ? Math.max(...promoPrices) : null,
+    count: promoListings.length,
+    imageUrl: firstWithImg ? firstWithImg.imageUrl : null,   // eBay thumb — not authoritative but recognizable
+    sampleTitle: (promoListings[0] && promoListings[0].title) || label,
+    tcg_ref_usd: null,        // unknown — API doesn't index alt-art reprints under the base number
+    listings: promoListings,
+    _synthetic: true,         // diagnostic marker
+  };
+
+  // Rebuild Base bucket with remaining (true-base) listings only
+  const basePrices = remaining.map(l => l.price).filter(p => typeof p === 'number' && p > 0);
+  const updatedBase = {
+    ...base,
+    price: median(basePrices),
+    priceMin: basePrices.length ? Math.min(...basePrices) : null,
+    priceMax: basePrices.length ? Math.max(...basePrices) : null,
+    count: remaining.length,
+    listings: remaining,
+  };
+
+  const result = [...buckets];
+  result[baseIdx] = updatedBase;
+  result.splice(baseIdx + 1, 0, synthetic);
+  return result;
+}
+
 // Given eBay listings + API-known variants, bucket each listing into the
 // matching variant by title keyword. Listings not matching any non-base
 // variant fall into the base (first) bucket. Returns variant objects with
@@ -160,21 +249,14 @@ function bucketListingsByVariant(ebayListings, apiVariants) {
       buckets[target]._listings.push(listing);
     }
   }
-  return buckets.map((b, i) => {
-    const prices = b._listings
-      .map(l => l.price)
-      .filter(p => typeof p === 'number' && p > 0)
-      .sort((a, c) => a - c);
-    const mid = Math.floor(prices.length / 2);
-    const median = prices.length === 0 ? null
-      : prices.length % 2 ? prices[mid]
-      : (prices[mid - 1] + prices[mid]) / 2;
+  const out = buckets.map((b, i) => {
+    const prices = b._listings.map(l => l.price).filter(p => typeof p === 'number' && p > 0);
     return {
       id:        'api-v' + i,
       label:     b.variant_descriptor || 'Base',
-      price:     median,                  // eBay-derived sold-price median
-      priceMin:  prices[0] || null,
-      priceMax:  prices[prices.length - 1] || null,
+      price:     median(prices),          // eBay-derived sold-price median
+      priceMin:  prices.length ? Math.min(...prices) : null,
+      priceMax:  prices.length ? Math.max(...prices) : null,
       count:     b._listings.length,
       imageUrl:  b.card_image,            // official Bandai image
       sampleTitle: b.card_name,
@@ -184,16 +266,22 @@ function bucketListingsByVariant(ebayListings, apiVariants) {
       listings:  b._listings,
     };
   });
+  // Split alt-art reprints (25th Anniv, Promo) out of Base into a synthetic
+  // tile — see PROMO_KEYWORDS / splitPromoFromBase for rationale.
+  return splitPromoFromBase(out);
 }
 
 module.exports = {
   TTL_MS,
+  PROMO_KEYWORDS,
+  MIN_PROMO_SPLIT,
   extractVariantDescriptor,
   extractCharacterName,
   formatCharacterForQuery,
   normalizeApiRecord,
   getOnePieceCardVariants,
   descriptorMatchTerms,
+  splitPromoFromBase,
   bucketListingsByVariant,
   _cache: CACHE,    // exposed for tests
 };

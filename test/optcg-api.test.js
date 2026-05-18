@@ -165,3 +165,81 @@ test('bucketListingsByVariant: imageUrl carries through from API', () => {
   const buckets = bucketListingsByVariant([], apiVariants);
   assert.strictEqual(buckets[0].imageUrl, 'https://optcgapi.com/img/base.jpg');
 });
+
+// ─── splitPromoFromBase (synthetic 25th-Anniv / Promo variant) ───────────────
+test('bucketListingsByVariant: splits 25th Anniv promos out of Base into a synthetic tile', () => {
+  // Mirrors the real-world OP01-001 Zoro case: API only knows Base + Parallel,
+  // but eBay has multiple 25th Anniversary Promo listings stamped with the
+  // gameplay number. The synthetic split should rescue them into their own
+  // picker tile so the user has something to tap that matches their card.
+  const apiVariants = [
+    { card_name: 'Roronoa Zoro (001)',            variant_descriptor: null,       card_image: 'base.jpg', market_price_usd: 3.44 },
+    { card_name: 'Roronoa Zoro (001) (Parallel)', variant_descriptor: 'Parallel', card_image: 'par.jpg',  market_price_usd: 556.77 },
+  ];
+  const ebayListings = [
+    { title: 'Carte One Piece OP01-001 L NM',                                                    price: 2.41, imageUrl: 'l1.jpg' },
+    { title: 'Roronoa Zoro OP01-001 Leader Romance Dawn',                                        price: 3.10, imageUrl: 'l2.jpg' },
+    { title: 'Roronoa Zoro OP01-001 (Promo) Leader 25th Anniversary Edition ONE PIECE Card NM', price: 21.38, imageUrl: 'l3.jpg' },
+    { title: 'Carte One Piece Promo OP01-001 Zoro Manga 25th',                                   price: 19.00, imageUrl: 'l4.jpg' },
+    { title: 'One Piece Card Game OP01-001 Promo Zoro',                                          price: 5.50, imageUrl: 'l5.jpg' },
+    { title: 'Roronoa Zoro [PAR] Parallel OP01-001',                                             price: 149.95, imageUrl: 'l6.jpg' },
+  ];
+  const buckets = bucketListingsByVariant(ebayListings, apiVariants);
+  // Expect 3 buckets now: Base, synthetic Promo, Parallel
+  assert.strictEqual(buckets.length, 3, 'expected 3 buckets after promo split, got ' + buckets.length);
+  const synth = buckets.find(b => b._synthetic);
+  assert.ok(synth, 'expected a synthetic promo bucket');
+  assert.ok(/Promo|Anniv/.test(synth.label), 'synthetic label should mention Promo/Anniv: ' + synth.label);
+  assert.strictEqual(synth.label, 'Promo / 25th Anniv', 'should detect 25th Anniv specifically');
+  assert.strictEqual(synth.count, 3, 'all 3 promo listings should be in the synthetic bucket');
+  assert.strictEqual(synth.tcg_ref_usd, null, 'synthetic variant has no API TCG ref');
+  assert.ok(synth.imageUrl, 'should use first promo listing imageUrl as thumb');
+  // Base bucket should now only contain the 2 true-base listings
+  const base = buckets.find(b => b.label === 'Base');
+  assert.strictEqual(base.count, 2, 'Base should have shed its promos');
+  // Parallel untouched
+  const par = buckets.find(b => b.label === 'Parallel');
+  assert.strictEqual(par.count, 1);
+});
+
+test('bucketListingsByVariant: does NOT split when only 1 promo listing exists (below threshold)', () => {
+  const apiVariants = [
+    { card_name: 'Zoro', variant_descriptor: null, card_image: 'base.jpg', market_price_usd: 3 },
+  ];
+  const buckets = bucketListingsByVariant([
+    { title: 'Base Zoro OP01-001', price: 3 },
+    { title: 'Base Zoro OP01-001 NM', price: 3.2 },
+    { title: 'Zoro OP01-001 promo 25th anniversary', price: 20 },  // only 1 promo
+  ], apiVariants);
+  assert.strictEqual(buckets.length, 1, 'should not split with only 1 promo listing');
+  assert.strictEqual(buckets[0].count, 3);
+});
+
+test('bucketListingsByVariant: does NOT split when ALL base listings are promos (would empty Base)', () => {
+  // Edge case: if the only listings in Base are promo-labeled, trust the API's
+  // base price rather than emptying Base into a synthetic tile.
+  const apiVariants = [
+    { card_name: 'Zoro', variant_descriptor: null, card_image: 'base.jpg', market_price_usd: 3 },
+  ];
+  const buckets = bucketListingsByVariant([
+    { title: 'Promo Zoro OP01-001 25th anniversary', price: 20 },
+    { title: 'Promo Zoro OP01-001 event pack',       price: 22 },
+  ], apiVariants);
+  assert.strictEqual(buckets.length, 1, 'should not split when remaining base would be empty');
+  assert.strictEqual(buckets[0].count, 2);
+});
+
+test('splitPromoFromBase: label falls back to plain "Promo" when 25th-anniv keywords absent', () => {
+  const { splitPromoFromBase } = require('../optcg-api');
+  const buckets = [
+    { label: 'Base', listings: [
+      { title: 'Base Zoro OP01-001', price: 3 },
+      { title: 'Base Zoro OP01-001 NM', price: 3.2 },
+      { title: 'Zoro OP01-001 promo event pack', price: 15 },
+      { title: 'Zoro OP01-001 one piece day promotion', price: 18 },
+    ]},
+  ];
+  const out = splitPromoFromBase(buckets);
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[1].label, 'Promo');
+});
