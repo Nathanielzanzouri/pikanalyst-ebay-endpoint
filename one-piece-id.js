@@ -14,11 +14,14 @@
 // Sometimes printed compactly as "OP01001" or with extra slashes — regex
 // tolerates both.
 
-// Strict format: card numbers are ALWAYS published as 2-digit set + 3-digit
-// card. Loose matching ("OP01-1") was producing wrong set numbers via greedy
-// backtracking ("OP01001" → setNum:10 instead of setNum:01). Require the
-// 2+3 structure; tolerate optional dash/space between them.
-const CARD_NUMBER_RE = /\b(OP|EB|ST)\s*(\d{2})\s*[-]?\s*(\d{3})\b|\bP\s*-\s*(\d{1,3})\b/i;
+// Modern OPCG format: 2-digit set + 3-digit card. Loose matching ("OP01-1")
+// was producing wrong set numbers via greedy backtracking ("OP01001" →
+// setNum:10 instead of setNum:01). Require the 2+3 structure; tolerate
+// optional dash/space between them.
+//
+// Also matches vintage Carddass / Hyper Battle formats (Bandai 2001-2010):
+//   H18, S111, PR-001 — short prefix + 1-3 digits, no set code.
+const CARD_NUMBER_RE = /\b(OP|EB|ST)\s*(\d{2})\s*[-]?\s*(\d{3})\b|\bP\s*-\s*(\d{1,3})\b|\b(H|S|PR|HB)\s*-?\s*(\d{1,3})\b/i;
 
 // Rarities printed on OP cards. Order matters — more specific patterns first
 // so "Manga Rare" doesn't get caught by the bare "R" match.
@@ -74,9 +77,12 @@ function normalizeCardNumber(rawMatch) {
   if (!rawMatch) return null;
   const m = String(rawMatch).match(CARD_NUMBER_RE);
   if (!m) return null;
-  // Promo card path: m[4] is the 1-3 digit promo number
+  // Promo (modern): m[4] is the 1-3 digit promo number
   if (m[4]) return 'P-' + String(m[4]).padStart(3, '0');
-  // Set card path: m[1]=OP/EB/ST, m[2]=2-digit setnum, m[3]=3-digit cardnum
+  // Vintage Carddass: m[5]=H/S/PR/HB, m[6]=number. Don't pad — vintage
+  // numbers are usually shown as printed ('H18' not 'H018').
+  if (m[5]) return m[5].toUpperCase() + m[6];
+  // Modern set card: m[1]=OP/EB/ST, m[2]=2-digit setnum, m[3]=3-digit cardnum
   return `${m[1].toUpperCase()}${m[2]}-${m[3]}`;
 }
 

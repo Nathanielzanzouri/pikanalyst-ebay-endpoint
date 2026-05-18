@@ -3602,7 +3602,26 @@ app.post('/scan', async (req, res) => {
             ? (detectedGrade.company ? `${detectedGrade.company} ${detectedGrade.grade}` : `grade-only ${detectedGrade.grade} (peer mode)`)
             : 'raw');
       }
-      const productName = lensResult?.productName ?? null;
+      // Lens often returns articles/blog titles as the top match ("Pourquoi
+      // les gens détestent-ils X?", "Top 10 cards of Y", Reddit threads).
+      // Walk visualMatches and prefer the first title that looks like a
+      // TCG card listing. Falls back to lensResult.productName when no
+      // better candidate exists.
+      const ARTICLE_RE = /\?|^\s*(pourquoi|comment|top\b|best\b|why\b|how\b|what\b|où|quand|quel|qui|theorie|théorie|review|unboxing|watch\b|guide)\b/i;
+      const TCG_KEYWORD_RE = /\b(card|carte|carddass|pokemon|pokémon|one\s*piece|onepiece|opcg|yugioh|yu-gi-oh|mtg|magic|tcg|charizard|pikachu|luffy|zoro|nami|chopper|holographic|holo|foil|alt\s*art|psa|cgc|bgs)\b/i;
+      const pickLensProductName = (matches, fallback) => {
+        for (const m of (matches || []).slice(0, 10)) {
+          const t = (m && m.title) || '';
+          if (!t) continue;
+          if (ARTICLE_RE.test(t)) continue;       // skip articles / interrogatives
+          if (TCG_KEYWORD_RE.test(t)) return t;   // first TCG-flavored match wins
+        }
+        return fallback || null;
+      };
+      const productName = pickLensProductName(lensResult?.visualMatches, lensResult?.productName);
+      if (productName !== lensResult?.productName) {
+        console.log('[Lakkot/lens-pick] overriding top productName:', JSON.stringify(lensResult?.productName), '→', JSON.stringify(productName));
+      }
 
       // === One Piece TCG path — branched BEFORE Pokemon paths so OP cards
       //     skip Pokemon vote logic entirely. Uses one-piece-id.js extractor

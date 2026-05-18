@@ -39,6 +39,18 @@ test('normalizeCardNumber: promo padded P-7 → P-007', () => {
   assert.strictEqual(normalizeCardNumber('P-7'), 'P-007');
 });
 
+test('normalizeCardNumber: vintage Carddass H18 (Hyper Battle) → H18', () => {
+  assert.strictEqual(normalizeCardNumber('H18'), 'H18');
+});
+
+test('normalizeCardNumber: vintage Carddass S111 → S111', () => {
+  assert.strictEqual(normalizeCardNumber('S111'), 'S111');
+});
+
+test('normalizeCardNumber: vintage Carddass with hyphen H-18 → H18', () => {
+  assert.strictEqual(normalizeCardNumber('H-18'), 'H18');
+});
+
 test('normalizeCardNumber: garbage returns null', () => {
   assert.strictEqual(normalizeCardNumber('not a card number'), null);
   assert.strictEqual(normalizeCardNumber(null), null);
