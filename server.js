@@ -379,15 +379,46 @@ function isGradedCard(title) {
   return GRADING_KEYWORDS.some(kw => lower.includes(kw));
 }
 
+// Peer graders for the "no exact grade data, use a proxy" fallback. PSA is
+// deliberately EXCLUDED because PSA carries a 30-100% price premium vs other
+// graders at the same numerical grade — using PSA data as a CGC/BGS/ACE proxy
+// would mislead the user about value.
+const PEER_GRADERS = [
+  'cgc', 'bgs', 'beckett', 'sgc', 'ace', 'pca',
+  'collectaura', 'collect aura', 'ccc', 'hga', 'pfx', 'fcg', 'sfg',
+];
+
+// Builds a title filter that keeps non-PSA listings at the target grade
+// (used when the strict company-specific search returned 0 sales). Matches any
+// peer grader name in the title alongside the grade number. Rejects titles
+// containing "PSA" so the proxy average isn't skewed up by PSA premiums.
+function makePeerGradedTitleFilter(grade) {
+  const gradeStr = String(grade).toLowerCase();
+  return (title) => {
+    const lower = title.toLowerCase();
+    if (lower.includes('psa')) return false;
+    if (!lower.includes(gradeStr)) return false;
+    return PEER_GRADERS.some((c) => lower.includes(c));
+  };
+}
+
 // When the "grading" feature flag is on and Gemini detected the user's card
 // is in a slab (e.g. PSA 10), we want to RETAIN graded listings that match the
 // target grade and reject everything else (raw + other grades). This function
 // returns the filter predicate to use for the title-keep decision.
 //   gradeFilter = null      → raw mode, existing behavior (reject all graded)
 //   gradeFilter = {company, grade} → graded mode, require "<company> <grade>" in title
+//   gradeFilter = {mode:'peer', grade} → peer fallback, any non-PSA grader at grade
 function makeGradedTitleFilter(gradeFilter) {
-  if (!gradeFilter || !gradeFilter.company || !gradeFilter.grade) {
+  if (!gradeFilter) {
     // Raw mode: keep only non-graded listings (existing behavior)
+    return (title) => !isGradedCard(title);
+  }
+  // Peer-fallback mode: any non-PSA grader at the same grade
+  if (gradeFilter.mode === 'peer' && gradeFilter.grade) {
+    return makePeerGradedTitleFilter(gradeFilter.grade);
+  }
+  if (!gradeFilter.company || !gradeFilter.grade) {
     return (title) => !isGradedCard(title);
   }
   // Graded mode: require the target grade keyword. Accept common formats:
@@ -1553,6 +1584,30 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     item._gradeFilter = gradeFilter;
     item.graded = gradeFilter; // surface in response so panel can label "vs eBay PSA 10"
     console.log('[Lakkot/grading] handleAnalyze using gradeFilter:', gradeFilter, '| query:', item.ebay_search);
+
+    // Try strict company+grade first.
+    const strictResult = await handleCard(item, sellerPrice, language, dateRange);
+    if ((strictResult.ebay_sales_count ?? 0) > 0) {
+      strictResult.graded_via = 'strict';
+      return strictResult;
+    }
+
+    // Peer fallback: boutique graders (CollectAura, HGA, etc.) often have
+    // zero eBay sold listings even when correctly identified. Retry with a
+    // broader filter — any non-PSA grader at the same grade. PSA excluded
+    // because PSA carries a 30-100% premium that would mislead the user.
+    console.log('[Lakkot/grading] strict returned 0; trying peer fallback at grade', gradeFilter.grade);
+    const peerItem = {
+      ...item,
+      // Drop the company from the query so eBay's relevance returns a mix of graders
+      ebay_search: item.ebay_search.replace(new RegExp('\\s+' + gradeFilter.company + '\\s+', 'i'), ' '),
+      _gradeFilter: { mode: 'peer', grade: gradeFilter.grade },
+    };
+    const peerResult = await handleCard(peerItem, sellerPrice, language, dateRange);
+    peerResult.graded = gradeFilter;            // keep detected company in response (panel still shows "CollectAura 9.5 detected")
+    peerResult.graded_via = (peerResult.ebay_sales_count ?? 0) > 0 ? 'peer' : 'none';
+    console.log('[Lakkot/grading] peer fallback:', peerResult.graded_via, '| sales:', peerResult.ebay_sales_count);
+    return peerResult;
   }
 
   return handleCard(item, sellerPrice, language, dateRange);
