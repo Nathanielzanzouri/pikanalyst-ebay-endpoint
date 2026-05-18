@@ -3442,20 +3442,53 @@ app.post('/scan', async (req, res) => {
       const lensResult = lensSettled.status === 'fulfilled' ? lensSettled.value : null;
       const gradeResult = gradeSettled.status === 'fulfilled' ? gradeSettled.value : { is_graded: false };
 
-      // Language auto-detection: if Gemini read the card's language confidently,
-      // override the user's manual toggle so we route to the correct vote path
-      // (lens-card-en-vote vs jp-vote vs fr-vote) and query the right eBay
-      // markets. Falls back to the user's setting when Gemini returns null.
-      // The route field implicitly records which language was actually used.
-      const VALID_LANGS = ['EN','FR','JP','DE','IT','ES','KO','ZH','PT'];
-      const detectedLang = (gradeResult && typeof gradeResult.language === 'string' && VALID_LANGS.includes(gradeResult.language.toUpperCase()))
+      // Language is determined by Gemini detection only (the manual EN/FR/JP
+      // picker was removed 2026-05-18). Three outcomes:
+      //
+      //   - Detected EN/FR/JP → use it (routes to the matching vote path)
+      //   - Detected DE/IT/ES/KO/ZH/PT → refuse cleanly (we don't have
+      //       pricing logic tuned for these — Japanese prices on a Korean
+      //       card etc. would mislead the user)
+      //   - Detection failed or returned null → treat as 'WORLD'
+      //       (multi-market eBay query, no language-specific filter — same
+      //       behavior as if the user had picked no language before)
+      //
+      // 'WORLD' is internal-only now — it means "no specific language",
+      // not a user choice.
+      const SUPPORTED_LANGS = new Set(['EN', 'FR', 'JP']);
+      const UNSUPPORTED_LANGS = { DE: 'German', IT: 'Italian', ES: 'Spanish', KO: 'Korean', ZH: 'Chinese', PT: 'Portuguese' };
+      const rawDetected = (gradeResult && typeof gradeResult.language === 'string')
         ? gradeResult.language.toUpperCase() : null;
-      if (detectedLang && detectedLang !== language) {
-        console.log('[Lakkot/lang-detect] overriding language: user=' + language + ' → detected=' + detectedLang);
-        language = detectedLang;
-      } else if (detectedLang) {
-        console.log('[Lakkot/lang-detect] confirmed language:', detectedLang);
+
+      if (rawDetected && UNSUPPORTED_LANGS[rawDetected]) {
+        const langName = UNSUPPORTED_LANGS[rawDetected];
+        console.log('[Lakkot/unsupported-lang] detected', rawDetected, '(' + langName + ') — refusing');
+        const logId = await logScan({
+          userEmail: scanUser?.email, userName: scanUser?.name,
+          domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64,
+          route: 'lang-unsupported',
+          resultType: 'UNSUPPORTED',
+          askingPrice: sellerPrice,
+          langToggle: rawDetected, // store detected lang here so we can count per-language demand
+          productCategory: 'Pokemon',
+          variant: 'Raw',
+          gradingCompany: null,
+          grade: null,
+          matchType: null,
+        });
+        return res.json({
+          type: 'UNSUPPORTED_LANGUAGE',
+          detectedLanguage: rawDetected,
+          detectedLanguageName: langName,
+          message: `Lakkot doesn't support ${langName} cards yet.`,
+          quota,
+          scanLogId: logId,
+        });
       }
+
+      // Supported detection → use it. Unknown / unreadable → multi-market default.
+      language = (rawDetected && SUPPORTED_LANGS.has(rawDetected)) ? rawDetected : 'WORLD';
+      console.log('[Lakkot/lang]', rawDetected ? ('detected ' + rawDetected) : 'no detection → WORLD');
       // Three detection outcomes:
       //   1. company + grade  → strict-match first, peer fallback if 0 results
       //   2. grade only       → straight to peer mode (covers ACE logo-only slabs
