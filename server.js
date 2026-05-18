@@ -11,6 +11,7 @@ const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
+const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
@@ -3489,6 +3490,14 @@ app.post('/scan', async (req, res) => {
       // Supported detection → use it. Unknown / unreadable → multi-market default.
       language = (rawDetected && SUPPORTED_LANGS.has(rawDetected)) ? rawDetected : 'WORLD';
       console.log('[Lakkot/lang]', rawDetected ? ('detected ' + rawDetected) : 'no detection → WORLD');
+
+      // TCG category from the same grade-detect call. Routes One Piece scans
+      // to a dedicated extractor (one-piece-id.js) that knows OP card-number
+      // format ("OP01-001") and rarities (SR/SEC/AA/Manga Rare). Pokemon path
+      // is unchanged — only branches here when category === 'OnePiece'.
+      const tcgCategory = (gradeResult && typeof gradeResult.tcg_category === 'string')
+        ? gradeResult.tcg_category : null;
+      console.log('[Lakkot/tcg-category]', tcgCategory || '(none — defaulting to Pokemon path)');
       // Three detection outcomes:
       //   1. company + grade  → strict-match first, peer fallback if 0 results
       //   2. grade only       → straight to peer mode (covers ACE logo-only slabs
@@ -3507,6 +3516,65 @@ app.post('/scan', async (req, res) => {
             : 'raw');
       }
       const productName = lensResult?.productName ?? null;
+
+      // === One Piece TCG path — branched BEFORE Pokemon paths so OP cards
+      //     skip Pokemon vote logic entirely. Uses one-piece-id.js extractor
+      //     to vote across Lens visualMatches and pull out
+      //     {character, card_number, rarity, color}, then builds an eBay
+      //     query and reuses handleAnalyze + handleCard + graded/peer logic.
+      //     Pokemon path below is unchanged.
+      if (tcgCategory === 'OnePiece' && lensResult?.visualMatches) {
+        const opVote = extractOnePieceFromMatches(lensResult.visualMatches);
+        // Require at least the card number to be confident enough to proceed.
+        // (Character is nice-to-have; card_number alone uniquely identifies an OP card.)
+        if (opVote && opVote.card_number) {
+          const opQuery = buildOnePieceQuery(opVote);
+          console.log('[Lakkot/onepiece] vote:', JSON.stringify(opVote), '| query:', opQuery);
+          const result = await handleAnalyze({
+            imageBase64, streamTitle: opQuery, sellerPrice,
+            mode: 'cards', manualCardOverride: opQuery,
+            language, dateRange, gradeFilter: detectedGrade,
+          });
+          const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
+          const v = mp && sellerPrice
+            ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR')
+            : 'NO_DATA';
+          const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
+          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
+          const _gf = computeGradingFields(detectedGrade, result);
+          const productLabel = [opVote.character, opVote.card_number].filter(Boolean).join(' ');
+          const logId = await logScan({
+            userEmail: scanUser?.email, userName: scanUser?.name,
+            domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64,
+            route: 'lens-card-onepiece-vote',
+            productName: productLabel,
+            lensProductName: productName,
+            ebayQuery: result.ebay_search || opQuery,
+            resultType: mp ? 'CARD_RESULT' : 'NO_DATA',
+            marketPrice: mp, askingPrice: sellerPrice, verdict: v,
+            ebaySalesCount: result.ebay_sales_count ?? 0,
+            lensMatches: lensMatchTitles, lensSelected: productName,
+            ebayResults: ebayTopResults, langToggle: language,
+            productCategory: 'One Piece',
+            variant: _gf.variant, gradingCompany: _gf.gradingCompany,
+            grade: _gf.grade, matchType: _gf.matchType,
+          });
+          return res.json({
+            type: 'CARD_RESULT',
+            ...result,
+            card_name: opVote.character || productLabel,
+            card_number: opVote.card_number,
+            set_name: opVote.color ? `One Piece · ${opVote.color}` : 'One Piece',
+            ebay_sales_count: result.ebay_sales_count ?? 0,
+            identified_by: 'lens-onepiece-vote',
+            product_category: 'One Piece',
+            tcg_category: 'OnePiece',
+            scanLogId: logId,
+            quota,
+          });
+        }
+        console.log('[Lakkot/onepiece] vote returned no card_number — falling through to default lens-card path');
+      }
 
       // === EN toggle: vote-based Pokemon identification ===
       if (language === 'EN' && lensResult?.visualMatches) {
