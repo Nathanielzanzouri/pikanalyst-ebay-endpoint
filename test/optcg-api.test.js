@@ -3,14 +3,46 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   extractVariantDescriptor,
+  extractCharacterName,
+  formatCharacterForQuery,
   normalizeApiRecord,
   descriptorMatchTerms,
   bucketListingsByVariant,
 } = require('../optcg-api');
 
+// ─── extractCharacterName ────────────────────────────────────────────────────
+test('extractCharacterName: strips all parens including card number', () => {
+  assert.strictEqual(extractCharacterName('Monkey.D.Luffy (118) (Alternate Art)'), 'Monkey.D.Luffy');
+});
+test('extractCharacterName: name with no parens stays as-is', () => {
+  assert.strictEqual(extractCharacterName('Monkey.D.Garp'), 'Monkey.D.Garp');
+});
+test('extractCharacterName: null-safe', () => {
+  assert.strictEqual(extractCharacterName(null), null);
+  assert.strictEqual(extractCharacterName(''),   null);
+});
+
+// ─── formatCharacterForQuery ────────────────────────────────────────────────
+test('formatCharacterForQuery: dots → spaces for eBay-friendly search', () => {
+  assert.strictEqual(formatCharacterForQuery('Monkey.D.Luffy (118)'), 'Monkey D Luffy');
+});
+test('formatCharacterForQuery: handles "D." → "D" middle initial', () => {
+  assert.strictEqual(formatCharacterForQuery('Monkey.D.Garp (Alternate Art)'), 'Monkey D Garp');
+});
+
 // ─── extractVariantDescriptor ────────────────────────────────────────────────
-test('extractVariantDescriptor: base card → null', () => {
+test('extractVariantDescriptor: base card with number-in-parens → null', () => {
   assert.strictEqual(extractVariantDescriptor('Monkey.D.Luffy (118)'), null);
+});
+
+test('extractVariantDescriptor: bare name with no parens → null', () => {
+  assert.strictEqual(extractVariantDescriptor('Monkey.D.Garp'), null);
+});
+
+test('extractVariantDescriptor: single-parens non-numeric IS a descriptor (real Garp case)', () => {
+  // API returned this exact format for OP12-056 Garp — single parens with the
+  // descriptor, no card number echo. Previously misclassified as base.
+  assert.strictEqual(extractVariantDescriptor('Monkey.D.Garp (Alternate Art)'), 'Alternate Art');
 });
 
 test('extractVariantDescriptor: Alternate Art', () => {

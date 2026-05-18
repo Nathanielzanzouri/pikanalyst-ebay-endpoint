@@ -27,8 +27,35 @@ const BASE_URL = 'https://optcgapi.com/api/sets/card';
 function extractVariantDescriptor(cardName) {
   if (!cardName) return null;
   const parens = [...String(cardName).matchAll(/\(([^)]+)\)/g)].map(m => m[1].trim());
-  if (parens.length < 2) return null;            // no descriptor parens → base print
-  return parens[parens.length - 1];               // last parens = descriptor
+  if (parens.length === 0) return null;
+  // Find the last parens content that ISN'T purely numeric. Numeric parens
+  // (e.g. "(118)") are just the card number echoed in the name. Non-numeric
+  // parens (e.g. "(Alternate Art)", "(Manga)", "(Parallel)") are the variant
+  // descriptor. Handles both API name styles:
+  //   "Monkey.D.Garp (Alternate Art)"        → "Alternate Art" (1 parens, non-numeric)
+  //   "Monkey.D.Luffy (118) (Alternate Art)" → "Alternate Art" (2 parens, last non-numeric)
+  //   "Monkey.D.Luffy (118)"                 → null            (1 parens, numeric = base)
+  //   "Roronoa Zoro"                         → null            (no parens = base)
+  for (let i = parens.length - 1; i >= 0; i--) {
+    if (!/^\d+$/.test(parens[i])) return parens[i];
+  }
+  return null;
+}
+
+// Strip all parens from a card_name to get the bare character name.
+// "Monkey.D.Luffy (118) (Alternate Art)" → "Monkey.D.Luffy"
+// "Monkey.D.Garp"                        → "Monkey.D.Garp"
+function extractCharacterName(cardName) {
+  if (!cardName) return null;
+  return String(cardName).replace(/\s*\([^)]*\)/g, '').trim() || null;
+}
+
+// Convert API character name into an eBay-friendly query token:
+// "Monkey.D.Luffy" → "Monkey D Luffy" (sellers use spaces, not periods)
+function formatCharacterForQuery(cardName) {
+  const bare = extractCharacterName(cardName);
+  if (!bare) return null;
+  return bare.replace(/\./g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // Normalize an API record into the shape the server + sidepanel expect.
@@ -162,6 +189,8 @@ function bucketListingsByVariant(ebayListings, apiVariants) {
 module.exports = {
   TTL_MS,
   extractVariantDescriptor,
+  extractCharacterName,
+  formatCharacterForQuery,
   normalizeApiRecord,
   getOnePieceCardVariants,
   descriptorMatchTerms,

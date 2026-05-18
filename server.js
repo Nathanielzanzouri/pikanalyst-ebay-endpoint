@@ -13,7 +13,7 @@ const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
-const { getOnePieceCardVariants, bucketListingsByVariant } = require('./optcg-api');
+const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
@@ -3656,19 +3656,36 @@ app.post('/scan', async (req, res) => {
           '| FINAL:', opIdentity.card_number, '(' + sourceTag + ')',
           '| variant:', opIdentity.variant_marker || '(none)');
         if (opIdentity.card_number) {
+          // optcgapi.com lookup FIRST — gives us the canonical character name,
+          // which is way more reliable than Lens-vote heuristic (which gets
+          // confused by noisy French listings like "Carte à l'unité One Piece
+          // Français" → extracts garbage like "Op L" as the character).
+          let apiVariants = null;
+          try {
+            apiVariants = await getOnePieceCardVariants(opIdentity.card_number);
+          } catch (e) {
+            console.warn('[Lakkot/onepiece] optcg-api lookup threw:', e.message);
+          }
+          if (apiVariants && apiVariants.length > 0) {
+            // Use API's canonical character name (stripped of variant parens,
+            // dots replaced with spaces) for the eBay query — overrides Lens vote.
+            const canonicalChar = formatCharacterForQuery(apiVariants[0].card_name);
+            if (canonicalChar) {
+              console.log('[Lakkot/onepiece] API canonical character:', canonicalChar,
+                '(overriding lens vote:', JSON.stringify(opIdentity.character) + ')');
+              opIdentity.character = canonicalChar;
+            }
+          }
           // buildOnePieceQuery includes high-stakes Lens-voted variants
           // (Manga Rare, SEC) when they have strong consensus. We deliberately
           // DON'T append Gemini's variant_marker to the query — sellers use
-          // many synonyms for the same variant ("AA" vs "Alt Art" vs
-          // "Alternative Art" vs "Comic Parallel") and requiring a specific
-          // token in eBay titles drops legitimate matches. Instead we keep
-          // variant_marker in the response for UI labeling, and rely on the
-          // variant cluster picker (clusterListings) to disambiguate
-          // post-hoc when prices split into multiple tiers.
+          // many synonyms for the same variant ('AA' vs 'Alt Art' vs
+          // 'Alternative Art' vs 'Comic Parallel') and requiring a specific
+          // token in eBay titles drops legitimate matches.
           let opQuery = buildOnePieceQuery(opIdentity);
           if (geminiVariant) {
             console.log('[Lakkot/onepiece] gemini variant_marker:', geminiVariant, '(used for UI label only, NOT eBay query)');
-            opIdentity.variant_marker = geminiVariant; // surface in response
+            opIdentity.variant_marker = geminiVariant;
           }
           console.log('[Lakkot/onepiece] identity:', JSON.stringify(opIdentity), '| query:', opQuery);
           const result = await handleAnalyze({
@@ -3701,20 +3718,10 @@ app.post('/scan', async (req, res) => {
             variant: _gf.variant, gradingCompany: _gf.gradingCompany,
             grade: _gf.grade, matchType: _gf.matchType,
           });
-          // optcgapi.com lookup — authoritative variant list with canonical
-          // names, official Bandai images, and TCGplayer reference prices.
-          // When the API has the card, we OVERRIDE result.variants (which
-          // would otherwise come from heuristic price-cluster detection in
-          // handleCard) with the API-defined variants enriched with
-          // eBay-derived sold-price medians via bucketListingsByVariant().
-          // When API misses (very newest sets, transient downtime), we keep
-          // the heuristic variants and lose nothing.
-          let apiVariants = null;
-          try {
-            apiVariants = await getOnePieceCardVariants(opIdentity.card_number);
-          } catch (e) {
-            console.warn('[Lakkot/onepiece] optcg-api lookup threw:', e.message);
-          }
+          // Bucket the eBay listings into the API-defined variants. apiVariants
+          // was already fetched above (before the eBay query) so we have the
+          // authoritative variant list. handleCard's heuristic cluster output
+          // (result.variants) is the fallback when API didn't cover the card.
           let enrichedVariants = result.variants || null;
           if (apiVariants && apiVariants.length > 0) {
             enrichedVariants = bucketListingsByVariant(result.listings || [], apiVariants);
