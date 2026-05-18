@@ -37,7 +37,7 @@ let lastGeminiApiError = null;
 // `app.post('/scan', ...)` handler can write to scan_logs. The nested copy
 // inside /scan stays untouched and shadows this one in its own scope. Body
 // is identical so /scan and /scan/gemini behave consistently.
-async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, productCategory, variant, gradingCompany, grade, matchType }) {
+async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, productCategory, variant, gradingCompany, grade, matchType }) {
   try {
     let imageUrl = null;
     if (imageBase64) {
@@ -72,6 +72,7 @@ async function logScan({ userEmail, userName, platform, domTitle, imageBase64, c
       product_name: productName ?? null,
       lens_product_name: lensProductName ?? null,
       ebay_query: ebayQuery ?? null,
+      shopping_query: shoppingQuery ?? null,
       result_type: resultType ?? null,
       market_price: marketPrice ?? null,
       asking_price: askingPrice ?? null,
@@ -3378,7 +3379,7 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, productCategory, variant, gradingCompany, grade, matchType }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, productCategory, variant, gradingCompany, grade, matchType }) {
     try {
       // Upload original image to Supabase Storage
       let imageUrl = null;
@@ -3418,6 +3419,7 @@ app.post('/scan', async (req, res) => {
         product_name: productName ?? null,
         lens_product_name: lensProductName ?? null,
         ebay_query: ebayQuery ?? null,
+      shopping_query: shoppingQuery ?? null,
         result_type: resultType ?? null,
         market_price: marketPrice ?? null,
         asking_price: askingPrice ?? null,
@@ -3970,9 +3972,14 @@ app.post('/scan', async (req, res) => {
       // original loose-title behavior, so non-sneaker items are not regressed.
       let shoppingResult = { cards: [], medianPrice: null, totalFound: 0 };
       let lowConfidence = false;
+      // Captured for scan_logs.shopping_query — the primary query we sent to
+      // Google Shopping (skuQuery on confident path, cleaned Lens name on loose).
+      // Lets us debug "what did Google see" without re-running the scan.
+      let loggedShoppingQuery = null;
       const identity = buildIdentity(lensResult?.visualMatches || []);
       if (identity.confident) {
         const skuQuery = buildShoppingQuery(identity);
+        loggedShoppingQuery = skuQuery;
         console.log('[Lakkot] Unified: style-code ID', identity.styleCode, '(score', identity.score + ') → query:', skuQuery);
         try {
           const raw1 = await handleGoogleShopping(skuQuery);
@@ -4024,6 +4031,7 @@ app.post('/scan', async (req, res) => {
         }
       } else {
         const shoppingQuery = cleanLensName || productName;
+        loggedShoppingQuery = shoppingQuery;
         if (shoppingQuery) {
           try {
             shoppingResult = await handleGoogleShopping(shoppingQuery);
@@ -4043,7 +4051,7 @@ app.post('/scan', async (req, res) => {
       const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
       const webVerdict = medianPrice && sellerPrice ? (sellerPrice / medianPrice < 0.90 ? 'DEAL' : sellerPrice / medianPrice > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
       const lensMatchTitles3 = (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || '');
-      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length, lensMatches: lensMatchTitles3, lensSelected: productName, langToggle: language, productCategory: 'Other', variant: 'Raw', gradingCompany: null, grade: null, matchType: medianPrice ? 'raw' : 'none' });
+      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, shoppingQuery: loggedShoppingQuery, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length, lensMatches: lensMatchTitles3, lensSelected: productName, langToggle: language, productCategory: 'Other', variant: 'Raw', gradingCompany: null, grade: null, matchType: medianPrice ? 'raw' : 'none' });
 
       return res.json({
         type: 'WEB_RESULT',
