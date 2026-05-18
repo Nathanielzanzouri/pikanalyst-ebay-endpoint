@@ -3627,7 +3627,7 @@ app.post('/scan', async (req, res) => {
           if (geminiVariant && !opQuery.toLowerCase().includes(geminiVariant.toLowerCase())) {
             opQuery = (opQuery + ' ' + geminiVariant).trim();
           }
-          console.log('[Lakkot/onepiece] vote:', JSON.stringify(opVote), '| query:', opQuery);
+          console.log('[Lakkot/onepiece] identity:', JSON.stringify(opIdentity), '| query:', opQuery);
           const result = await handleAnalyze({
             imageBase64, streamTitle: opQuery, sellerPrice,
             mode: 'cards', manualCardOverride: opQuery,
@@ -3641,7 +3641,7 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
           const _gf = computeGradingFields(detectedGrade, result);
-          const productLabel = [opVote.character, opVote.card_number].filter(Boolean).join(' ');
+          const productLabel = [opIdentity.character, opIdentity.card_number].filter(Boolean).join(' ');
           const logId = await logScan({
             userEmail: scanUser?.email, userName: scanUser?.name,
             domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64,
@@ -3661,9 +3661,9 @@ app.post('/scan', async (req, res) => {
           return res.json({
             type: 'CARD_RESULT',
             ...result,
-            card_name: opVote.character || productLabel,
-            card_number: opVote.card_number,
-            set_name: opVote.color ? `One Piece · ${opVote.color}` : 'One Piece',
+            card_name: opIdentity.character || productLabel,
+            card_number: opIdentity.card_number,
+            set_name: opIdentity.color ? `One Piece · ${opIdentity.color}` : 'One Piece',
             ebay_sales_count: result.ebay_sales_count ?? 0,
             identified_by: 'lens-onepiece-vote',
             product_category: 'One Piece',
