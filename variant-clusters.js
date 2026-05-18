@@ -120,6 +120,9 @@ function clusterListings(listings, opts = {}) {
         count:     cluster.length,
         imageUrl:  repWithImage.imageUrl || null,
         sampleTitle: repWithImage.title || null,
+        // Actual listings in this cluster — sidepanel uses these to filter
+        // the listings panel when the user picks this variant.
+        listings:  cluster,
       };
     })
     // Sort variants ascending by price for predictable UI ordering
