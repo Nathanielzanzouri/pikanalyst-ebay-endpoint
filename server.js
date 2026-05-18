@@ -1600,7 +1600,22 @@ async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90)
 
     cacheSet(cacheKey, priceData);
   }
-  return { ...item, ...priceData, seller_asking_price: sellerPrice ?? item.seller_asking_price ?? null };
+  // Variant-cluster detection runs on EVERY card scan now (was previously
+  // only on the OP route). Returns [] when prices are tight (no picker
+  // needed — Pokemon scans, graded scans isolated to one company+grade,
+  // tightly-priced sneakers). Returns 2+ clusters when wide price spreads
+  // signal multiple variants share the same card identity (OP base vs
+  // promo, mixed grading companies, etc.).
+  const variants = clusterListings(priceData.listings || []);
+  if (variants.length >= 2) {
+    console.log('[Lakkot/variants] detected', variants.length, 'clusters →',
+      variants.map(v => `${v.label}=€${v.price.toFixed(2)} (n=${v.count})`).join(' | '));
+  }
+  return {
+    ...item, ...priceData,
+    seller_asking_price: sellerPrice ?? item.seller_asking_price ?? null,
+    variants: variants.length >= 2 ? variants : null,
+  };
 }
 
 async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90, gradeFilter = null, tcgCategory = null }) {
@@ -3659,15 +3674,9 @@ app.post('/scan', async (req, res) => {
             variant: _gf.variant, gradingCompany: _gf.gradingCompany,
             grade: _gf.grade, matchType: _gf.matchType,
           });
-          // Variant-cluster detection: when eBay returned listings spanning
-          // multiple price tiers (base SR vs promo vs championship etc.),
-          // surface them as a picker so the user can confirm which one they
-          // actually have. Returns [] when prices are tight (no picker).
-          const variants = clusterListings(result.listings || []);
-          if (variants.length >= 2) {
-            console.log('[Lakkot/onepiece] detected', variants.length, 'price clusters →',
-              variants.map(v => `${v.label}=€${v.price.toFixed(2)} (n=${v.count})`).join(' | '));
-          }
+          // Variant clustering is now done in handleCard (applies to ALL card
+          // scans, not just OP). result.variants is null when no picker is
+          // needed (tight cluster) or 2+ entries when the user should pick.
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -3678,7 +3687,6 @@ app.post('/scan', async (req, res) => {
             identified_by: 'lens-onepiece-vote',
             product_category: 'One Piece',
             tcg_category: 'OnePiece',
-            variants: variants.length >= 2 ? variants : null,
             scanLogId: logId,
             quota,
           });
