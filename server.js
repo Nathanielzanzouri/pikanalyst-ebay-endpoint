@@ -3641,20 +3641,27 @@ app.post('/scan', async (req, res) => {
           : null;
         const geminiVariant = (gradeResult && typeof gradeResult.variant_marker === 'string')
           ? gradeResult.variant_marker : null;
-        // Merge: Gemini number wins if present, else Lens vote
+        // Lens-vote IS the source of truth for card_number on OP scans.
+        // We deliberately do NOT use Gemini's card_number reading here —
+        // Gemini Vision misreads tiny printed text on blurry stream frames
+        // often enough (EB03-026 → EB01-039, 067 → 068) that it would
+        // override Lens consensus and route the entire scan to the wrong
+        // card / wrong API lookup / wrong eBay query / wrong variants.
+        // Gemini's variant_marker (Promo/Parallel/AA/Manga — big visual
+        // cues, not tiny text) is still kept for UI labeling, but it
+        // doesn't influence the eBay query or the API call.
         const opIdentity = {
-          card_number: geminiCardNumber || lensVote.card_number,
+          card_number: lensVote.card_number,
+          card_number_votes: lensVote.card_number_votes || 0,
           character:   lensVote.character,
           rarity:      lensVote.rarity,
           color:       lensVote.color,
           variant_marker: geminiVariant,
         };
-        const sourceTag = geminiCardNumber ? 'gemini' : (lensVote.card_number ? 'lens-vote' : 'none');
-        console.log('[Lakkot/onepiece] identity sources — gemini.card_number:', geminiCardNumber,
-          '| lens.card_number:', lensVote.card_number,
-          '| gemini.variant:', geminiVariant,
-          '| FINAL:', opIdentity.card_number, '(' + sourceTag + ')',
-          '| variant:', opIdentity.variant_marker || '(none)');
+        console.log('[Lakkot/onepiece] identity — lens.card_number:', lensVote.card_number,
+          '(votes:' + (lensVote.card_number_votes || 0) + ')',
+          '| gemini.card_number(ignored):', geminiCardNumber,
+          '| variant:', geminiVariant || '(none)');
         if (opIdentity.card_number) {
           // optcgapi.com lookup FIRST — gives us the canonical character name,
           // which is way more reliable than Lens-vote heuristic (which gets

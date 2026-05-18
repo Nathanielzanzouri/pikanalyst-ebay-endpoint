@@ -71,6 +71,22 @@ function voteMajority(values, minVotes = 2) {
   return bestCount >= minVotes ? best : null;
 }
 
+// Same as voteMajority but returns { value, count }. Used when the caller
+// needs to weigh confidence (e.g. "trust Lens over Gemini when ≥3 matches agree").
+function voteMajorityWithCount(values, minVotes = 2) {
+  const counts = new Map();
+  for (const v of values) {
+    if (!v) continue;
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  let best = null, bestCount = 0;
+  for (const [v, c] of counts) {
+    if (c > bestCount) { best = v; bestCount = c; }
+  }
+  if (bestCount < minVotes) return { value: null, count: 0 };
+  return { value: best, count: bestCount };
+}
+
 // Normalize an OP card number to canonical "OP01-001" / "ST01-001" / "P-001"
 // form regardless of how the source wrote it ("OP01001", "op-1-001", etc.).
 function normalizeCardNumber(rawMatch) {
@@ -185,8 +201,10 @@ function extractOnePieceFromMatches(visualMatches, topN = 10) {
     if (color) colors.push(color);
   }
   const winnerChar = voteMajority(characters, 2);
+  const numberVote = voteMajorityWithCount(numbers, 2);
   return {
-    card_number: voteMajority(numbers,    2),
+    card_number: numberVote.value,
+    card_number_votes: numberVote.count,   // exposed so callers can weigh confidence (Gemini-vs-Lens tiebreaks)
     character:   winnerChar ? titleCaseName(winnerChar) : null,  // pretty-cased for display + query
     rarity:      voteMajority(rarities,   2),
     color:       voteMajority(colors,     2),
@@ -213,6 +231,7 @@ module.exports = {
   CARD_NUMBER_RE,
   RARITY_PATTERNS,
   voteMajority,
+  voteMajorityWithCount,
   normalizeCardNumber,
   normalizeCharacterName,
   titleCaseName,

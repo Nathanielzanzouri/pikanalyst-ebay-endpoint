@@ -123,7 +123,7 @@ test('extractOnePieceFromMatches: only 1 vote → null (under threshold)', () =>
 
 test('extractOnePieceFromMatches: empty input → all null', () => {
   const out = extractOnePieceFromMatches([]);
-  assert.deepStrictEqual(out, { card_number: null, character: null, rarity: null, color: null });
+  assert.deepStrictEqual(out, { card_number: null, card_number_votes: 0, character: null, rarity: null, color: null });
 });
 
 test('extractOnePieceFromMatches: handles non-array gracefully', () => {
