@@ -86,6 +86,26 @@ function normalizeCardNumber(rawMatch) {
   return `${m[1].toUpperCase()}${m[2]}-${m[3]}`;
 }
 
+// Normalize a character name for vote consensus — strip middle-initial
+// periods, collapse whitespace, lowercase. Means "Monkey D. Luffy" /
+// "Monkey.D.Luffy" / "Monkey D Luffy" all vote for the same value.
+// Returns the normalized form used for vote keys; pretty-cased version is
+// reconstructed for display.
+function normalizeCharacterName(name) {
+  if (!name) return null;
+  return String(name)
+    .replace(/\./g, ' ')              // "Monkey.D.Luffy" → "Monkey D Luffy"
+    .replace(/\s+/g, ' ')             // collapse whitespace
+    .trim()
+    .toLowerCase();
+}
+
+// Pretty-case a normalized name back for display: title case each word.
+function titleCaseName(name) {
+  if (!name) return null;
+  return name.split(' ').map(w => w.length <= 1 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)).join(' ');
+}
+
 // Extract the most likely character name from a Lens title.
 // Strategy: strip everything we KNOW isn't part of the name (card numbers,
 // rarity words, game/publisher/lang/condition noise), then take the longest
@@ -155,15 +175,19 @@ function extractOnePieceFromMatches(visualMatches, topN = 10) {
     const cardNumber = normalizeCardNumber(numMatch ? numMatch[0] : null);
     if (cardNumber) numbers.push(cardNumber);
     const character = extractCharacterFromTitle(title, cardNumber);
-    if (character) characters.push(character);
+    // Normalize for vote: 'Monkey.D.Luffy', 'Monkey D. Luffy', and
+    // 'Monkey D Luffy' all become the same key, so votes don't split
+    // across spelling variants.
+    if (character) characters.push(normalizeCharacterName(character));
     const rarity = extractRarityFromTitle(title);
     if (rarity) rarities.push(rarity);
     const color = extractColorFromTitle(title);
     if (color) colors.push(color);
   }
+  const winnerChar = voteMajority(characters, 2);
   return {
     card_number: voteMajority(numbers,    2),
-    character:   voteMajority(characters, 2),
+    character:   winnerChar ? titleCaseName(winnerChar) : null,  // pretty-cased for display + query
     rarity:      voteMajority(rarities,   2),
     color:       voteMajority(colors,     2),
   };
@@ -190,6 +214,8 @@ module.exports = {
   RARITY_PATTERNS,
   voteMajority,
   normalizeCardNumber,
+  normalizeCharacterName,
+  titleCaseName,
   extractCharacterFromTitle,
   extractRarityFromTitle,
   extractColorFromTitle,

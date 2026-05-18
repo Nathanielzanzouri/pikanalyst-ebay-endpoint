@@ -3655,12 +3655,19 @@ app.post('/scan', async (req, res) => {
           '| FINAL:', opIdentity.card_number, '(' + sourceTag + ')',
           '| variant:', opIdentity.variant_marker || '(none)');
         if (opIdentity.card_number) {
-          // buildOnePieceQuery appends high-stakes variant markers (AA, SEC,
-          // Manga Rare) when the LENS vote returned them. With the Gemini
-          // variant_marker we explicitly add it to the query string.
+          // buildOnePieceQuery includes high-stakes Lens-voted variants
+          // (Manga Rare, SEC) when they have strong consensus. We deliberately
+          // DON'T append Gemini's variant_marker to the query — sellers use
+          // many synonyms for the same variant ("AA" vs "Alt Art" vs
+          // "Alternative Art" vs "Comic Parallel") and requiring a specific
+          // token in eBay titles drops legitimate matches. Instead we keep
+          // variant_marker in the response for UI labeling, and rely on the
+          // variant cluster picker (clusterListings) to disambiguate
+          // post-hoc when prices split into multiple tiers.
           let opQuery = buildOnePieceQuery(opIdentity);
-          if (geminiVariant && !opQuery.toLowerCase().includes(geminiVariant.toLowerCase())) {
-            opQuery = (opQuery + ' ' + geminiVariant).trim();
+          if (geminiVariant) {
+            console.log('[Lakkot/onepiece] gemini variant_marker:', geminiVariant, '(used for UI label only, NOT eBay query)');
+            opIdentity.variant_marker = geminiVariant; // surface in response
           }
           console.log('[Lakkot/onepiece] identity:', JSON.stringify(opIdentity), '| query:', opQuery);
           const result = await handleAnalyze({
