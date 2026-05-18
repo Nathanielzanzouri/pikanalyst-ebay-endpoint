@@ -3579,12 +3579,30 @@ app.post('/scan', async (req, res) => {
       language = (rawDetected && SUPPORTED_LANGS.has(rawDetected)) ? rawDetected : 'WORLD';
       console.log('[Lakkot/lang]', rawDetected ? ('detected ' + rawDetected) : 'no detection → WORLD');
 
-      // TCG category from the same grade-detect call. Routes One Piece scans
-      // to a dedicated extractor (one-piece-id.js) that knows OP card-number
-      // format ("OP01-001") and rarities (SR/SEC/AA/Manga Rare). Pokemon path
-      // is unchanged — only branches here when category === 'OnePiece'.
-      const tcgCategory = (gradeResult && typeof gradeResult.tcg_category === 'string')
+      // TCG category — start with Gemini's classification, then OVERRIDE with
+      // Lens evidence when Lens matches strongly suggest One Piece. Gemini's
+      // visual classifier fails when the image is a multi-card photo, weird
+      // angle, or partial view (scan 152d3755 was a 3-card Mercari listing
+      // photo — Gemini said 'Other' even though 10+ Lens matches said OP).
+      // Lens-text evidence is more reliable in those cases.
+      let tcgCategory = (gradeResult && typeof gradeResult.tcg_category === 'string')
         ? gradeResult.tcg_category : null;
+      if (tcgCategory !== 'OnePiece' && Array.isArray(lensResult?.visualMatches)) {
+        // Count OP signals across the top 10 Lens matches:
+        //   - 'one piece' / 'opcg' keyword in title
+        //   - OP card number format (OP##-###, ST##-###, EB##-###, P-###, H##, S###, PR##, HB##)
+        const OP_NUMBER_RE = /\b(OP|EB|ST)\s*\d{2}\s*-?\s*\d{3}\b|\bP\s*-\s*\d{1,3}\b|\b(H|S|PR|HB)\s*-?\s*\d{1,3}\b/i;
+        const OP_KEYWORD_RE = /\b(one\s*piece|opcg|onepiece)\b/i;
+        let opSignals = 0;
+        for (const m of lensResult.visualMatches.slice(0, 10)) {
+          const t = (m && m.title) || '';
+          if (OP_KEYWORD_RE.test(t) || OP_NUMBER_RE.test(t)) opSignals++;
+        }
+        if (opSignals >= 3) {
+          console.log('[Lakkot/tcg-category] OVERRIDING gemini="' + tcgCategory + '" → "OnePiece" (lens signals:' + opSignals + ')');
+          tcgCategory = 'OnePiece';
+        }
+      }
       console.log('[Lakkot/tcg-category]', tcgCategory || '(none — defaulting to Pokemon path)');
       // Three detection outcomes:
       //   1. company + grade  → strict-match first, peer fallback if 0 results
