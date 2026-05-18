@@ -1574,6 +1574,22 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     }
   }
 
+  // Grade-only detection (ACE logo-only slabs, boutique graders without
+  // readable company text): skip strict-match, go directly to peer-mode
+  // (any non-PSA grader at the detected grade).
+  if (gradeFilter && gradeFilter.mode === 'peer' && gradeFilter.grade) {
+    if (item.ebay_search && !item.ebay_search.includes(gradeFilter.grade)) {
+      item.ebay_search = (item.ebay_search + ' ' + gradeFilter.grade).trim();
+    }
+    item._gradeFilter = gradeFilter;
+    item.graded = { company: null, grade: gradeFilter.grade };
+    console.log('[Lakkot/grading] handleAnalyze grade-only peer mode | query:', item.ebay_search);
+    const peerResult = await handleCard(item, sellerPrice, language, dateRange);
+    peerResult.graded = item.graded;
+    peerResult.graded_via = (peerResult.ebay_sales_count ?? 0) > 0 ? 'peer' : 'none';
+    return peerResult;
+  }
+
   // Grading feature flag: when Gemini detected a slab, append the grade to the
   // eBay query AND attach the filter so the result-filter keeps matching titles.
   if (gradeFilter && gradeFilter.company && gradeFilter.grade) {
@@ -3373,11 +3389,22 @@ app.post('/scan', async (req, res) => {
       ]);
       const lensResult = lensSettled.status === 'fulfilled' ? lensSettled.value : null;
       const gradeResult = gradeSettled.status === 'fulfilled' ? gradeSettled.value : { is_graded: false };
-      const detectedGrade = (gradeResult && gradeResult.is_graded && gradeResult.company && gradeResult.grade)
-        ? { company: String(gradeResult.company).toUpperCase(), grade: String(gradeResult.grade) }
-        : null;
+      // Three detection outcomes:
+      //   1. company + grade  → strict-match first, peer fallback if 0 results
+      //   2. grade only       → straight to peer mode (covers ACE logo-only slabs
+      //                          and any boutique grader whose name we can't read)
+      //   3. neither          → raw scan (treat as ungraded)
+      let detectedGrade = null;
+      if (gradeResult && gradeResult.is_graded && gradeResult.grade) {
+        detectedGrade = gradeResult.company
+          ? { company: String(gradeResult.company).toUpperCase(), grade: String(gradeResult.grade) }
+          : { mode: 'peer', grade: String(gradeResult.grade) };
+      }
       if (gradingEnabled) {
-        console.log('[Lakkot/grading] enabled, detection:', detectedGrade ? `${detectedGrade.company} ${detectedGrade.grade}` : 'raw');
+        console.log('[Lakkot/grading] enabled, detection:',
+          detectedGrade
+            ? (detectedGrade.company ? `${detectedGrade.company} ${detectedGrade.grade}` : `grade-only ${detectedGrade.grade} (peer mode)`)
+            : 'raw');
       }
       const productName = lensResult?.productName ?? null;
 
