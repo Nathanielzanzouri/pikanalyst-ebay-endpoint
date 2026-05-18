@@ -3591,7 +3591,7 @@ app.post('/scan', async (req, res) => {
         // Count OP signals across the top 10 Lens matches:
         //   - 'one piece' / 'opcg' keyword in title
         //   - OP card number format (OP##-###, ST##-###, EB##-###, P-###, H##, S###, PR##, HB##)
-        const OP_NUMBER_RE = /\b(OP|EB|ST)\s*\d{2}\s*-?\s*\d{3}\b|\bP\s*-\s*\d{1,3}\b|\b(H|S|PR|HB)\s*-?\s*\d{1,3}\b/i;
+        const OP_NUMBER_RE = /\b(OP|EB|ST|PRB)\s*\d{2}\s*-?\s*\d{3}\b|\bP\s*-\s*\d{1,3}\b|\b(H|S|PR|HB)\s*-?\s*\d{1,3}\b/i;
         const OP_KEYWORD_RE = /\b(one\s*piece|opcg|onepiece)\b/i;
         let opSignals = 0;
         for (const m of lensResult.visualMatches.slice(0, 10)) {
@@ -3759,6 +3759,22 @@ app.post('/scan', async (req, res) => {
           const finalVariants = (enrichedVariants && enrichedVariants.length >= 2)
             ? enrichedVariants : null;
 
+          // Top-level TCGplayer reference price — shown alongside the eBay
+          // SOLD price in the main panel even when there's no variant picker
+          // (single variant or tight cluster). Picks the price of the most-
+          // populous variant (the one most users actually have), falling
+          // back to the first API variant's price.
+          let tcgRefUsd = null;
+          if (apiVariants && apiVariants.length > 0) {
+            // If we have buckets with eBay counts, prefer the most-populous
+            const popular = enrichedVariants && enrichedVariants.length
+              ? enrichedVariants.reduce((a, b) => (b.count > (a.count || 0) ? b : a), enrichedVariants[0])
+              : null;
+            tcgRefUsd = (popular && typeof popular.tcg_ref_usd === 'number')
+              ? popular.tcg_ref_usd
+              : (typeof apiVariants[0].market_price_usd === 'number' ? apiVariants[0].market_price_usd : null);
+          }
+
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -3770,6 +3786,7 @@ app.post('/scan', async (req, res) => {
             product_category: 'One Piece',
             tcg_category: 'OnePiece',
             variants: finalVariants,
+            tcg_ref_usd: tcgRefUsd,    // top-level reference for the eBay-SOLD-adjacent display
             scanLogId: logId,
             quota,
           });

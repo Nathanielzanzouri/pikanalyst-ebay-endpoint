@@ -21,7 +21,7 @@
 //
 // Also matches vintage Carddass / Hyper Battle formats (Bandai 2001-2010):
 //   H18, S111, PR-001 — short prefix + 1-3 digits, no set code.
-const CARD_NUMBER_RE = /\b(OP|EB|ST)\s*(\d{2})\s*[-]?\s*(\d{3})\b|\bP\s*-\s*(\d{1,3})\b|\b(H|S|PR|HB)\s*-?\s*(\d{1,3})\b/i;
+const CARD_NUMBER_RE = /\b(OP|EB|ST|PRB)\s*(\d{2})\s*[-]?\s*(\d{3})\b|\bP\s*-\s*(\d{1,3})\b|\b(H|S|PR|HB)\s*-?\s*(\d{1,3})\b/i;
 
 // Rarities printed on OP cards. Order matters — more specific patterns first
 // so "Manga Rare" doesn't get caught by the bare "R" match.
