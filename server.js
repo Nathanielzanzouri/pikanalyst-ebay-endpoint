@@ -12,6 +12,7 @@ const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
+const { clusterListings } = require('./variant-clusters');
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
@@ -3658,6 +3659,15 @@ app.post('/scan', async (req, res) => {
             variant: _gf.variant, gradingCompany: _gf.gradingCompany,
             grade: _gf.grade, matchType: _gf.matchType,
           });
+          // Variant-cluster detection: when eBay returned listings spanning
+          // multiple price tiers (base SR vs promo vs championship etc.),
+          // surface them as a picker so the user can confirm which one they
+          // actually have. Returns [] when prices are tight (no picker).
+          const variants = clusterListings(result.listings || []);
+          if (variants.length >= 2) {
+            console.log('[Lakkot/onepiece] detected', variants.length, 'price clusters →',
+              variants.map(v => `${v.label}=€${v.price.toFixed(2)} (n=${v.count})`).join(' | '));
+          }
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -3668,6 +3678,7 @@ app.post('/scan', async (req, res) => {
             identified_by: 'lens-onepiece-vote',
             product_category: 'One Piece',
             tcg_category: 'OnePiece',
+            variants: variants.length >= 2 ? variants : null,
             scanLogId: logId,
             quota,
           });
