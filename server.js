@@ -509,6 +509,15 @@ function isOnePieceSealedProduct(title) {
   return OP_SEALED_KEYWORDS.some(kw => lower.includes(kw));
 }
 
+// Require the queried card number to actually appear in the title — fixes
+// eBay's fuzzy relevance returning completely different cards. Normalizes
+// both sides so "OP06-118", "OP06 118", "OP06118", "op06-118" all match.
+function titleContainsCardNumber(title, cardNumber) {
+  if (!cardNumber) return true; // no number to check → pass
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  return norm(title).includes(norm(cardNumber));
+}
+
 function isFigurine(title) {
   const lower = title.toLowerCase();
   return [
@@ -1234,7 +1243,7 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
   // Otherwise, existing behavior: reject all graded listings as noise.
   const titleFilter = makeGradedTitleFilter(card._gradeFilter);
   const isOpScan = card._tcgCategory === 'OnePiece';
-  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0;
+  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0;
   const clean = sold.filter(i => {
     const t = i?.title?.[0] ?? '';
     if (!titleFilter(t)) { gradedOut++;     return false; }
@@ -1243,14 +1252,20 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
     if (isFigurine(t))     { figuresOut++;    return false; }
     if (isMultiChoice(t))  { multichoiceOut++;return false; }
     if (isSpecialEdition(t)){ specialOut++;   return false; }
-    // One Piece-specific filters (only when category=OnePiece). Reject
-    // cross-game collisions (Gundam ST01-001 etc.) and sealed products.
-    if (isOpScan && isOnePieceCrossGame(t))   { opCrossGameOut++; return false; }
-    if (isOpScan && isOnePieceSealedProduct(t)){ opSealedOut++;    return false; }
-    if (isOpScan && !hasOnePieceKeyword(t))   { opNoKeywordOut++; return false; }
+    // One Piece-specific filters (only when category=OnePiece). Reject:
+    //  - cross-game collisions (Gundam/Digimon ST01-001 etc.)
+    //  - sealed products (deck sets, Premium Card Collection)
+    //  - titles that don't even contain the queried card number (eBay's loose
+    //    relevance often surfaces completely different OP cards — Boa Hancock
+    //    OP14-041 returned for an OP06-118 query, etc.)
+    //  - titles missing 'one piece' keyword (positive signal)
+    if (isOpScan && isOnePieceCrossGame(t))                  { opCrossGameOut++; return false; }
+    if (isOpScan && isOnePieceSealedProduct(t))              { opSealedOut++;    return false; }
+    if (isOpScan && !titleContainsCardNumber(t, card.card_number)) { opNoNumberOut++;  return false; }
+    if (isOpScan && !hasOnePieceKeyword(t))                  { opNoKeywordOut++; return false; }
     return true;
   });
-  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
+  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
 
   if (clean.length === 0) throw new Error('Finding: 0 results after graded/lot filter');
 
@@ -1392,7 +1407,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
     // See Finding-API equivalent for the grading-filter inversion logic.
     const titleFilter = makeGradedTitleFilter(card._gradeFilter);
     const isOpScan = card._tcgCategory === 'OnePiece';
-    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0;
+    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
       if (!titleFilter(t))    { gradedOut++;     return false; }
@@ -1403,13 +1418,14 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
       if (isSpecialEdition(t)){ specialOut++;    return false; }
       // OP-specific filters (only when category=OnePiece). See Finding-API
       // equivalent above for full rationale.
-      if (isOpScan && isOnePieceCrossGame(t))   { opCrossGameOut++; return false; }
-      if (isOpScan && isOnePieceSealedProduct(t)){ opSealedOut++;    return false; }
-      if (isOpScan && !hasOnePieceKeyword(t))   { opNoKeywordOut++; return false; }
+      if (isOpScan && isOnePieceCrossGame(t))                          { opCrossGameOut++; return false; }
+      if (isOpScan && isOnePieceSealedProduct(t))                      { opSealedOut++;    return false; }
+      if (isOpScan && !titleContainsCardNumber(t, card.card_number))   { opNoNumberOut++;  return false; }
+      if (isOpScan && !hasOnePieceKeyword(t))                          { opNoKeywordOut++; return false; }
       return true;
     });
 
-    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
+    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
 
     let identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
 
@@ -3578,12 +3594,39 @@ app.post('/scan', async (req, res) => {
       //     {character, card_number, rarity, color}, then builds an eBay
       //     query and reuses handleAnalyze + handleCard + graded/peer logic.
       //     Pokemon path below is unchanged.
-      if (tcgCategory === 'OnePiece' && lensResult?.visualMatches) {
-        const opVote = extractOnePieceFromMatches(lensResult.visualMatches);
-        // Require at least the card number to be confident enough to proceed.
-        // (Character is nice-to-have; card_number alone uniquely identifies an OP card.)
-        if (opVote && opVote.card_number) {
-          const opQuery = buildOnePieceQuery(opVote);
+      if (tcgCategory === 'OnePiece') {
+        // Identity priority: Gemini reads card_number + variant_marker directly
+        // from the image (same vision call that did grading detect — free).
+        // Lens vote only provides the character name (and acts as fallback for
+        // card_number if Gemini couldn't read it).
+        const lensVote = extractOnePieceFromMatches(lensResult?.visualMatches || []);
+        const geminiCardNumber = (gradeResult && typeof gradeResult.card_number === 'string')
+          ? gradeResult.card_number.toUpperCase().replace(/\s+/g, '')
+          : null;
+        const geminiVariant = (gradeResult && typeof gradeResult.variant_marker === 'string')
+          ? gradeResult.variant_marker : null;
+        // Merge: Gemini number wins if present, else Lens vote
+        const opIdentity = {
+          card_number: geminiCardNumber || lensVote.card_number,
+          character:   lensVote.character,
+          rarity:      lensVote.rarity,
+          color:       lensVote.color,
+          variant_marker: geminiVariant,
+        };
+        const sourceTag = geminiCardNumber ? 'gemini' : (lensVote.card_number ? 'lens-vote' : 'none');
+        console.log('[Lakkot/onepiece] identity sources — gemini.card_number:', geminiCardNumber,
+          '| lens.card_number:', lensVote.card_number,
+          '| gemini.variant:', geminiVariant,
+          '| FINAL:', opIdentity.card_number, '(' + sourceTag + ')',
+          '| variant:', opIdentity.variant_marker || '(none)');
+        if (opIdentity.card_number) {
+          // buildOnePieceQuery appends high-stakes variant markers (AA, SEC,
+          // Manga Rare) when the LENS vote returned them. With the Gemini
+          // variant_marker we explicitly add it to the query string.
+          let opQuery = buildOnePieceQuery(opIdentity);
+          if (geminiVariant && !opQuery.toLowerCase().includes(geminiVariant.toLowerCase())) {
+            opQuery = (opQuery + ' ' + geminiVariant).trim();
+          }
           console.log('[Lakkot/onepiece] vote:', JSON.stringify(opVote), '| query:', opQuery);
           const result = await handleAnalyze({
             imageBase64, streamTitle: opQuery, sellerPrice,
