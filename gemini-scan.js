@@ -458,25 +458,38 @@ function buildGoatPrompt(identity) {
 // eBay search query so the user sees sold prices for THEIR specific grade.
 
 function buildGradeDetectionPrompt() {
+  // The company list MUST stay in sync with GRADING_KEYWORDS in server.js
+  // (which curates the canonical set we recognize across raw-query exclusion
+  // and graded-query filtering). Don't add a company here without also adding
+  // it to that array, or the eBay filter won't keep matching listings.
   return [
     'Look at this trading card image.',
-    'Is the card encased in a GRADING SLAB (a hard plastic case with a label at the top)?',
+    'Is the card encased in a GRADING SLAB (a hard plastic case with a label at the top, usually showing a company name, a grade number, and a cert serial)?',
     '',
-    'Common slabs you might see:',
-    '  - PSA: red/blue/gold cert label, white center',
-    '  - BGS (Beckett): silver label, often with subgrades',
-    '  - CGC: blue label, grade prominently shown',
-    '  - SGC: black label with gold border',
-    '  - ACE: French company, dark gradient label',
-    '  - TAG: thin colored label, AI-graded',
+    'Grading companies to recognize (look for the company name printed on the label):',
+    '  - PSA           — US, red/blue/gold cert label with white center, most common',
+    '  - CGC           — US/EU, blue label with grade prominently shown',
+    '  - BGS (Beckett) — US, silver label, often with subgrades like 9.5',
+    '  - SGC           — US, black label with gold border',
+    '  - ACE           — French, dark gradient label, popular in France',
+    '  - PCA           — French, black-and-white label, common in FR Pokemon scene',
+    '  - CollectAura / CA — boutique, gold-ish label',
+    '  - CCC           — niche European',
+    '  - HGA / PFX / FCG / SFG — smaller European graders, label shows the acronym',
     '',
-    'If you see a slab AND can read the grade clearly, return both.',
+    'IMPORTANT — do NOT classify these as graded:',
+    '  - "TAG TEAM" Pokemon cards (TAG is a card type, not a grading company)',
+    '  - Cards in penny sleeves / toploaders (not slabs)',
+    '  - "MINT" condition stickers (not the same as a grading slab)',
+    '  - Pokemon ranks/symbols on the card itself',
+    '',
+    'If you see a slab AND can clearly read the company name AND the grade number, return both.',
     'If uncertain about either, prefer is_graded:false — wrong info is worse than no info.',
     '',
     'Return STRICT JSON, no markdown:',
     '{',
     '  "is_graded": true | false,',
-    '  "company":   "PSA" | "BGS" | "CGC" | "SGC" | "ACE" | "TAG" | null,',
+    '  "company":   "PSA" | "CGC" | "BGS" | "SGC" | "ACE" | "PCA" | "CollectAura" | "CCC" | "HGA" | "PFX" | "FCG" | "SFG" | null,',
     '  "grade":     "10" | "9.5" | "9" | "8.5" | "8" | "7" | "6" | "5" | "4" | "3" | "2" | "1" | null',
     '}',
   ].join('\n');
