@@ -13,6 +13,7 @@ const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
+const { getOnePieceCardVariants, bucketListingsByVariant } = require('./optcg-api');
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
   mapIdentityToCardResult, mapEbayPriceToCardResult, mapTcgplayerPriceToCardResult, mapPriceChartingToCardResult,
@@ -3700,9 +3701,32 @@ app.post('/scan', async (req, res) => {
             variant: _gf.variant, gradingCompany: _gf.gradingCompany,
             grade: _gf.grade, matchType: _gf.matchType,
           });
-          // Variant clustering is now done in handleCard (applies to ALL card
-          // scans, not just OP). result.variants is null when no picker is
-          // needed (tight cluster) or 2+ entries when the user should pick.
+          // optcgapi.com lookup — authoritative variant list with canonical
+          // names, official Bandai images, and TCGplayer reference prices.
+          // When the API has the card, we OVERRIDE result.variants (which
+          // would otherwise come from heuristic price-cluster detection in
+          // handleCard) with the API-defined variants enriched with
+          // eBay-derived sold-price medians via bucketListingsByVariant().
+          // When API misses (very newest sets, transient downtime), we keep
+          // the heuristic variants and lose nothing.
+          let apiVariants = null;
+          try {
+            apiVariants = await getOnePieceCardVariants(opIdentity.card_number);
+          } catch (e) {
+            console.warn('[Lakkot/onepiece] optcg-api lookup threw:', e.message);
+          }
+          let enrichedVariants = result.variants || null;
+          if (apiVariants && apiVariants.length > 0) {
+            enrichedVariants = bucketListingsByVariant(result.listings || [], apiVariants);
+            console.log('[Lakkot/onepiece] optcg-api returned', apiVariants.length, 'variants for',
+              opIdentity.card_number, '→ bucketed eBay listings:',
+              enrichedVariants.map(v => `${v.label}(${v.count})`).join(' / '));
+          }
+          // If we have API variants OR multi-cluster heuristic variants, expose
+          // them as the variants[] payload. Single-variant cases stay null.
+          const finalVariants = (enrichedVariants && enrichedVariants.length >= 2)
+            ? enrichedVariants : null;
+
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -3710,9 +3734,10 @@ app.post('/scan', async (req, res) => {
             card_number: opIdentity.card_number,
             set_name: opIdentity.color ? `One Piece · ${opIdentity.color}` : 'One Piece',
             ebay_sales_count: result.ebay_sales_count ?? 0,
-            identified_by: 'lens-onepiece-vote',
+            identified_by: apiVariants ? 'lens-onepiece-vote+optcg-api' : 'lens-onepiece-vote',
             product_category: 'One Piece',
             tcg_category: 'OnePiece',
+            variants: finalVariants,
             scanLogId: logId,
             quota,
           });
