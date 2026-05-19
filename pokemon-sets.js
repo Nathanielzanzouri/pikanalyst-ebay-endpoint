@@ -106,4 +106,39 @@ function bucketListingsBySet(listings, candidates) {
   });
 }
 
-module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet };
+// For a given candidate set, find the most-cited card_number that co-occurs
+// with that set in Lens match titles. Used to build a per-set eBay query
+// when the user taps a picker tile (Flow A — ask first, then query).
+// Returns "27/64" / "4/102" / null. Picks the most-frequent number across
+// Lens titles that mention the set's name, so "Snorlax + Jungle" resolves
+// to "27/64" (the non-holo Rare) since that's the most common reprint.
+function getNumberForSet(visualMatches, setName, { topN = 15 } = {}) {
+  if (!setName) return null;
+  const counts = new Map();
+  const setLower = String(setName).toLowerCase();
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = ((m && m.title) || '').toLowerCase();
+    if (!title.includes(setLower)) continue;
+    const nums = title.match(/\b\d{1,3}\/\d{1,3}\b/g) || [];
+    for (const n of nums) counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  if (counts.size === 0) return null;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+// Find a representative thumbnail for a candidate set — first Lens match that
+// mentions the set name AND has a thumbnail. Used to populate the picker
+// tile image when we haven't yet fired an eBay query (so no listing images
+// to draw from).
+function getThumbForSet(visualMatches, setName, { topN = 15 } = {}) {
+  if (!setName) return null;
+  const setLower = String(setName).toLowerCase();
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = ((m && m.title) || '').toLowerCase();
+    if (!title.includes(setLower)) continue;
+    if (m && m.thumbnail) return m.thumbnail;
+  }
+  return null;
+}
+
+module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet };

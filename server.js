@@ -7,7 +7,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
-const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet } = require('./pokemon-sets');
+const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
@@ -3807,6 +3807,52 @@ app.post('/scan', async (req, res) => {
             : `${vote.nameEN} pokemon card`;
           console.log(`[Lakkot] EN vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
+          // ── Multi-set picker — Flow A (ask user, then query) ───────────
+          // When the feature flag is on AND Lens matches describe ≥2 sets
+          // for this Pokemon, we DON'T fire eBay yet. We return picker tiles
+          // (image + set name + per-set suggested query) so the user picks
+          // their actual set, then the sidepanel re-fires a targeted scan
+          // using the tile's query. Prevents the Snorlax case where Lakkot
+          // queries `Snorlax 30/130` (Base Set 2) but the user actually has
+          // Jungle `27/64` — totally different prices.
+          if (multiSetEnabled) {
+            const setCandidates = getSetCandidates(lensResult.visualMatches, { topN: 15, minMentions: 2 });
+            if (setCandidates.length >= 2) {
+              const pickerVariants = setCandidates.map((s, i) => {
+                const num = getNumberForSet(lensResult.visualMatches, s.name);
+                const q = num ? `${vote.nameEN} ${num}` : `${vote.nameEN} ${s.name} pokemon card`;
+                return {
+                  id: 'set-' + s.code,
+                  label: s.name,
+                  sublabel: s.series,
+                  query: q,                        // sidepanel fires this on tap
+                  number: num,
+                  imageUrl: getThumbForSet(lensResult.visualMatches, s.name),
+                  count: s.count,                  // Lens-mention count (not eBay sales — those come on tap)
+                  price: null,                     // null = "Tap to load" in the picker
+                  listings: [],
+                };
+              });
+              console.log('[Lakkot/multi-set] Flow A — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+              return res.json({
+                type: 'CARD_RESULT',                 // sidepanel treats as a normal result so the picker renders
+                card_name: vote.nameEN,
+                card_name_fr: vote.nameFR,
+                identified_by: 'lens-en-vote-multiset-pending',
+                pokemon_votes: vote.votes,
+                ebay_market_price: null,             // null = picker-only mode, no eBay yet
+                ebay_sales_count: 0,
+                listings: [],
+                variants: pickerVariants,
+                multi_set_pending: true,             // flag for the sidepanel to hide the eBay box until pick
+                quota,
+                scanLogId: logId,
+              });
+            }
+          }
+          // ── End multi-set picker ────────────────────────────────────────
+
           // eBay sold price
           const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange, gradeFilter: detectedGrade });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
@@ -3833,22 +3879,12 @@ app.post('/scan', async (req, res) => {
           const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
           const _gf = computeGradingFields(detectedGrade, result);
 
-          // ── Multi-set picker (feature-flagged) ───────────────────────────
-          // When the user has the multi-printing toggle on AND Lens matches
-          // describe ≥2 distinct sets, expose them as picker tiles so the
-          // user can disambiguate Base Set / Celebrations / Base Set 2 /
-          // Jungle etc. for vintage cards that share artwork across reprints.
-          // Same picker UI as One Piece variants — different dimension.
-          let multiSetVariants = null;
-          if (multiSetEnabled) {
-            const setCandidates = getSetCandidates(lensResult.visualMatches, { topN: 15, minMentions: 2 });
-            if (setCandidates.length >= 2) {
-              multiSetVariants = bucketListingsBySet(result.listings || [], setCandidates);
-              console.log(`[Lakkot/multi-set] ${setCandidates.length} candidate sets:`, setCandidates.map(s => `${s.name}(${s.count})`).join(', '));
-            }
-          }
+          // Multi-set ambiguity (if any) was already handled BEFORE the eBay
+          // query — we returned a picker-only response there. Reaching this
+          // point means the user's scan is unambiguous OR the feature flag
+          // is off, so we proceed normally with the single voted card.
 
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: multiSetVariants ? 'lens-card-en-vote-multiset' : 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
             type: 'CARD_RESULT',
@@ -3861,11 +3897,6 @@ app.post('/scan', async (req, res) => {
             tcg_url: tcgUrl,
             identified_by: 'lens-en-vote',
             pokemon_votes: vote.votes,
-            // Multi-set picker data — only present when the feature flag is on
-            // AND Lens detected ≥2 candidate sets. Reuses the existing
-            // `variants` field that the sidepanel's renderVariantPicker
-            // already consumes (originally built for OP cards).
-            ...(multiSetVariants ? { variants: multiSetVariants } : {}),
             quota,
             scanLogId: logId,
           });
