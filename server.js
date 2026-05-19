@@ -889,7 +889,35 @@ function detectTitleLang(title) {
   return null; // unknown
 }
 
-function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
+// `promoMode` (feature-flagged at the caller) tightens promo extraction:
+//   - Filter out titles tagged as foreign-language promos for the active lang
+//     (e.g., a "Chinois" / "Japonaise" promo on an EN scan is a different SKU
+//      — same artwork, different market, different price. Excluding them
+//      stops their numbers from polluting the vote.)
+//   - Normalize promo numbers ("SVP 027", "SVPFR 027", "Promo 027") so they
+//     converge on one canonical key in the vote (e.g., "SVP027"), instead of
+//     splitting votes across format variations.
+function isForeignPromoTitle(title, targetLang) {
+  const t = (title || '').toLowerCase();
+  if (targetLang === 'EN' || targetLang === 'FR') {
+    // Skip Japanese / Chinese promo references for Western scans
+    if (/\bjaponaise\b|\bjapanese\b|\[?(s-)?chinois\]?|\bchinese\b|\bs-chinois\b/.test(t)) return true;
+    if (/[぀-ヿ㐀-鿿]/.test(title)) return true;  // CJK chars
+  }
+  return false;
+}
+
+function normalizePromoNumber(raw) {
+  if (!raw) return raw;
+  const s = String(raw).trim();
+  // "SVP 027" / "SVPFR 027" / "SVP-027" / "SVPEN027" → "SVP027"
+  const m = s.match(/^(SVP|SWSH|SM|XY|BW|DP|HGSS|NP|POP)(?:FR|EN)?\s*[#-]?\s*(\d{1,4})$/i);
+  if (m) return `${m[1].toUpperCase()}${m[2].padStart(3, '0')}`;
+  return s;
+}
+
+function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {}) {
+  const { promoMode = false } = options;
   const nameVotes = {};
   const nameWithNumber = []; // [{name, nameEN, number, title, lang}]
 
@@ -900,6 +928,9 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
 
   for (const match of (visualMatches || []).slice(0, 15)) {
     const title = match.title || '';
+    // Promo mode: skip foreign-language promos for this scan's target language.
+    // Keeps the Chinese/JP `004/SV-P` variant from voting against the EN `SVP027`.
+    if (promoMode && isForeignPromoTitle(title, targetLang)) continue;
     const titleLang = detectTitleLang(title);
     // Split title into words and check each against Pokemon names
     // Also split on hyphens — "Méga-Lucario-ex" → ["Méga", "Lucario", "ex"]
@@ -928,7 +959,14 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN') {
             // Try promo code: SVP044, SVPFR 044, etc.
             const promoMatch = title.match(PROMO_CODE_RE);
             if (promoMatch) {
-              const promoNum = `${promoMatch[1].toUpperCase()} ${promoMatch[2]}`;
+              // In promo mode: normalize SVP/SWSH/SM/XY/BW/DP family codes so
+              // "SVP 027", "SVPFR 027", "SVP027" all vote as one canonical
+              // key ("SVP027"). Without this, format variations split the
+              // vote across cousin formats and let a generic "Promo NNN"
+              // fallback from foreign titles win.
+              const promoNum = promoMode
+                ? normalizePromoNumber(`${promoMatch[1].toUpperCase()}${promoMatch[2]}`)
+                : `${promoMatch[1].toUpperCase()} ${promoMatch[2]}`;
               nameWithNumber.push({ name: lower, nameEN: en, number: promoNum, title, lang: titleLang, isPromo: true });
             } else {
               // Try "Promo" + number pattern: "Evoli 173 Promo" or "Promo 173"
@@ -3478,7 +3516,7 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90, country = null, multiSetEnabled = false } = params;
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90, country = null, multiSetEnabled = false, promoEnabled = false } = params;
       // If client sent a full frame (scan zone active), use it as the original for logging
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
@@ -3800,7 +3838,7 @@ app.post('/scan', async (req, res) => {
 
       // === EN toggle: vote-based Pokemon identification ===
       if (language === 'EN' && lensResult?.visualMatches) {
-        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN');
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN', { promoMode: promoEnabled });
         if (vote) {
           const voteQuery = vote.number
             ? `${vote.nameEN} ${vote.number}`
@@ -3944,7 +3982,7 @@ app.post('/scan', async (req, res) => {
 
       // === FR toggle: vote-based Pokemon identification ===
       if (language === 'FR' && lensResult?.visualMatches) {
-        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'FR');
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'FR', { promoMode: promoEnabled });
         if (vote) {
           // Use French name for eBay query — French cards are listed with FR names on eBay France
           const voteQuery = vote.number
