@@ -924,6 +924,15 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
   const cardNumRe = /\b([A-Za-z]{0,3}\d{1,4}\s*\/\s*[A-Za-z]{0,3}\d{1,4})\b/;
   // Also match dash-separated format: "033-106-SV8-B" → "033/106"
   const dashNumRe = /^(\d{2,4})-(\d{2,4})-[A-Z]{2,}/;
+  // Japanese promo SKU: "098/SV-P", "098/XY-P", "045/BW-P", "001/PCG-P", etc.
+  // These don't match cardNumRe (which expects digits on both sides of the slash)
+  // and weren't being captured by PROMO_CODE_RE either — the era suffix would
+  // get stripped, sending out queries like "Pikachu Promo 098" that match
+  // multiple totally different cards on eBay (Detective Pikachu 098/SV-P,
+  // Mega Tokyo's Pikachu 098/XY-P, Regice 098/PCG-P — same number, different
+  // eras, totally different prices). Captures the full SKU so the query
+  // preserves the era suffix.
+  const jpPromoRe = /\b(\d{1,3})\s*\/\s*(SV|XY|BW|DP|HGSS|SM|PCG|S|HS)-?P\b/i;
   // Promo codes: uses PROMO_CODE_RE built from pokemon-sets.js at module load
 
   for (const match of (visualMatches || []).slice(0, 15)) {
@@ -941,6 +950,20 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
       if (isPokemonName(lower)) {
         const en = pokemonToEN(lower) || lower;
         nameVotes[en] = (nameVotes[en] || 0) + 1;
+
+        // Promo mode: first try the Japanese promo SKU pattern (e.g. "098/SV-P").
+        // If matched, that's the most specific form — use it verbatim and skip
+        // the other patterns. Without this, the X/Y regex below misses it (no
+        // digits after the slash) and we'd fall back to a generic "Promo 098"
+        // that fuzz-matches every promo numbered 098 across eras.
+        if (promoMode) {
+          const jpPromoMatch = title.match(jpPromoRe);
+          if (jpPromoMatch) {
+            const jpPromoNum = `${jpPromoMatch[1].padStart(3, '0')}/${jpPromoMatch[2].toUpperCase()}-P`;
+            nameWithNumber.push({ name: lower, nameEN: en, number: jpPromoNum, title, lang: titleLang, isPromo: true });
+            continue;
+          }
+        }
 
         // Also check if this match has a card number
         const numMatch = title.match(cardNumRe);
@@ -1286,7 +1309,13 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
   // Otherwise, existing behavior: reject all graded listings as noise.
   const titleFilter = makeGradedTitleFilter(card._gradeFilter);
   const isOpScan = card._tcgCategory === 'OnePiece';
-  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0;
+  // Pokemon promo with an era suffix (098/SV-P, 098/XY-P, etc.) is uniquely
+  // disambiguating — different eras = different cards entirely. Apply the
+  // same title-must-contain-SKU filter we use for OP so eBay's loose keyword
+  // match doesn't surface "098/XY-P Mega Tokyo Pikachu" or "098/PCG Regice"
+  // when the user actually scanned "098/SV-P Detective Pikachu".
+  const isJpPromoScan = !isOpScan && /\b\d{1,3}\/[A-Z]{1,4}-?P\b/i.test(card.card_number || '');
+  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0;
   const clean = sold.filter(i => {
     const t = i?.title?.[0] ?? '';
     if (!titleFilter(t)) { gradedOut++;     return false; }
@@ -1306,6 +1335,8 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
     if (isOpScan && isOnePieceSealedProduct(t))              { opSealedOut++;    return false; }
     if (isOpScan && !titleContainsCardNumber(t, card.card_number)) { opNoNumberOut++;  return false; }
     if (isOpScan && !hasOnePieceKeyword(t))                  { opNoKeywordOut++; return false; }
+    // Pokemon JP promo: require the full SKU (e.g. "098/SV-P") in the title
+    if (isJpPromoScan && !titleContainsCardNumber(t, card.card_number)) { jpPromoNoSkuOut++; return false; }
     return true;
   });
   console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
@@ -1450,7 +1481,9 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
     // See Finding-API equivalent for the grading-filter inversion logic.
     const titleFilter = makeGradedTitleFilter(card._gradeFilter);
     const isOpScan = card._tcgCategory === 'OnePiece';
-    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0;
+    // Same JP-promo SKU filter logic as the Finding-API path above.
+    const isJpPromoScan = !isOpScan && /\b\d{1,3}\/[A-Z]{1,4}-?P\b/i.test(card.card_number || '');
+    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
       if (!titleFilter(t))    { gradedOut++;     return false; }
@@ -1465,6 +1498,8 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
       if (isOpScan && isOnePieceSealedProduct(t))                      { opSealedOut++;    return false; }
       if (isOpScan && !titleContainsCardNumber(t, card.card_number))   { opNoNumberOut++;  return false; }
       if (isOpScan && !hasOnePieceKeyword(t))                          { opNoKeywordOut++; return false; }
+      // Pokemon JP promo: require the full SKU (e.g. "098/SV-P") in the title
+      if (isJpPromoScan && !titleContainsCardNumber(t, card.card_number)) { jpPromoNoSkuOut++; return false; }
       return true;
     });
 
@@ -3943,7 +3978,7 @@ app.post('/scan', async (req, res) => {
 
       // === JP toggle: vote-based Pokemon identification ===
       if (language === 'JP' && lensResult?.visualMatches) {
-        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'JP');
+        const vote = extractPokemonFromMatches(lensResult.visualMatches, 'JP', { promoMode: promoEnabled });
         if (vote) {
           const voteQuery = vote.number
             ? `${vote.nameEN} ${vote.number} japanese`
