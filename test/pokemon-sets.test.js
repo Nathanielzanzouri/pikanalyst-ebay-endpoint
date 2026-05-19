@@ -1,0 +1,131 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert');
+const { findSetInText, getSetCandidates, bucketListingsBySet } = require('../pokemon-sets');
+
+// ─── findSetInText (existing helper, sanity-check it still works) ────────────
+test('findSetInText: detects "Base Set 2" longer match over "Base"', () => {
+  // Long-match-wins: "Base Set 2" should win over the shorter "Base" prefix.
+  const out = findSetInText('Charizard 4/130 Base Set 2 Holo 2000');
+  assert.ok(out);
+  assert.strictEqual(out.name, 'Base Set 2');
+});
+
+test('findSetInText: detects Celebrations', () => {
+  const out = findSetInText('Pokemon TCG Celebrations 25th Anniversary Charizard 4/102');
+  assert.ok(out);
+  assert.strictEqual(out.name, 'Celebrations');
+});
+
+test('findSetInText: no set keyword → null', () => {
+  assert.strictEqual(findSetInText('Charizard 4/102 Holo Rare'), null);
+});
+
+// ─── getSetCandidates ────────────────────────────────────────────────────────
+test('getSetCandidates: real Ronflex case — surfaces Jungle + Base Set 2', () => {
+  const matches = [
+    { title: 'Carte Pokémon anglaise Ronflex holo jungle - Collection' },
+    { title: 'Ronflex - carte Pokémon 27/64 Jungle' },
+    { title: 'Carte Pokémon Ronflex 11/64' },
+    { title: 'CARTE POKEMON RONFLEX 27/64 FR RARE WIZARDS JUNGLE - TBE' },
+    { title: 'Ronflex 27/64 [PREMIERE EDITION 1] - Jungle' },
+    { title: 'SNORLAX - 11/64 - ensemble jungle - Holo' },
+    { title: 'Snorlax de 1999' },
+    { title: 'Ronflex (B2 30/130) - Base Set 2 | Cardex international' },
+    { title: 'Prix de Snorlax [1st Edition] #11 | Pokemon Jungle' },
+    { title: 'JCC Pokémon.tf - Pokédex >> #143 Ronflex' },
+    { title: 'Snorlax - Base Set 2 #30 Pokemon Card' },
+    { title: 'Ronflex 11/64 brillant - Collection' },
+    { title: 'Ronflex 27/64 - Valeur & Prix de Rachat' },
+    { title: 'Snorlax (XY Promo 179) - Bulbapedia' },
+    { title: 'Snorlax Custom Metal Credit Card' },
+  ];
+  const cands = getSetCandidates(matches);
+  // Jungle should be #1 (most-cited), Base Set 2 should be #2.
+  assert.ok(cands.length >= 2, 'expected at least 2 candidates, got ' + cands.length);
+  assert.strictEqual(cands[0].name, 'Jungle');
+  assert.ok(cands[0].count >= 5, 'Jungle should have ≥5 mentions, got ' + cands[0].count);
+  const bs2 = cands.find(c => c.name === 'Base Set 2');
+  assert.ok(bs2, 'Base Set 2 should be in candidates');
+});
+
+test('getSetCandidates: needs ≥minMentions per set (default 2) — filters out one-offs', () => {
+  const matches = [
+    { title: 'Charizard 4/102 Base Set Shadowless 1999' },   // 1 mention of Base
+    { title: 'Charizard 4/102 XY Promo' },                    // 1 mention of XY Promos
+    { title: 'Charizard generic listing' },
+  ];
+  const cands = getSetCandidates(matches);
+  assert.strictEqual(cands.length, 0, 'no set with ≥2 mentions → no candidates');
+});
+
+test('getSetCandidates: returns candidates sorted by count desc', () => {
+  const matches = [
+    { title: 'Celebrations 4/102 1' },
+    { title: 'Celebrations Classic Collection 2' },
+    { title: 'Celebrations 25th 3' },
+    { title: 'Base Set 4/102 1' },
+    { title: 'Base Set Shadowless 2' },
+  ];
+  const cands = getSetCandidates(matches);
+  assert.strictEqual(cands[0].name, 'Celebrations');
+  assert.strictEqual(cands[0].count, 3);
+  assert.strictEqual(cands[1].name, 'Base');
+});
+
+test('getSetCandidates: empty/null input safe', () => {
+  assert.deepStrictEqual(getSetCandidates([]), []);
+  assert.deepStrictEqual(getSetCandidates(null), []);
+});
+
+// ─── bucketListingsBySet ─────────────────────────────────────────────────────
+test('bucketListingsBySet: sorts listings into the right set bucket by title', () => {
+  const candidates = [
+    { code: 'base1', name: 'Base', series: 'Base' },
+    { code: 'cel25c', name: 'Celebrations: Classic Collection', series: 'Sword & Shield' },
+  ];
+  const listings = [
+    { title: 'Charizard 4/102 Base Set 1st Edition',                price: 5000, imageUrl: 'a.jpg' },
+    { title: 'Charizard 4/102 Celebrations: Classic Collection',    price: 30,   imageUrl: 'b.jpg' },
+    { title: 'Charizard 4/102 Base Set Shadowless',                 price: 1500, imageUrl: 'c.jpg' },
+    { title: 'Charizard 4/102 Celebrations: Classic Collection PSA 9', price: 60, imageUrl: 'd.jpg' },
+  ];
+  const out = bucketListingsBySet(listings, candidates);
+  assert.strictEqual(out.length, 2);
+  const base = out.find(b => b.label === 'Base');
+  const cel  = out.find(b => /Celebrations/.test(b.label));
+  assert.strictEqual(base.count, 2);
+  assert.strictEqual(cel.count, 2);
+  assert.ok(base.price > cel.price, 'Base Set should be more expensive than Celebrations');
+});
+
+test('bucketListingsBySet: listings without a recognized set go to the top-voted bucket', () => {
+  // Sellers often omit the set name when the card is the most-common print.
+  // Those should land in the top-voted (first) bucket so they aren't lost.
+  const candidates = [
+    { code: 'base1', name: 'Base', series: 'Base', count: 5 },
+    { code: 'cel25c', name: 'Celebrations: Classic Collection', series: 'Sword & Shield', count: 3 },
+  ];
+  const listings = [
+    { title: 'Charizard 4/102 Holo Rare',                    price: 600 },    // ambiguous → goes to Base
+    { title: 'Charizard 4/102 Celebrations',                 price: 25 },
+    { title: 'Charizard 4/102 Base Set Shadowless',          price: 1500 },
+  ];
+  const out = bucketListingsBySet(listings, candidates);
+  const base = out.find(b => b.label === 'Base');
+  assert.strictEqual(base.count, 2, 'ambiguous listing should join Base (top-voted) bucket');
+});
+
+test('bucketListingsBySet: empty candidates → []', () => {
+  assert.deepStrictEqual(bucketListingsBySet([{ title: 'x', price: 1 }], []), []);
+  assert.deepStrictEqual(bucketListingsBySet([{ title: 'x', price: 1 }], null), []);
+});
+
+test('bucketListingsBySet: zero-listing bucket returns null price + count=0', () => {
+  const candidates = [
+    { code: 'base3', name: 'Fossil', series: 'Base', count: 2 },
+  ];
+  const out = bucketListingsBySet([], candidates);
+  assert.strictEqual(out[0].count, 0);
+  assert.strictEqual(out[0].price, null);
+});

@@ -7,7 +7,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
-const { POKEMON_SETS, findSetInText } = require('./pokemon-sets');
+const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet } = require('./pokemon-sets');
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
@@ -3478,7 +3478,7 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90, country = null } = params;
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90, country = null, multiSetEnabled = false } = params;
       // If client sent a full frame (scan zone active), use it as the original for logging
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
@@ -3832,7 +3832,23 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
           const _gf = computeGradingFields(detectedGrade, result);
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+
+          // ── Multi-set picker (feature-flagged) ───────────────────────────
+          // When the user has the multi-printing toggle on AND Lens matches
+          // describe ≥2 distinct sets, expose them as picker tiles so the
+          // user can disambiguate Base Set / Celebrations / Base Set 2 /
+          // Jungle etc. for vintage cards that share artwork across reprints.
+          // Same picker UI as One Piece variants — different dimension.
+          let multiSetVariants = null;
+          if (multiSetEnabled) {
+            const setCandidates = getSetCandidates(lensResult.visualMatches, { topN: 15, minMentions: 2 });
+            if (setCandidates.length >= 2) {
+              multiSetVariants = bucketListingsBySet(result.listings || [], setCandidates);
+              console.log(`[Lakkot/multi-set] ${setCandidates.length} candidate sets:`, setCandidates.map(s => `${s.name}(${s.count})`).join(', '));
+            }
+          }
+
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: multiSetVariants ? 'lens-card-en-vote-multiset' : 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
             type: 'CARD_RESULT',
@@ -3845,6 +3861,11 @@ app.post('/scan', async (req, res) => {
             tcg_url: tcgUrl,
             identified_by: 'lens-en-vote',
             pokemon_votes: vote.votes,
+            // Multi-set picker data — only present when the feature flag is on
+            // AND Lens detected ≥2 candidate sets. Reuses the existing
+            // `variants` field that the sidepanel's renderVariantPicker
+            // already consumes (originally built for OP cards).
+            ...(multiSetVariants ? { variants: multiSetVariants } : {}),
             quota,
             scanLogId: logId,
           });

@@ -32,4 +32,78 @@ function findSetInText(text) {
   return best ? { code: best.code, name: best.name, series: best.series } : null;
 }
 
-module.exports = { POKEMON_SETS, findSetInText };
+// ─── Multi-set picker support (vintage cards reprinted across sets) ──────────
+// extractPokemonFromMatches already picks ONE winning set from Lens votes —
+// good for non-ambiguous cards. For vintage cards reprinted across multiple
+// sets (Charizard 4/102 in Base Set vs Celebrations, Snorlax in Jungle vs
+// Base Set 2, etc.), we need the full candidate distribution so the
+// sidepanel can show a picker. This is the Pokemon analog of OP's variant
+// picker — same UI, different disambiguation dimension (set instead of variant).
+
+// Vote across Lens top-N titles for set candidates. Returns ALL sets that
+// appear at least `minMentions` times, sorted by mention count desc.
+// Caller uses array length to decide whether to trigger the picker
+// (length >= 2 = multi-set ambiguity).
+function getSetCandidates(visualMatches, { topN = 15, minMentions = 2 } = {}) {
+  const votes = new Map();
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const setInfo = findSetInText((m && m.title) || '');
+    if (!setInfo) continue;
+    if (!votes.has(setInfo.code)) votes.set(setInfo.code, { ...setInfo, count: 0 });
+    votes.get(setInfo.code).count++;
+  }
+  return [...votes.values()]
+    .filter(v => v.count >= minMentions)
+    .sort((a, b) => b.count - a.count);
+}
+
+// Bucket eBay listings into the candidate sets by detecting the set name in
+// each listing's title. Listings whose title doesn't mention any known set
+// fall into the "ambiguous" bin and we attach them to the top-voted bucket
+// (so they aren't lost — sellers often omit the set name in titles).
+function bucketListingsBySet(listings, candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+  const buckets = candidates.map(c => ({ ...c, _listings: [] }));
+  const ambiguous = [];
+  for (const l of (listings || [])) {
+    const setInfo = findSetInText(((l && l.title) || ''));
+    if (!setInfo) { ambiguous.push(l); continue; }
+    // Match on code OR name-overlap. Pokemon's set catalog has cousin codes
+    // ("cel25" Celebrations vs "cel25c" Celebrations: Classic Collection)
+    // that refer to the same set family. eBay sellers rarely write the full
+    // "Celebrations: Classic Collection" — they just say "Celebrations" —
+    // so strict code match would lose those listings to the ambiguous bin.
+    const sn = (setInfo.name || '').toLowerCase();
+    const target = buckets.find(b => {
+      if (b.code === setInfo.code) return true;
+      const bn = (b.name || '').toLowerCase();
+      return bn === sn || bn.startsWith(sn) || sn.startsWith(bn);
+    });
+    if (target) target._listings.push(l);
+    else ambiguous.push(l);   // matched a set not in our candidate list
+  }
+  // Hand ambiguous listings to the top-voted bucket — they likely belong
+  // there since sellers default to omitting set name on the most common print.
+  if (ambiguous.length && buckets.length) buckets[0]._listings.push(...ambiguous);
+
+  return buckets.map((b, i) => {
+    const prices = b._listings.map(l => l.price).filter(p => typeof p === 'number' && p > 0).sort((a, c) => a - c);
+    const median = prices.length ? prices[Math.floor(prices.length / 2)] : null;
+    const firstImg = b._listings.find(l => l && l.imageUrl);
+    return {
+      id:        'set-' + b.code,
+      label:     b.name,           // e.g. "Base Set", "Celebrations", "Jungle"
+      sublabel:  b.series,         // e.g. "Base", "Sword & Shield"
+      price:     median,
+      priceMin:  prices[0] || null,
+      priceMax:  prices[prices.length - 1] || null,
+      count:     b._listings.length,
+      imageUrl:  firstImg ? firstImg.imageUrl : null,   // eBay thumb — not authoritative, but recognizable
+      sampleTitle: (b._listings[0] && b._listings[0].title) || b.name,
+      tcg_ref_usd: null,           // could enrich from pokemontcg.io later
+      listings:  b._listings,
+    };
+  });
+}
+
+module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet };
