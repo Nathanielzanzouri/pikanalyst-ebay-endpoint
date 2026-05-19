@@ -141,4 +141,40 @@ function getThumbForSet(visualMatches, setName, { topN = 15 } = {}) {
   return null;
 }
 
-module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet };
+// JP era-suffix candidates — Japanese Pokemon promos disambiguate by ERA
+// (SV-P / XY-P / BW-P / DP-P / PCG-P) more than by set name. Detective Pikachu
+// 098/SV-P and Mega Tokyo's Pikachu 098/XY-P share the same number "098" but
+// belong to different eras and trade at very different prices. The Western-set
+// picker (getSetCandidates) can't disambiguate these — they don't carry Western
+// set names. This detector groups Lens matches by era suffix instead.
+function getJpEraCandidates(visualMatches, { topN = 15, minMentions = 2 } = {}) {
+  const eraRe = /\b(\d{1,3})\s*\/\s*(SV|XY|BW|DP|HGSS|SM|PCG|HS)-?P\b/i;
+  const groups = new Map();   // era → { era, count, sampleNumber, sample_title }
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = (m && m.title) || '';
+    const match = title.match(eraRe);
+    if (!match) continue;
+    const era = match[2].toUpperCase() + '-P';
+    const num = match[1].padStart(3, '0') + '/' + era;
+    if (!groups.has(era)) groups.set(era, { era, count: 0, sampleNumber: num, sample_title: title });
+    groups.get(era).count++;
+  }
+  return [...groups.values()]
+    .filter(g => g.count >= minMentions)
+    .sort((a, b) => b.count - a.count);
+}
+
+// Representative thumbnail for a JP era — first Lens match whose title mentions
+// the era suffix AND carries a thumbnail. Mirrors getThumbForSet for Western
+// sets so the picker tile UI works identically across both code paths.
+function getThumbForJpEra(visualMatches, era, { topN = 15 } = {}) {
+  if (!era) return null;
+  const eraUpper = era.toUpperCase();
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = ((m && m.title) || '').toUpperCase();
+    if (title.includes(eraUpper) && m && m.thumbnail) return m.thumbnail;
+  }
+  return null;
+}
+
+module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra };

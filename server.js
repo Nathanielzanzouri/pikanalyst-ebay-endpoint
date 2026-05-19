@@ -7,7 +7,54 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
-const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet } = require('./pokemon-sets');
+const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra } = require('./pokemon-sets');
+
+// Build multi-set picker variants for a Pokemon scan. EN/FR use Western set
+// names (Base / Jungle / Celebrations / etc.); JP uses era suffixes
+// (SV-P / XY-P / etc.) since JP promos don't carry Western set names. Returns
+// null when there's no ambiguity (<2 candidates) so the caller can take the
+// normal single-vote path.
+function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
+  if (!vote) return null;
+  if (lang === 'EN' || lang === 'FR') {
+    const candidates = getSetCandidates(visualMatches, { topN: 15, minMentions: 2 });
+    if (candidates.length < 2) return null;
+    return candidates.map(s => {
+      const num = getNumberForSet(visualMatches, s.name);
+      // FR queries use the FR Pokemon name (vote.nameFR) so eBay returns
+      // French listings; EN uses nameEN.
+      const cardName = lang === 'FR' ? (vote.nameFR || vote.nameEN) : vote.nameEN;
+      const q = num ? `${cardName} ${num}` : `${cardName} ${s.name} pokemon card`;
+      return {
+        id: 'set-' + s.code,
+        label: s.name,
+        sublabel: s.series,
+        query: q,
+        number: num,
+        imageUrl: getThumbForSet(visualMatches, s.name),
+        count: s.count,
+        price: null,
+        listings: [],
+      };
+    });
+  }
+  if (lang === 'JP') {
+    const candidates = getJpEraCandidates(visualMatches, { topN: 15, minMentions: 2 });
+    if (candidates.length < 2) return null;
+    return candidates.map(g => ({
+      id:        'jp-era-' + g.era,
+      label:     g.era + ' (' + g.sampleNumber + ')',  // e.g. "SV-P (098/SV-P)" — readable for buyer
+      sublabel:  'JP Promo',
+      query:     `${vote.nameEN} ${g.sampleNumber} japanese`,
+      number:    g.sampleNumber,
+      imageUrl:  getThumbForJpEra(visualMatches, g.era),
+      count:     g.count,
+      price:     null,
+      listings:  [],
+    }));
+  }
+  return null;
+}
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
@@ -3893,25 +3940,10 @@ app.post('/scan', async (req, res) => {
           // queries `Snorlax 30/130` (Base Set 2) but the user actually has
           // Jungle `27/64` — totally different prices.
           if (multiSetEnabled) {
-            const setCandidates = getSetCandidates(lensResult.visualMatches, { topN: 15, minMentions: 2 });
-            if (setCandidates.length >= 2) {
-              const pickerVariants = setCandidates.map((s, i) => {
-                const num = getNumberForSet(lensResult.visualMatches, s.name);
-                const q = num ? `${vote.nameEN} ${num}` : `${vote.nameEN} ${s.name} pokemon card`;
-                return {
-                  id: 'set-' + s.code,
-                  label: s.name,
-                  sublabel: s.series,
-                  query: q,                        // sidepanel fires this on tap
-                  number: num,
-                  imageUrl: getThumbForSet(lensResult.visualMatches, s.name),
-                  count: s.count,                  // Lens-mention count (not eBay sales — those come on tap)
-                  price: null,                     // null = "Tap to load" in the picker
-                  listings: [],
-                };
-              });
-              console.log('[Lakkot/multi-set] Flow A — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
-              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+            const pickerVariants = buildPokemonMultiSetPicker(lensResult.visualMatches, vote, 'EN');
+            if (pickerVariants) {
+              console.log('[Lakkot/multi-set] EN — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
               return res.json({
                 type: 'CARD_RESULT',                 // sidepanel treats as a normal result so the picker renders
                 card_name: vote.nameEN,
@@ -3961,7 +3993,7 @@ app.post('/scan', async (req, res) => {
           // point means the user's scan is unambiguous OR the feature flag
           // is off, so we proceed normally with the single voted card.
 
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
             type: 'CARD_RESULT',
@@ -3988,6 +4020,31 @@ app.post('/scan', async (req, res) => {
             ? `${vote.nameEN} ${vote.number} japanese`
             : `${vote.nameEN} japanese pokemon card`;
           console.log(`[Lakkot] JP vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
+
+          // Multi-set picker (JP variant — disambiguates by era suffix, see
+          // buildPokemonMultiSetPicker). Detective Pikachu 098/SV-P vs Mega
+          // Tokyo's Pikachu 098/XY-P are the real-world failure case here.
+          if (multiSetEnabled) {
+            const pickerVariants = buildPokemonMultiSetPicker(lensResult.visualMatches, vote, 'JP');
+            if (pickerVariants) {
+              console.log('[Lakkot/multi-set] JP — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+              return res.json({
+                type: 'CARD_RESULT',
+                card_name: vote.nameEN,
+                card_name_fr: vote.nameFR,
+                identified_by: 'lens-jp-vote-multiset-pending',
+                pokemon_votes: vote.votes,
+                ebay_market_price: null,
+                ebay_sales_count: 0,
+                listings: [],
+                variants: pickerVariants,
+                multi_set_pending: true,
+                quota,
+                scanLogId: logId,
+              });
+            }
+          }
 
           // eBay sold price — search with JP language filter
           const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange, gradeFilter: detectedGrade });
@@ -4029,6 +4086,31 @@ app.post('/scan', async (req, res) => {
             : `${vote.nameFR} carte pokemon`;
           console.log(`[Lakkot] FR vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
 
+          // Multi-set picker (FR — Western set lineage, same as EN. Real case:
+          // Ronflex Jungle 27/64 vs Jungle 11/64 Holo vs Base Set 2 30/130 —
+          // FR sellers list across all three with the same artwork.)
+          if (multiSetEnabled) {
+            const pickerVariants = buildPokemonMultiSetPicker(lensResult.visualMatches, vote, 'FR');
+            if (pickerVariants) {
+              console.log('[Lakkot/multi-set] FR — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote-multiset-pending', productName: vote.nameFR || vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+              return res.json({
+                type: 'CARD_RESULT',
+                card_name: vote.nameEN,
+                card_name_fr: vote.nameFR,
+                identified_by: 'lens-fr-vote-multiset-pending',
+                pokemon_votes: vote.votes,
+                ebay_market_price: null,
+                ebay_sales_count: 0,
+                listings: [],
+                variants: pickerVariants,
+                multi_set_pending: true,
+                quota,
+                scanLogId: logId,
+              });
+            }
+          }
+
           // eBay sold price — search with FR language filter
           const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange, gradeFilter: detectedGrade });
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
@@ -4037,7 +4119,7 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
           const _gf = computeGradingFields(detectedGrade, result);
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
             type: 'CARD_RESULT',
