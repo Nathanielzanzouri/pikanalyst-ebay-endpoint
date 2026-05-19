@@ -38,7 +38,7 @@ let lastGeminiApiError = null;
 // `app.post('/scan', ...)` handler can write to scan_logs. The nested copy
 // inside /scan stays untouched and shadows this one in its own scope. Body
 // is identical so /scan and /scan/gemini behave consistently.
-async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType }) {
+async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled }) {
   try {
     let imageUrl = null;
     if (imageBase64) {
@@ -75,6 +75,8 @@ async function logScan({ userEmail, userName, platform, domTitle, imageBase64, c
       ebay_query: ebayQuery ?? null,
       shopping_query: shoppingQuery ?? null,
       country: country ?? null,
+      promo_enabled: promoEnabled ?? null,
+      multi_set_enabled: multiSetEnabled ?? null,
       result_type: resultType ?? null,
       market_price: marketPrice ?? null,
       asking_price: askingPrice ?? null,
@@ -3453,7 +3455,7 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled }) {
     try {
       // Upload original image to Supabase Storage
       let imageUrl = null;
@@ -3495,6 +3497,8 @@ app.post('/scan', async (req, res) => {
         ebay_query: ebayQuery ?? null,
       shopping_query: shoppingQuery ?? null,
       country: country ?? null,
+      promo_enabled: promoEnabled ?? null,
+      multi_set_enabled: multiSetEnabled ?? null,
         result_type: resultType ?? null,
         market_price: marketPrice ?? null,
         asking_price: askingPrice ?? null,
@@ -3993,7 +3997,7 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
           const _gf = computeGradingFields(detectedGrade, result);
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           // Flag when JP toggle couldn't find a JP-specific number (fell back to EN/FR promo)
           const langMismatch = vote.isPromo ? 'EN promo — JP version not found' : null;
