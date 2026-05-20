@@ -4565,10 +4565,16 @@ app.post('/scan', async (req, res) => {
 
   try {
     let result;
+    let scanLogIdOut = null;   // surfaced in the response so the extension can report client_total_ms
     if (type === 'analyze') {
       result = await handleAnalyze(params);
     } else if (type === 'manual') {
-      result = await handleManualLookup(params.cardName, params.language);
+      // Instrument the manual-lookup path — used by typed queries AND by
+      // multi-set picker tile-taps — so it gets the same timing + ebay_source
+      // diagnostics as image scans. No Lens/Gemini here, only the eBay stage.
+      const timings = { t0: Date.now(), lensMs: 0, gradeMs: 0, ebayMs: 0, shoppingMs: 0, serpApiCalls: 0 };
+      _scanTimings = timings;
+      result = await _timed(timings, 'ebayMs', () => handleManualLookup(params.cardName, params.language));
       // TCGPlayer for EN manual lookups
       if (params.language === 'EN' && result.card_name && result.card_number) {
         try {
@@ -4587,14 +4593,16 @@ app.post('/scan', async (req, res) => {
       if (mp) {
         const askP = result.seller_asking_price ?? null;
         const verdict = mp && askP ? (askP / mp < 0.90 ? 'DEAL' : askP / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
-        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0, langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: mp ? 'raw' : 'none' });
+        scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0, langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: mp ? 'raw' : 'none' });
       } else {
-        await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA', langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: 'none' });
+        scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA', langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: 'none' });
       }
     } else {
       return res.status(400).json({ error: 'unknown_type', type });
     }
-    return res.json({ ...result, quota });
+    // scanLogIdOut lets the extension fire reportRenderTiming → client_total_ms
+    // for manual-lookup scans (incl. picker tile-taps), same as image scans.
+    return res.json({ ...result, scanLogId: scanLogIdOut, quota });
   } catch (err) {
     console.error('[Yamo] /scan error:', err.message);
     return res.status(500).json({ error: 'scan_failed', message: err.message });
