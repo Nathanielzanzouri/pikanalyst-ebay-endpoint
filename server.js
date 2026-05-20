@@ -28,7 +28,7 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
   // ── 1. Card-number grouping (primary) ──
   const numCandidates = getNumberCandidates(visualMatches, { topN: 15, minMentions: 2 });
   if (numCandidates.length >= 2) {
-    return numCandidates.map(c => {
+    let tiles = numCandidates.map(c => {
       const setName = getSetNameForNumber(visualMatches, c.number);
       return {
         id:       'num-' + c.number.replace(/[^a-z0-9]/gi, ''),
@@ -42,6 +42,15 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
         listings: [],
       };
     });
+    // Disambiguate tiles that resolved to the SAME set name (e.g. Ronflex
+    // Jungle 27/64 vs Jungle 11/64 — both "Jungle"). Fold the number into
+    // the label so the user can tell them apart at a glance.
+    const labelCounts = {};
+    for (const t of tiles) labelCounts[t.label] = (labelCounts[t.label] || 0) + 1;
+    tiles = tiles.map(t => labelCounts[t.label] > 1
+      ? { ...t, label: `${t.label} ${t.number}`, sublabel: '' }
+      : t);
+    return tiles;
   }
 
   // ── 2. JP era suffixes (098/SV-P vs 098/XY-P) ──
