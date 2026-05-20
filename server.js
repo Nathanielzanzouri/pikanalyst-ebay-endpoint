@@ -401,7 +401,13 @@ function cacheSet(key, data) { _cache.set(key, { data, ts: Date.now() }); }
 // timings may be null (non-unified scans) → no-op.
 async function _timed(timings, key, fn) {
   const s = Date.now();
-  try { return await fn(); }
+  try {
+    const r = await fn();
+    // _timed only ever wraps handleAnalyze (the eBay stage), whose result
+    // carries ebay_source — capture it for the scan_logs diagnostic.
+    if (timings && r && r.ebay_source) timings.ebaySource = r.ebay_source;
+    return r;
+  }
   finally { if (timings) timings[key] = (timings[key] || 0) + (Date.now() - s); }
 }
 // Same, but also counts the call as one SerpApi request (Google Shopping).
@@ -1727,14 +1733,26 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
 async function fetchEbayAny(card, language = 'WORLD', dateRange = 90) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const certId    = process.env.EBAY_CERT_ID;
+  // _ebaySource diagnostic: tag which API actually served the result, so
+  // scan_logs.ebay_source tells us whether the Finding API still works in
+  // production (Finding succeeded) or everything is running on the Browse
+  // fallback (Finding threw / returned 0). Purely observational.
+  let findingError = null;
   try {
-    if (ebayAppId) return await fetchEbayFinding(card, language, dateRange);
+    if (ebayAppId) {
+      const r = await fetchEbayFinding(card, language, dateRange);
+      if (r) r._ebaySource = 'finding';
+      return r;
+    }
   } catch (e) {
+    findingError = e.message;
     console.warn('[Yamo] Finding API failed:', e.message, '→ trying Browse API...');
   }
   if (ebayAppId && certId) {
     const token = await getEbayOAuthToken();
-    return await fetchEbayBrowse(card, token, language, dateRange);
+    const r = await fetchEbayBrowse(card, token, language, dateRange);
+    if (r) { r._ebaySource = 'browse'; r._findingError = findingError; }
+    return r;
   }
   throw new Error('No eBay credentials available');
 }
@@ -1756,6 +1774,8 @@ async function fetchPrices(card, language = 'WORLD', dateRange = 90) {
     ebay_sales_count:  ebay?.ebay_sales_count  ?? 0,
     ebay_url:          ebay?.ebay_url           ?? null,
     listings:          ebay?.listings          ?? [],
+    // Diagnostic: 'finding' | 'browse' | 'none' — which eBay API served this.
+    ebay_source:       ebay?._ebaySource        ?? 'none',
   };
 }
 
@@ -3686,6 +3706,7 @@ app.post('/scan', async (req, res) => {
       timing_ebay_ms:     _scanTimings ? (_scanTimings.ebayMs     || null) : null,
       timing_shopping_ms: _scanTimings ? (_scanTimings.shoppingMs || null) : null,
       serpapi_calls:      _scanTimings ? (_scanTimings.serpApiCalls ?? null) : null,
+      ebay_source:        _scanTimings ? (_scanTimings.ebaySource    ?? null) : null,
         result_type: resultType ?? null,
         market_price: marketPrice ?? null,
         asking_price: askingPrice ?? null,
