@@ -57,6 +57,35 @@ test('normalizeCardNumber: garbage returns null', () => {
   assert.strictEqual(normalizeCardNumber(''), null);
 });
 
+test('normalizeCardNumber: slash separator OP05/119 → OP05-119', () => {
+  assert.strictEqual(normalizeCardNumber('OP05/119'), 'OP05-119');
+});
+
+test('normalizeCardNumber: dash after prefix "OP-05 119" → OP05-119', () => {
+  assert.strictEqual(normalizeCardNumber('OP-05 119'), 'OP05-119');
+});
+
+test('normalizeCardNumber: dash after prefix + dash separator "OP-05-119" → OP05-119', () => {
+  assert.strictEqual(normalizeCardNumber('OP-05-119'), 'OP05-119');
+});
+
+test('extractOnePieceFromMatches: tolerant separators all vote as one number', () => {
+  // Real Luffy OP05-119 case: sellers write the number 5 different ways.
+  // Before the regex fix, "OP-05 119" and "OP05/119" were dropped, splitting
+  // the vote and letting a minority "OP09-119" win.
+  const matches = [
+    { title: 'One Piece OP09-119 Luffy Wanted' },
+    { title: 'Luffy Wanted OP05-119 SEC FR' },
+    { title: 'Luffy OP09-119 Wanted' },
+    { title: 'Luffy wanted OP-05 119 Collection' },
+    { title: 'OP05-119-SEC Monkey D. Luffy' },
+    { title: 'Luffy Wanted OP05-119 Trade' },
+    { title: 'OP05/119 Monkey D. Luffy PSA10' },
+  ];
+  const out = extractOnePieceFromMatches(matches);
+  assert.strictEqual(out.card_number, 'OP05-119', 'OP05-119 should win — 5 votes vs OP09-119 2');
+});
+
 // ─── rarity extraction ────────────────────────────────────────────────────────
 test('extractRarityFromTitle: SEC takes priority over R (substring)', () => {
   assert.strictEqual(extractRarityFromTitle('Luffy OP01-001 SEC'), 'SEC');
