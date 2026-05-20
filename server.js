@@ -2851,6 +2851,29 @@ app.post('/scan/feedback', async (req, res) => {
   }
 });
 
+// ─── /scan/timing — client-measured end-to-end latency ───────────────────────
+// The extension fires this fire-and-forget after a scan completes, reporting
+// the TRUE user-perceived latency (trigger → result received): capture +
+// upload + backend + download. Patched onto the existing scan_logs row so it
+// sits beside the server-side timing_total_ms. The gap between the two is
+// upload + network + any Render cold start.
+app.post('/scan/timing', async (req, res) => {
+  const { scanLogId, clientTotalMs } = req.body || {};
+  if (!scanLogId || typeof clientTotalMs !== 'number' || clientTotalMs < 0) {
+    return res.status(400).json({ error: 'invalid_timing' });
+  }
+  try {
+    const { error } = await supabase.from('scan_logs')
+      .update({ client_total_ms: Math.round(clientTotalMs) })
+      .eq('id', scanLogId);
+    if (error) console.warn('[Lakkot] client timing save failed (column may not exist yet):', error.message);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[Lakkot] timing error:', err.message);
+    return res.status(500).json({ error: 'timing_failed' });
+  }
+});
+
 // ─── /scan/gemini — experimental Gemini 3 Flash card path ────────────────────
 // Takes the image, calls Gemini with grounded web search, maps the strict-JSON
 // response into the existing CARD_RESULT shape so the current renderer handles
