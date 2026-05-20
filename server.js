@@ -1104,27 +1104,40 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
   const topVotes = sorted[0][1];
   console.log(`[Lakkot] Pokemon vote: "${topNameEN}" (${topVotes} votes) | all: ${JSON.stringify(sorted.slice(0, 5))}`);
 
-  // Find the best number for this Pokemon — prefer number from matching language
+  // Find the best number for this Pokemon.
   const matchesForTop = nameWithNumber.filter(m => m.nameEN === topNameEN);
 
+  // Pick the card number by FREQUENCY VOTE — the most-cited number wins.
+  // Previously this used `find(m => m.lang === targetLang)`, which picked the
+  // FIRST language-matched title's number, not the consensus. That let a
+  // single stray title outvote the majority: an EN-toggle scan of a Base Set
+  // Nidoking (8 French titles → "11/102", 1 English title → "45/108") picked
+  // "45/108" because it was the first EN-tagged entry. Card numbers are
+  // language-independent for Western cards (11/102 is 11/102 in EN/FR/DE), so
+  // frequency is the right signal; language is only a tiebreaker for the
+  // selectedTitle / isPromo metadata.
+  const numberCounts = {};
+  for (const m of matchesForTop) {
+    if (m.number) numberCounts[m.number] = (numberCounts[m.number] || 0) + 1;
+  }
+  const topNumber = Object.entries(numberCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  // Among entries carrying the winning number, pick one for metadata using
+  // the same language preference as before (JP also prefers non-promo).
+  const winners = topNumber ? matchesForTop.filter(m => m.number === topNumber) : matchesForTop;
   let bestMatch = null;
   if (targetLang === 'JP') {
-    // JP cards use NNN/NNN set numbers, never promo codes (SVP, SWSH, etc.)
-    // Priority: JP-tagged non-promo > any JP-tagged > neutral non-promo > any non-promo > fallback
     bestMatch =
-      matchesForTop.find(m => m.lang === 'JP' && !m.isPromo) ||
-      matchesForTop.find(m => m.lang === 'JP') ||
-      matchesForTop.find(m => m.lang === null && !m.isPromo) ||
-      matchesForTop.find(m => !m.isPromo) ||
-      matchesForTop[0] || null;
+      winners.find(m => m.lang === 'JP' && !m.isPromo) ||
+      winners.find(m => m.lang === 'JP') ||
+      winners.find(m => !m.isPromo) ||
+      winners[0] || null;
   } else {
-    // EN/FR: prefer language-matched > neutral > any
     bestMatch =
-      matchesForTop.find(m => m.lang === targetLang) ||
-      matchesForTop.find(m => m.lang === null) ||
-      matchesForTop[0] || null;
+      winners.find(m => m.lang === targetLang) ||
+      winners.find(m => m.lang === null) ||
+      winners[0] || null;
   }
-  const bestNumber = bestMatch ? bestMatch.number : null;
+  const bestNumber = topNumber || (bestMatch ? bestMatch.number : null);
   const selectedTitle = bestMatch ? bestMatch.title : null;
 
   if (matchesForTop.length > 0) {
