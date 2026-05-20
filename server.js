@@ -16,15 +16,18 @@ const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getN
 // normal single-vote path.
 function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
   if (!vote) return null;
-  if (lang === 'EN' || lang === 'FR') {
+
+  // Western set-name picker — used for EN/FR always, and for JP as the
+  // primary detector (JP vintage cards like Base Set Nidoking are still
+  // referenced by Western set names in Lens titles).
+  const setPicker = () => {
     const candidates = getSetCandidates(visualMatches, { topN: 15, minMentions: 2 });
     if (candidates.length < 2) return null;
     return candidates.map(s => {
       const num = getNumberForSet(visualMatches, s.name);
-      // FR queries use the FR Pokemon name (vote.nameFR) so eBay returns
-      // French listings; EN uses nameEN.
       const cardName = lang === 'FR' ? (vote.nameFR || vote.nameEN) : vote.nameEN;
-      const q = num ? `${cardName} ${num}` : `${cardName} ${s.name} pokemon card`;
+      const jpSuffix = lang === 'JP' ? ' japanese' : '';
+      const q = num ? `${cardName} ${num}${jpSuffix}` : `${cardName} ${s.name} pokemon card${jpSuffix}`;
       return {
         id: 'set-' + s.code,
         label: s.name,
@@ -37,21 +40,31 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
         listings: [],
       };
     });
+  };
+
+  if (lang === 'EN' || lang === 'FR') {
+    return setPicker();
   }
+
   if (lang === 'JP') {
-    const candidates = getJpEraCandidates(visualMatches, { topN: 15, minMentions: 2 });
-    if (candidates.length < 2) return null;
-    return candidates.map(g => ({
-      id:        'jp-era-' + g.era,
-      label:     g.era + ' (' + g.sampleNumber + ')',  // e.g. "SV-P (098/SV-P)" — readable for buyer
-      sublabel:  'JP Promo',
-      query:     `${vote.nameEN} ${g.sampleNumber} japanese`,
-      number:    g.sampleNumber,
-      imageUrl:  getThumbForJpEra(visualMatches, g.era),
-      count:     g.count,
-      price:     null,
-      listings:  [],
-    }));
+    // JP promos disambiguate by era suffix (SV-P / XY-P / ...). JP vintage
+    // cards disambiguate by Western set name. Try the era detector first
+    // (more specific for promos), fall back to the set-name detector.
+    const eraCandidates = getJpEraCandidates(visualMatches, { topN: 15, minMentions: 2 });
+    if (eraCandidates.length >= 2) {
+      return eraCandidates.map(g => ({
+        id:        'jp-era-' + g.era,
+        label:     g.era + ' (' + g.sampleNumber + ')',  // readable for buyer
+        sublabel:  'JP Promo',
+        query:     `${vote.nameEN} ${g.sampleNumber} japanese`,
+        number:    g.sampleNumber,
+        imageUrl:  getThumbForJpEra(visualMatches, g.era),
+        count:     g.count,
+        price:     null,
+        listings:  [],
+      }));
+    }
+    return setPicker();   // vintage JP card — disambiguate by set name
   }
   return null;
 }
@@ -585,6 +598,10 @@ function isMultiChoice(title) {
   return [
     'au choix', 'à l\'unité', "a l'unite", 'liste déroulante', 'liste deroulante',
     'you choose', 'pick one', 'choose your', 'your choice',
+    // "pick a card" / "pick your card" — multi-card bundle listings where the
+    // displayed price is a per-card floor, not the actual card's value. They
+    // dragged a Nidoking 45/108 median down to €1.61 from noise.
+    'pick a card', 'pick your card', 'pick your', 'complete your set',
   ].some(kw => lower.includes(kw));
 }
 
