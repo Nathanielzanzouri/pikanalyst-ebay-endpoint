@@ -396,6 +396,26 @@ function cacheGet(key) {
 }
 function cacheSet(key, data) { _cache.set(key, { data, ts: Date.now() }); }
 
+// ─── Per-scan timing helpers ──────────────────────────────────────────────────
+// Wrap an async stage and accumulate its wall-time into timings[key].
+// timings may be null (non-unified scans) → no-op.
+async function _timed(timings, key, fn) {
+  const s = Date.now();
+  try { return await fn(); }
+  finally { if (timings) timings[key] = (timings[key] || 0) + (Date.now() - s); }
+}
+// Same, but also counts the call as one SerpApi request (Google Shopping).
+async function _timedShopping(timings, fn) {
+  const s = Date.now();
+  try { return await fn(); }
+  finally {
+    if (timings) {
+      timings.shoppingMs   = (timings.shoppingMs   || 0) + (Date.now() - s);
+      timings.serpApiCalls = (timings.serpApiCalls || 0) + 1;
+    }
+  }
+}
+
 // ─── eBay rate limits ──────────────────────────────────────────────────────────
 let lastFindingCallTime = 0;
 const FINDING_MIN_INTERVAL = 1_000; // eBay allows 18 calls/sec; 1s is safely conservative
@@ -3545,6 +3565,11 @@ app.post('/scan/gemini-stream', async (req, res) => {
 app.post('/scan', async (req, res) => {
   const { token, type, ...params } = req.body;
 
+  // Request-scoped scan timing. The unified branch populates this; the
+  // nested logScan() below reads it via closure so we don't have to thread
+  // it through ~10 logScan call sites. Null for non-unified scans.
+  let _scanTimings = null;
+
   // match_listings: vision matching — does not consume quota
   if (type === 'match_listings') {
     try {
@@ -3601,6 +3626,15 @@ app.post('/scan', async (req, res) => {
       country: country ?? null,
       promo_enabled: promoEnabled ?? null,
       multi_set_enabled: multiSetEnabled ?? null,
+      // Per-scan timing (unified scans only — read from the request-scoped
+      // _scanTimings closure variable). timing_total_ms is computed here so
+      // it captures everything up to the moment the row is written.
+      timing_total_ms:    _scanTimings ? Date.now() - _scanTimings.t0 : null,
+      timing_lens_ms:     _scanTimings ? (_scanTimings.lensMs     || null) : null,
+      timing_grade_ms:    _scanTimings ? (_scanTimings.gradeMs    || null) : null,
+      timing_ebay_ms:     _scanTimings ? (_scanTimings.ebayMs     || null) : null,
+      timing_shopping_ms: _scanTimings ? (_scanTimings.shoppingMs || null) : null,
+      serpapi_calls:      _scanTimings ? (_scanTimings.serpApiCalls ?? null) : null,
         result_type: resultType ?? null,
         market_price: marketPrice ?? null,
         asking_price: askingPrice ?? null,
@@ -3707,9 +3741,28 @@ app.post('/scan', async (req, res) => {
       // Fail-safe: if Gemini key missing or call fails, returns is_graded:false
       // and scan runs as raw (same behavior as the legacy flag-off path).
       const gradingEnabled = !!process.env.GEMINI_API_KEY;
+      // Per-scan timing — see logScan() which reads this via the _scanTimings
+      // closure. lensMs/gradeMs measured around the parallel block below;
+      // ebayMs/shoppingMs accumulated at their call sites; serpApiCalls
+      // counts SerpApi requests (Lens = 1, each Google Shopping call = +1).
+      const timings = { t0: Date.now(), lensMs: 0, gradeMs: 0, ebayMs: 0, shoppingMs: 0, serpApiCalls: 0 };
+      _scanTimings = timings;
       const [lensSettled, gradeSettled] = await Promise.allSettled([
-        handleGoogleLens(imageBase64),
-        gradingEnabled ? callGeminiGradeDetect(imageBase64) : Promise.resolve({ is_graded: false }),
+        (async () => {
+          const _s = Date.now();
+          const r = await handleGoogleLens(imageBase64);
+          timings.lensMs = Date.now() - _s;
+          timings.serpApiCalls += 1;          // Lens is always 1 SerpApi call
+          return r;
+        })(),
+        gradingEnabled
+          ? (async () => {
+              const _s = Date.now();
+              const r = await callGeminiGradeDetect(imageBase64);
+              timings.gradeMs = Date.now() - _s;
+              return r;
+            })()
+          : Promise.resolve({ is_graded: false }),
       ]);
       const lensResult = lensSettled.status === 'fulfilled' ? lensSettled.value : null;
       const gradeResult = gradeSettled.status === 'fulfilled' ? gradeSettled.value : { is_graded: false };
@@ -3896,12 +3949,12 @@ app.post('/scan', async (req, res) => {
             opIdentity.variant_marker = geminiVariant;
           }
           console.log('[Lakkot/onepiece] identity:', JSON.stringify(opIdentity), '| query:', opQuery);
-          const result = await handleAnalyze({
+          const result = await _timed(timings, 'ebayMs', () => handleAnalyze({
             imageBase64, streamTitle: opQuery, sellerPrice,
             mode: 'cards', manualCardOverride: opQuery,
             language, dateRange, gradeFilter: detectedGrade,
             tcgCategory: 'OnePiece',
-          });
+          }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice
             ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR')
@@ -4018,7 +4071,7 @@ app.post('/scan', async (req, res) => {
           // ── End multi-set picker ────────────────────────────────────────
 
           // eBay sold price
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange, gradeFilter: detectedGrade });
+          const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -4102,7 +4155,7 @@ app.post('/scan', async (req, res) => {
           }
 
           // eBay sold price — search with JP language filter
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange, gradeFilter: detectedGrade });
+          const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -4167,7 +4220,7 @@ app.post('/scan', async (req, res) => {
           }
 
           // eBay sold price — search with FR language filter
-          const result = await handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange, gradeFilter: detectedGrade });
+          const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
@@ -4223,7 +4276,7 @@ app.post('/scan', async (req, res) => {
           .replace(/\s+/g, ' ')
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
-        const result = await handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language, dateRange, gradeFilter: detectedGrade });
+        const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language, dateRange, gradeFilter: detectedGrade }));
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
@@ -4259,7 +4312,7 @@ app.post('/scan', async (req, res) => {
         // becomes the basket as-is. Keeps the AI's role tightly scoped.
         console.log('[Lakkot] Unified: AI identity →', JSON.stringify({ brand: aiIdentity.brand, model: aiIdentity.model, variant: aiIdentity.variant, sku: aiIdentity.sku, category: aiIdentity.category, conf: aiIdentity.confidence }));
         try {
-          const raw = await handleGoogleShopping(aiIdentity.query, country);
+          const raw = await _timedShopping(timings, () => handleGoogleShopping(aiIdentity.query, country));
           const basket = raw.cards || [];
           if (basket.length >= 1) {
             shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
@@ -4284,7 +4337,7 @@ app.post('/scan', async (req, res) => {
         loggedShoppingQuery = skuQuery;
         console.log('[Lakkot] Unified: style-code ID', identity.styleCode, '(score', identity.score + ') → query:', skuQuery);
         try {
-          const raw1 = await handleGoogleShopping(skuQuery, country);
+          const raw1 = await _timedShopping(timings, () => handleGoogleShopping(skuQuery, country));
           let basket = filterBySku(raw1.cards, identity.styleCode);
           // Fallback: if the precise query yielded too few SKU matches, retry with
           // a broader "brand + sku" query and pool the unique results. This is the
@@ -4292,7 +4345,7 @@ app.post('/scan', async (req, res) => {
           if (basket.length < 2 && identity.brand && identity.styleCode) {
             const fallbackQuery = `${identity.brand} ${identity.styleCode}`;
             console.log('[Lakkot] Unified: thin basket — fallback query →', fallbackQuery);
-            const raw2 = await handleGoogleShopping(fallbackQuery, country);
+            const raw2 = await _timedShopping(timings, () => handleGoogleShopping(fallbackQuery, country));
             const more = filterBySku(raw2.cards, identity.styleCode);
             const seen = new Set(basket.map((c) => c.title));
             for (const c of more) if (!seen.has(c.title)) { basket.push(c); seen.add(c.title); }
@@ -4309,7 +4362,7 @@ app.post('/scan', async (req, res) => {
             const nameQuery = `${identity.brand} ${phrase}`;
             console.log('[Lakkot] Unified: retailer-augment query →', nameQuery);
             try {
-              const raw3 = await handleGoogleShopping(nameQuery, country);
+              const raw3 = await _timedShopping(timings, () => handleGoogleShopping(nameQuery, country));
               const retailers = (raw3.cards || []).filter((c) => !isMarketplace(c.source));
               const seenTitles = new Set(basket.map((c) => c.title));
               let added = 0;
@@ -4336,7 +4389,7 @@ app.post('/scan', async (req, res) => {
         loggedShoppingQuery = shoppingQuery;
         if (shoppingQuery) {
           try {
-            shoppingResult = await handleGoogleShopping(shoppingQuery, country);
+            shoppingResult = await _timedShopping(timings, () => handleGoogleShopping(shoppingQuery, country));
             console.log('[Lakkot] Unified: Google Shopping (loose)', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
           } catch (err) {
             console.error('[Lakkot] Unified: Google Shopping error:', err.message);
