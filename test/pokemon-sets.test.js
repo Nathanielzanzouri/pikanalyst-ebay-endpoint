@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { findSetInText, getSetCandidates, bucketListingsBySet } = require('../pokemon-sets');
+const { findSetInText, getSetCandidates, bucketListingsBySet, getNumberCandidates } = require('../pokemon-sets');
 
 // ─── findSetInText (existing helper, sanity-check it still works) ────────────
 test('findSetInText: detects "Base Set 2" longer match over "Base"', () => {
@@ -128,4 +128,52 @@ test('bucketListingsBySet: zero-listing bucket returns null price + count=0', ()
   const out = bucketListingsBySet([], candidates);
   assert.strictEqual(out[0].count, 0);
   assert.strictEqual(out[0].price, null);
+});
+
+// ─── getNumberCandidates ─────────────────────────────────────────────────────
+test('getNumberCandidates: real Nidoking case — surfaces 3 distinct numbers', () => {
+  const matches = [
+    { title: 'Carte Pokemon NIDOKING 11/102 Holo Set de Base Wizards FR' },
+    { title: 'Nidoking No.034 Holo No rarity Expansion Pack Japanese' },
+    { title: 'Pokémon - Carte à collection Nidoking (45/108) - XY' },
+    { title: 'Nidoking 45/108 Evolutions Holo Rare Pokemon Card' },
+    { title: 'Carte Pokémon - Set de Base - Nidoking - 11/102 - Gradée 8,5' },
+    { title: 'Carte Pokémon Nidoking 11/102 Holographique Set de Base' },
+    { title: 'NIDOKING NO. 034 - Set de base - Base Set - Carte Pokémon' },
+    { title: 'NIDOKING - 11/102 - Coffret de base - Holo - Carte Pokémon' },
+  ];
+  const out = getNumberCandidates(matches);
+  assert.strictEqual(out.length, 3, 'expected 3 number candidates, got ' + out.length);
+  assert.strictEqual(out[0].number, '11/102');     // most-cited first
+  assert.strictEqual(out[0].count, 4);
+  assert.ok(out.some(c => c.number === 'No.034'),  'No.034 should be a candidate');
+  assert.ok(out.some(c => c.number === '45/108'),  '45/108 should be a candidate');
+});
+
+test('getNumberCandidates: captures JP vintage "No.034" / "No. 034" format', () => {
+  const out = getNumberCandidates([
+    { title: 'Charizard No.006 Holo Expansion Pack' },
+    { title: 'Charizard No. 006 Japanese Base' },
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].number, 'No.006');
+  assert.strictEqual(out[0].count, 2);
+});
+
+test('getNumberCandidates: same number across all → 1 candidate (caller needs ≥2 to trigger picker)', () => {
+  // When every title shares one number (Charizard 4/102 Base vs Celebrations),
+  // number-grouping returns just that one candidate. buildPokemonMultiSetPicker
+  // requires length >= 2, so it falls through to set-name grouping instead.
+  const out = getNumberCandidates([
+    { title: 'Charizard 4/102 Base Set' },
+    { title: 'Charizard 4/102 Celebrations' },
+    { title: 'Charizard 4/102 Holo' },
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].number, '4/102');
+});
+
+test('getNumberCandidates: empty/null safe', () => {
+  assert.deepStrictEqual(getNumberCandidates([]), []);
+  assert.deepStrictEqual(getNumberCandidates(null), []);
 });

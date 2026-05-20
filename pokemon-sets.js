@@ -177,4 +177,62 @@ function getThumbForJpEra(visualMatches, era, { topN = 15 } = {}) {
   return null;
 }
 
-module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra };
+// Card-number candidates — the most robust multi-printing detector. Groups
+// Lens match titles by the card number itself (X/Y like "11/102", or JP
+// vintage "No.034"). Different printings of the same Pokemon almost always
+// carry different numbers (Nidoking: 11/102 Base / No.034 Expansion Pack /
+// 45/108 Evolutions), so number-grouping surfaces a picker even when set
+// names aren't recognizable. The one case it can't split is same-number-
+// different-set (Charizard 4/102 Base vs Celebrations) — set-name grouping
+// handles that as the fallback.
+function getNumberCandidates(visualMatches, { topN = 15, minMentions = 2 } = {}) {
+  const groups = new Map();   // number → { number, count, sample_title }
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = (m && m.title) || '';
+    let num = null;
+    const xy = title.match(/\b(\d{1,3})\s*\/\s*(\d{1,3})\b/);   // "11/102"
+    if (xy) {
+      num = `${xy[1]}/${xy[2]}`;
+    } else {
+      // JP vintage "No.034" / "No. 034" / "N°034"
+      const no = title.match(/\bN[o°]\.?\s*(\d{1,3})\b/i);
+      if (no) num = `No.${no[1].padStart(3, '0')}`;
+    }
+    if (!num) continue;
+    if (!groups.has(num)) groups.set(num, { number: num, count: 0, sample_title: title });
+    groups.get(num).count++;
+  }
+  return [...groups.values()]
+    .filter(g => g.count >= minMentions)
+    .sort((a, b) => b.count - a.count);
+}
+
+// Representative thumbnail for a card number — first Lens match whose title
+// contains that number AND carries a thumbnail.
+function getThumbForNumber(visualMatches, number, { topN = 15 } = {}) {
+  if (!number) return null;
+  // Match the digits of the number loosely (ignore the "No." prefix / slashes)
+  const digitsKey = String(number).replace(/[^0-9/]/g, '');
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = ((m && m.title) || '');
+    if (title.replace(/\s/g, '').includes(digitsKey) && m && m.thumbnail) return m.thumbnail;
+  }
+  return null;
+}
+
+// Best-effort set name for a card number — runs findSetInText over the Lens
+// titles that mention that number, returns the first hit. Used to give the
+// picker tile a friendly label ("Base Set" instead of a bare "11/102").
+function getSetNameForNumber(visualMatches, number, { topN = 15 } = {}) {
+  if (!number) return null;
+  const digitsKey = String(number).replace(/[^0-9/]/g, '');
+  for (const m of (visualMatches || []).slice(0, topN)) {
+    const title = ((m && m.title) || '');
+    if (!title.replace(/\s/g, '').includes(digitsKey)) continue;
+    const setInfo = findSetInText(title);
+    if (setInfo) return setInfo.name;
+  }
+  return null;
+}
+
+module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber };

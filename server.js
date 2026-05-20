@@ -7,54 +7,50 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
-const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra } = require('./pokemon-sets');
+const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber } = require('./pokemon-sets');
 
-// Build multi-set picker variants for a Pokemon scan. EN/FR use Western set
-// names (Base / Jungle / Celebrations / etc.); JP uses era suffixes
-// (SV-P / XY-P / etc.) since JP promos don't carry Western set names. Returns
-// null when there's no ambiguity (<2 candidates) so the caller can take the
+// Build multi-set picker variants for a Pokemon scan. Detection order, most
+// to least robust:
+//   1. Card NUMBER grouping — different printings carry different numbers
+//      (Nidoking 11/102 vs No.034 vs 45/108). Works for all langs.
+//   2. JP era suffixes — for JP promos sharing a number (098/SV-P vs
+//      098/XY-P), which number-grouping can't split.
+//   3. Western SET-NAME grouping — for same-number-different-set
+//      (Charizard 4/102 Base vs Celebrations), which number-grouping
+//      can't split either.
+// Returns null when no detector finds ≥2 candidates → caller takes the
 // normal single-vote path.
 function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
   if (!vote) return null;
+  const cardName = lang === 'FR' ? (vote.nameFR || vote.nameEN) : vote.nameEN;
+  const jpSuffix = lang === 'JP' ? ' japanese' : '';
 
-  // Western set-name picker — used for EN/FR always, and for JP as the
-  // primary detector (JP vintage cards like Base Set Nidoking are still
-  // referenced by Western set names in Lens titles).
-  const setPicker = () => {
-    const candidates = getSetCandidates(visualMatches, { topN: 15, minMentions: 2 });
-    if (candidates.length < 2) return null;
-    return candidates.map(s => {
-      const num = getNumberForSet(visualMatches, s.name);
-      const cardName = lang === 'FR' ? (vote.nameFR || vote.nameEN) : vote.nameEN;
-      const jpSuffix = lang === 'JP' ? ' japanese' : '';
-      const q = num ? `${cardName} ${num}${jpSuffix}` : `${cardName} ${s.name} pokemon card${jpSuffix}`;
+  // ── 1. Card-number grouping (primary) ──
+  const numCandidates = getNumberCandidates(visualMatches, { topN: 15, minMentions: 2 });
+  if (numCandidates.length >= 2) {
+    return numCandidates.map(c => {
+      const setName = getSetNameForNumber(visualMatches, c.number);
       return {
-        id: 'set-' + s.code,
-        label: s.name,
-        sublabel: s.series,
-        query: q,
-        number: num,
-        imageUrl: getThumbForSet(visualMatches, s.name),
-        count: s.count,
-        price: null,
+        id:       'num-' + c.number.replace(/[^a-z0-9]/gi, ''),
+        label:    setName || c.number,             // "Base Set" if we know it, else the bare number
+        sublabel: setName ? c.number : '',         // number shown as sub-line when we have a set name
+        query:    `${cardName} ${c.number}${jpSuffix}`,
+        number:   c.number,
+        imageUrl: getThumbForNumber(visualMatches, c.number),
+        count:    c.count,
+        price:    null,
         listings: [],
       };
     });
-  };
-
-  if (lang === 'EN' || lang === 'FR') {
-    return setPicker();
   }
 
+  // ── 2. JP era suffixes (098/SV-P vs 098/XY-P) ──
   if (lang === 'JP') {
-    // JP promos disambiguate by era suffix (SV-P / XY-P / ...). JP vintage
-    // cards disambiguate by Western set name. Try the era detector first
-    // (more specific for promos), fall back to the set-name detector.
     const eraCandidates = getJpEraCandidates(visualMatches, { topN: 15, minMentions: 2 });
     if (eraCandidates.length >= 2) {
       return eraCandidates.map(g => ({
         id:        'jp-era-' + g.era,
-        label:     g.era + ' (' + g.sampleNumber + ')',  // readable for buyer
+        label:     g.era + ' (' + g.sampleNumber + ')',
         sublabel:  'JP Promo',
         query:     `${vote.nameEN} ${g.sampleNumber} japanese`,
         number:    g.sampleNumber,
@@ -64,8 +60,28 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
         listings:  [],
       }));
     }
-    return setPicker();   // vintage JP card — disambiguate by set name
   }
+
+  // ── 3. Western set-name grouping (same number, different set) ──
+  const setCandidates = getSetCandidates(visualMatches, { topN: 15, minMentions: 2 });
+  if (setCandidates.length >= 2) {
+    return setCandidates.map(s => {
+      const num = getNumberForSet(visualMatches, s.name);
+      const q = num ? `${cardName} ${num}${jpSuffix}` : `${cardName} ${s.name} pokemon card${jpSuffix}`;
+      return {
+        id:       'set-' + s.code,
+        label:    s.name,
+        sublabel: s.series,
+        query:    q,
+        number:   num,
+        imageUrl: getThumbForSet(visualMatches, s.name),
+        count:    s.count,
+        price:    null,
+        listings: [],
+      };
+    });
+  }
+
   return null;
 }
 const Stripe  = require('stripe');
