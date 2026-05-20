@@ -527,16 +527,21 @@ const PEER_GRADERS = [
   'collectaura', 'collect aura', 'ccc', 'hga', 'pfx', 'fcg', 'sfg',
 ];
 
-// Builds a title filter that keeps non-PSA listings at the target grade
-// (used when the strict company-specific search returned 0 sales). Matches any
-// peer grader name in the title alongside the grade number. Rejects titles
-// containing "PSA" so the proxy average isn't skewed up by PSA premiums.
-function makePeerGradedTitleFilter(grade) {
+// Builds a title filter that keeps graded listings at the target grade when
+// the strict company-specific search returned 0 sales.
+//   includePsa = false → non-PSA graders only (PSA premium would skew the
+//                        proxy average up).
+//   includePsa = true  → last-resort tier: include PSA too. For some cards
+//                        (notably One Piece) PSA is the dominant grader, so a
+//                        non-PSA-only proxy finds nothing. A PSA-inclusive
+//                        grade-N price, clearly labeled as a proxy, beats
+//                        showing the user no price at all.
+function makePeerGradedTitleFilter(grade, { includePsa = false } = {}) {
   const gradeStr = String(grade).toLowerCase();
   return (title) => {
     const lower = title.toLowerCase();
-    if (lower.includes('psa')) return false;
     if (!lower.includes(gradeStr)) return false;
+    if (lower.includes('psa')) return includePsa;        // PSA kept only in peer-all mode
     return PEER_GRADERS.some((c) => lower.includes(c));
   };
 }
@@ -556,6 +561,10 @@ function makeGradedTitleFilter(gradeFilter) {
   // Peer-fallback mode: any non-PSA grader at the same grade
   if (gradeFilter.mode === 'peer' && gradeFilter.grade) {
     return makePeerGradedTitleFilter(gradeFilter.grade);
+  }
+  // Peer-all mode: last-resort — any grader (incl. PSA) at the same grade
+  if (gradeFilter.mode === 'peer-all' && gradeFilter.grade) {
+    return makePeerGradedTitleFilter(gradeFilter.grade, { includePsa: true });
   }
   if (!gradeFilter.company || !gradeFilter.grade) {
     return (title) => !isGradedCard(title);
@@ -1935,10 +1944,29 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
       _gradeFilter: { mode: 'peer', grade: gradeFilter.grade },
     };
     const peerResult = await handleCard(peerItem, sellerPrice, language, dateRange);
-    peerResult.graded = gradeFilter;            // keep detected company in response (panel still shows "CollectAura 9.5 detected")
-    peerResult.graded_via = (peerResult.ebay_sales_count ?? 0) > 0 ? 'peer' : 'none';
-    console.log('[Lakkot/grading] peer fallback:', peerResult.graded_via, '| sales:', peerResult.ebay_sales_count);
-    return peerResult;
+    if ((peerResult.ebay_sales_count ?? 0) > 0) {
+      peerResult.graded = gradeFilter;          // keep detected company in response (panel shows "CollectAura 10 detected")
+      peerResult.graded_via = 'peer';
+      console.log('[Lakkot/grading] peer fallback: peer | sales:', peerResult.ebay_sales_count);
+      return peerResult;
+    }
+
+    // Tier 3 — peer-all: even non-PSA peers had zero sales. Some cards (esp.
+    // One Piece) trade almost entirely as PSA, so a non-PSA proxy finds
+    // nothing. Last resort: include PSA. Still labeled graded_via:'peer' so
+    // the panel shows the "proxy — no <company> sales" disclaimer. A
+    // grade-N price beats no price.
+    console.log('[Lakkot/grading] peer (non-PSA) returned 0; trying peer-all (incl. PSA) at grade', gradeFilter.grade);
+    const peerAllItem = {
+      ...item,
+      ebay_search: item.ebay_search.replace(new RegExp('\\s+' + gradeFilter.company + '\\s+', 'i'), ' '),
+      _gradeFilter: { mode: 'peer-all', grade: gradeFilter.grade },
+    };
+    const peerAllResult = await handleCard(peerAllItem, sellerPrice, language, dateRange);
+    peerAllResult.graded = gradeFilter;
+    peerAllResult.graded_via = (peerAllResult.ebay_sales_count ?? 0) > 0 ? 'peer' : 'none';
+    console.log('[Lakkot/grading] peer-all fallback:', peerAllResult.graded_via, '| sales:', peerAllResult.ebay_sales_count);
+    return peerAllResult;
   }
 
   return handleCard(item, sellerPrice, language, dateRange);
