@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { findSetInText, getSetCandidates, bucketListingsBySet, getNumberCandidates } = require('../pokemon-sets');
+const { findSetInText, getSetCandidates, bucketListingsBySet, getNumberCandidates, hasJapaneseSignal, filterNumberCandidatesByLanguage } = require('../pokemon-sets');
 
 // ─── findSetInText (existing helper, sanity-check it still works) ────────────
 test('findSetInText: detects "Base Set 2" longer match over "Base"', () => {
@@ -211,4 +211,100 @@ test('getNumberCandidates: different sets keep separate keys (does NOT over-merg
   assert.strictEqual(out.length, 2);
   assert.ok(out.some(c => c.number === '4/102'));
   assert.ok(out.some(c => c.number === '4/108'));
+});
+
+// ─── hasJapaneseSignal ──────────────────────────────────────────────────────
+test('hasJapaneseSignal: detects Hiragana/Katakana/Kanji directly', () => {
+  assert.strictEqual(hasJapaneseSignal('カビゴン 145/165'), true);  // Katakana (Snorlax)
+  assert.strictEqual(hasJapaneseSignal('ピカチュウ'), true);          // Katakana (Pikachu)
+  assert.strictEqual(hasJapaneseSignal('ポケモン カード'), true);     // mixed CJK
+  assert.strictEqual(hasJapaneseSignal('日本語'), true);              // Kanji
+});
+
+test('hasJapaneseSignal: detects explicit JP keywords in Latin script', () => {
+  assert.strictEqual(hasJapaneseSignal('Charizard Japanese Holo'), true);
+  assert.strictEqual(hasJapaneseSignal('Carte japonaise Eevee'), true);
+  assert.strictEqual(hasJapaneseSignal('PSA10 Eevee AR Crimson Haze 2024 sv5a Pokemon Card Japanese'), true);
+});
+
+test('hasJapaneseSignal: pure FR/EN listings return false', () => {
+  assert.strictEqual(hasJapaneseSignal('Pokemon - EVOLI FA 188/167 - PCA 9.5 - Collection'), false);
+  assert.strictEqual(hasJapaneseSignal('Carte Pokémon Evoli 188/167 - Kinkai'), false);
+  assert.strictEqual(hasJapaneseSignal('Charizard 4/102 Base Set Shadowless 1999'), false);
+});
+
+test('hasJapaneseSignal: null/empty safe', () => {
+  assert.strictEqual(hasJapaneseSignal(null), false);
+  assert.strictEqual(hasJapaneseSignal(''), false);
+  assert.strictEqual(hasJapaneseSignal(undefined), false);
+});
+
+// ─── filterNumberCandidatesByLanguage ──────────────────────────────────────
+test('filterNumberCandidatesByLanguage: real Évoli case — JP scan drops FR-only 188/167', () => {
+  // Scan 7c11fb5c: card detected JP. Lens returned mixed matches including
+  // a FR-only 188/167 candidate (different Évoli printing from EV6 — does
+  // not exist in JP). Filter must drop it so the picker doesn't offer an
+  // impossible choice to the user.
+  const matches = [
+    { title: 'Japanese Pokémon Card - Eevee AR 078/066 - SV5A Crimson Haze' },
+    { title: 'PSA10 Eevee AR 078/066 Crimson Haze 2024 sv5a Pokemon Card Japanese' },
+    { title: 'Évoli 078/066 AR SV5a イーブイ' },              // explicit JP chars
+    { title: 'Eevee AR 078/066 Crimson Haze sv5a 2024 Japan' },
+    { title: 'Pokemon - EVOLI FA 188/167 - PCA 9.5 - Collection' },     // FR
+    { title: 'Carte Pokémon Evoli 188/167 - Kinkai' },                  // FR
+    { title: 'FULL ART EVOLI 188/167 SFG GRADING' },                    // FR
+  ];
+  const candidates = getNumberCandidates(matches);
+  assert.strictEqual(candidates.length, 2, 'sanity: raw candidates should be 2');
+  const filtered = filterNumberCandidatesByLanguage(candidates, matches, 'JP');
+  assert.strictEqual(filtered.length, 1, 'JP filter should drop 188/167');
+  assert.strictEqual(filtered[0].number, '78/66');  // normalized form
+});
+
+test('filterNumberCandidatesByLanguage: FR scan with same-language candidates keeps both', () => {
+  // Regression guard: Ronflex multi-set case, both Jungle and Base Set 2
+  // are FR-language listings → both stay. Filter must not over-prune.
+  const matches = [
+    { title: 'Ronflex 27/64 Jungle Wizards FR' },
+    { title: 'Carte Pokémon Ronflex 27/64 Jungle' },
+    { title: 'Ronflex (B2 30/130) - Base Set 2 français' },
+    { title: 'Snorlax - Base Set 2 #30 Pokemon Card français' },
+  ];
+  const candidates = getNumberCandidates(matches);
+  const filtered = filterNumberCandidatesByLanguage(candidates, matches, 'FR');
+  assert.strictEqual(filtered.length, candidates.length, 'both FR candidates must survive');
+});
+
+test('filterNumberCandidatesByLanguage: WORLD / null / undefined language → no filter applied', () => {
+  // When language isn't decided, we have no basis to filter — return as-is.
+  const matches = [
+    { title: 'Eevee AR 078/066 Japanese sv5a' },
+    { title: 'Eevee AR 078/066 Japanese sv5a 2' },
+    { title: 'Pokemon EVOLI 188/167 français' },
+    { title: 'Pokemon EVOLI 188/167 français 2' },
+  ];
+  const candidates = getNumberCandidates(matches);
+  assert.strictEqual(filterNumberCandidatesByLanguage(candidates, matches, 'WORLD').length, 2);
+  assert.strictEqual(filterNumberCandidatesByLanguage(candidates, matches, null).length,    2);
+  assert.strictEqual(filterNumberCandidatesByLanguage(candidates, matches, undefined).length, 2);
+});
+
+test('filterNumberCandidatesByLanguage: EN/FR scan drops JP-only candidate', () => {
+  // Inverse of the Évoli case: someone scans a FR card and Lens picks up a
+  // JP-only printing variant. Filter must drop the JP-only candidate.
+  const matches = [
+    { title: 'Charizard 4/102 Base Set Shadowless français' },
+    { title: 'Carte Charizard 4/102 Base Set' },
+    { title: 'リザードン 003/032 Japanese promo' },          // JP-only candidate
+    { title: 'Charizard 003/032 Japanese Promo card' },
+  ];
+  const candidates = getNumberCandidates(matches);
+  const filtered = filterNumberCandidatesByLanguage(candidates, matches, 'FR');
+  assert.ok(filtered.every(c => c.number !== '3/32'), 'JP-only candidate must be dropped');
+  assert.ok(filtered.some(c => c.number === '4/102'), 'FR candidate must survive');
+});
+
+test('filterNumberCandidatesByLanguage: empty / null safe', () => {
+  assert.deepStrictEqual(filterNumberCandidatesByLanguage([], [], 'JP'), []);
+  assert.deepStrictEqual(filterNumberCandidatesByLanguage(null, [], 'JP'), []);
 });

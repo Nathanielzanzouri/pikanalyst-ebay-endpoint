@@ -7,7 +7,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
-const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber } = require('./pokemon-sets');
+const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber, filterNumberCandidatesByLanguage } = require('./pokemon-sets');
 
 // Build multi-set picker variants for a Pokemon scan. Detection order, most
 // to least robust:
@@ -26,7 +26,14 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
   const jpSuffix = lang === 'JP' ? ' japanese' : '';
 
   // ── 1. Card-number grouping (primary) ──
-  const numCandidates = getNumberCandidates(visualMatches, { topN: 15, minMentions: 2 });
+  // Apply a language filter on top of raw number-grouping: a JP scan should
+  // never propose a candidate that only exists in FR/EN listings (and vice
+  // versa). Reference scan that triggered this: 7c11fb5c (Évoli AR JP, was
+  // offered 188/167 FR alongside the real 078/066). After filtering, if only
+  // 1 candidate remains we fall through to other strategies / no picker —
+  // which is the right behavior, no spurious choice forced on the user.
+  const numCandidatesRaw = getNumberCandidates(visualMatches, { topN: 15, minMentions: 2 });
+  const numCandidates    = filterNumberCandidatesByLanguage(numCandidatesRaw, visualMatches, lang);
   if (numCandidates.length >= 2) {
     let tiles = numCandidates.map(c => {
       const setName = getSetNameForNumber(visualMatches, c.number);

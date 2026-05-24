@@ -243,4 +243,65 @@ function getSetNameForNumber(visualMatches, number, { topN = 15 } = {}) {
   return null;
 }
 
-module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber };
+// ─── Language signal helpers (for picker cross-language filtering) ───────────
+// Why this exists: getNumberCandidates groups by raw card number, no awareness
+// of the listing language. So a JP card scan (route lens-card-jp-vote-...)
+// could surface a candidate that only exists in FR/EN listings as a separate
+// picker tile, even though the user definitely doesn't have that printing in
+// hand. The filter below uses the detected card language + the listing-title
+// language signal to drop candidates that don't plausibly match the language
+// the user is actually scanning.
+//
+// Reference scan: 7c11fb5c-06f5-4781-b1f3-3d91102eca10 (Évoli AR JP, where a
+// FR-only 188/167 candidate was bogusly offered alongside the real 078/066).
+
+// CJK characters (Hiragana U+3040-U+309F, Katakana U+30A0-U+30FF, Kanji /
+// CJK Unified Ideographs U+4E00-U+9FAF) — any one is a strong JP signal.
+// The range endpoints are written as literal CJK boundary chars in source —
+// both forms match the same code points, this just reads more directly.
+const JP_CHAR_RE = /[぀-ゟ゠-ヿ一-龯]/;
+// Explicit Japanese keywords used in non-Japanese listings to describe a JP
+// printing. Word-bounded to avoid matching substrings ("japon" only as a
+// whole word — wouldn't want to false-positive on a misspelled token).
+const JP_KEYWORD_RE = /\b(japanese|japonais|japonaise|japan|nihon|jpn|japonesa)\b/i;
+
+function hasJapaneseSignal(text) {
+  if (!text) return false;
+  return JP_CHAR_RE.test(text) || JP_KEYWORD_RE.test(text);
+}
+
+// Filter picker candidates by detected card language. Drops candidates that
+// don't plausibly match the language the user is scanning:
+//   - language = 'JP'      → keep candidates with ≥1 JP-signal listing
+//   - language = 'EN'/'FR' → keep candidates with ≥1 non-JP-signal listing
+//                            (i.e. the card actually exists in a Western set)
+//   - language = null/'WORLD' → no filter (caller hasn't decided yet)
+// A candidate with zero matching titles is kept (we don't punish for absence
+// of evidence — getThumbForNumber etc. already accept partial matches).
+// Strip leading zeros from card-number tokens inside a title so substring
+// searches match across padding variants — "078/066" ↔ "78/66". Same idea
+// getNumberCandidates uses for grouping; we apply it here too so the filter's
+// per-candidate title lookup actually finds the listings.
+function stripLeadingZerosInNumbers(title) {
+  return String(title).replace(/\b0*(\d{1,3})\s*\/\s*0*(\d{1,3})\b/g, '$1/$2');
+}
+
+function filterNumberCandidatesByLanguage(candidates, visualMatches, language, { topN = 15 } = {}) {
+  if (!candidates || !candidates.length) return candidates || [];
+  if (!language || language === 'WORLD') return candidates;
+  const isJP = language === 'JP';
+  const matches = (visualMatches || []).slice(0, topN);
+  return candidates.filter(c => {
+    const digitsKey = String(c.number).replace(/[^0-9/]/g, '');
+    const titles = matches
+      .map(m => (m && m.title) || '')
+      .filter(t => stripLeadingZerosInNumbers(t).replace(/\s/g, '').includes(digitsKey));
+    if (titles.length === 0) return true;     // no evidence → don't punish
+    const jpHits = titles.filter(hasJapaneseSignal).length;
+    return isJP
+      ? jpHits >= 1                            // JP card needs ≥1 JP listing for this number
+      : jpHits < titles.length;                // non-JP card needs ≥1 non-JP listing
+  });
+}
+
+module.exports = { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber, hasJapaneseSignal, filterNumberCandidatesByLanguage };
