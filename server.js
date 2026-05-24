@@ -1385,7 +1385,7 @@ async function getEbayOAuthToken() {
 }
 
 // ─── eBay Finding API (legacy, rate limit 5000/day) ──────────────────────────
-async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
+async function fetchEbayFinding(card, language = 'WORLD', dateRange = 30) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const now = Date.now();
   const waitTime = FINDING_MIN_INTERVAL - (now - lastFindingCallTime);
@@ -1561,7 +1561,7 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 90) {
 // ─── eBay Browse API (OAuth, active listings) ─────────────────────────────────
 const BROWSE_SITE_MAP = { EBAY_FR: 'www.ebay.fr', EBAY_US: 'www.ebay.com', EBAY_DE: 'www.ebay.de', EBAY_GB: 'www.ebay.co.uk' };
 
-async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) {
+async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) {
   const baseQueries = buildBrowseQueries(card);
   const queries = baseQueries.map(q => applyLanguageToQuery(q, language));
 
@@ -1737,7 +1737,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 90) 
   throw new Error('Browse: 0 results for all queries and markets');
 }
 
-async function fetchEbayAny(card, language = 'WORLD', dateRange = 90) {
+async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const certId    = process.env.EBAY_CERT_ID;
   // _ebaySource diagnostic: tag which API actually served the result, so
@@ -1764,7 +1764,7 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 90) {
   throw new Error('No eBay credentials available');
 }
 
-async function fetchPrices(card, language = 'WORLD', dateRange = 90) {
+async function fetchPrices(card, language = 'WORLD', dateRange = 30) {
   let ebay = null;
   try {
     ebay = await fetchEbayAny(card, language, dateRange);
@@ -1786,7 +1786,7 @@ async function fetchPrices(card, language = 'WORLD', dateRange = 90) {
   };
 }
 
-async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90) {
+async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 30) {
   const cacheKey = `card|${item.card_name}|${item.card_number ?? ''}|${item.condition ?? ''}|${language}|${dateRange}`;
   const cached = cacheGet(cacheKey);
   let priceData;
@@ -1855,7 +1855,7 @@ async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 90)
   };
 }
 
-async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 90, gradeFilter = null, tcgCategory = null }) {
+async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 30, gradeFilter = null, tcgCategory = null }) {
   const rawTitle = streamTitle?.trim() ?? '';
   const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
 
@@ -2900,7 +2900,7 @@ app.post('/scan/sold', async (req, res) => {
 
 // ─── Re-price: same card query, different date range (no new scan) ───────────
 app.post('/scan/reprice', async (req, res) => {
-  const { query, language = 'WORLD', dateRange = 90 } = req.body;
+  const { query, language = 'WORLD', dateRange = 30 } = req.body;
   if (!query) return res.status(400).json({ error: 'missing query' });
   try {
     const result = await handleAnalyze({ imageBase64: '', streamTitle: query, sellerPrice: null, mode: 'cards', manualCardOverride: query, language, dateRange });
@@ -3810,7 +3810,7 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 90, country = null, multiSetEnabled = false, promoEnabled = false } = params;
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 30, country = null, multiSetEnabled = false, promoEnabled = false } = params;
       // If client sent a full frame (scan zone active), use it as the original for logging
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
