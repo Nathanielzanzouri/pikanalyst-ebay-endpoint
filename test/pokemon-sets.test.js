@@ -177,3 +177,38 @@ test('getNumberCandidates: empty/null safe', () => {
   assert.deepStrictEqual(getNumberCandidates([]), []);
   assert.deepStrictEqual(getNumberCandidates(null), []);
 });
+
+test('getNumberCandidates: real Dracaufeu Radieux case — "020/159" and "20/159" group together (same printing, different padding)', () => {
+  // Scan a7081c41: Lens returned both padded and unpadded forms of the same
+  // card number, which was producing TWO bogus picker tiles for the SAME
+  // printing. After normalization they collapse into one vote.
+  const matches = [
+    { title: 'Carte Pokémon Dracaufeu radieux 020/159 Zénith suprême ...' },
+    { title: 'Carte Pokemon - Dracaufeu Radieux - 020/159 - Ultra-rare ...' },
+    { title: 'Carte Pokémon – Dracaufeu Radieux 020/159 – E&B 12.5 – ultra ...' },
+    { title: 'carte Pokémon Dracaufeu Radieux 020/159 #9 NEUF FR | eBay' },
+    { title: 'Carte Pokémon Dracaufeu Radieux 020/159 Ultra Rare Zénith ...' },
+    { title: 'Dracaufeu Radieux 20/159 - Myboost X Epée et Bouclier 12.5 ...' },
+    { title: 'Carte Pokemon Dracaufeu Radieux 20/159 EB12.5 Zénith Suprême ...' },
+  ];
+  const out = getNumberCandidates(matches);
+  assert.strictEqual(out.length, 1, 'expected the two paddings to merge into one candidate');
+  assert.strictEqual(out[0].number, '20/159');
+  assert.strictEqual(out[0].count, 7);
+});
+
+test('getNumberCandidates: different sets keep separate keys (does NOT over-merge)', () => {
+  // Safety check that the leading-zero strip doesn't accidentally collapse
+  // distinct cards. Charizard 4/102 (Base) and 4/108 (Evolutions) must stay
+  // as two candidates.
+  const matches = [
+    { title: 'Charizard 4/102 Base Set' },
+    { title: 'Charizard 4/102 Holo' },
+    { title: 'Charizard 4/108 Evolutions' },
+    { title: 'Charizard 4/108 XY' },
+  ];
+  const out = getNumberCandidates(matches);
+  assert.strictEqual(out.length, 2);
+  assert.ok(out.some(c => c.number === '4/102'));
+  assert.ok(out.some(c => c.number === '4/108'));
+});

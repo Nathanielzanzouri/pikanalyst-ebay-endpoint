@@ -192,7 +192,15 @@ function getNumberCandidates(visualMatches, { topN = 15, minMentions = 2 } = {})
     let num = null;
     const xy = title.match(/\b(\d{1,3})\s*\/\s*(\d{1,3})\b/);   // "11/102"
     if (xy) {
-      num = `${xy[1]}/${xy[2]}`;
+      // Strip leading zeros so "020/159" and "20/159" — the same printing
+      // written two ways — vote together instead of splitting into two
+      // bogus picker tiles. The substring lookups in getThumbForNumber /
+      // getSetNameForNumber already work against both written forms because
+      // "020/159".includes("20/159") is true; we just needed to make the
+      // group KEY match too.
+      const a = String(parseInt(xy[1], 10));
+      const b = String(parseInt(xy[2], 10));
+      num = `${a}/${b}`;
     } else {
       // JP vintage "No.034" / "No. 034" / "N°034"
       const no = title.match(/\bN[o°]\.?\s*(\d{1,3})\b/i);
