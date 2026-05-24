@@ -2147,6 +2147,46 @@ app.post('/stripe/checkout', async (req, res) => {
   }
 });
 
+// ─── Stripe: billing portal ──────────────────────────────────────────────────
+// Lets a paying user manage their subscription themselves — cancel, update
+// card, download invoices, switch plan. Required by French consumer law
+// (L.215-1-1: cancellation must be as easy as signup). Auth: bearer-style
+// token in the body (same pattern as /wishlist/* etc.). The user must have a
+// stripe_customer_id (set by the checkout.session.completed webhook); free
+// users never went through Stripe and have nothing to manage.
+//
+// IMPORTANT: the Stripe Customer Portal must be enabled+configured in the
+// Stripe Dashboard (Settings → Billing → Customer portal) or this call
+// returns 400 "Set up the customer portal...". Configure once per Stripe
+// account (live + test modes are separate).
+app.post('/stripe/portal', async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(401).json({ error: 'missing_token' });
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('email, stripe_customer_id')
+    .eq('token', token)
+    .single();
+
+  if (!user) return res.status(401).json({ error: 'invalid_token' });
+  if (!user.stripe_customer_id) {
+    return res.status(400).json({ error: 'no_subscription', message: 'No active subscription found for this account.' });
+  }
+
+  try {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: user.stripe_customer_id,
+      return_url: 'https://lakkot.com',
+    });
+    console.log('[Lakkot] Stripe portal session created for', user.email);
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error('[Lakkot] Stripe portal error:', err.message);
+    return res.status(500).json({ error: 'portal_failed', detail: err.message });
+  }
+});
+
 // ─── Stripe: webhook ─────────────────────────────────────────────────────────
 // NOTE: This must be BEFORE express.json() middleware for raw body access
 // But since we already have express.json() at the top, we use express.raw() here
