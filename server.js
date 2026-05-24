@@ -1461,7 +1461,16 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 30) {
   // match doesn't surface "098/XY-P Mega Tokyo Pikachu" or "098/PCG Regice"
   // when the user actually scanned "098/SV-P Detective Pikachu".
   const isJpPromoScan = !isOpScan && /\b\d{1,3}\/[A-Z]{1,4}-?P\b/i.test(card.card_number || '');
-  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0;
+  // For ALL graded scans (any company, any tier), enforce that the listing
+  // title actually mentions the card we asked about. Otherwise eBay's loose
+  // keyword match surfaces random same-grade cards (Zapdos CGC 8.5 for an
+  // Eevee TG11/TG30 query) and the grade-only title filter happily keeps
+  // them — producing a fake "DEAL" verdict from unrelated prices. Scoped
+  // to non-OP / non-JP-promo because those already have stricter checks.
+  // Reference scan: 557223c4 (Eevee TG11/TG30 CGC 8.5 returning 10 random
+  // CGC 8.5 Japanese listings, none containing eevee or tg11/tg30).
+  const isGradedScan = !!card._gradeFilter && !isOpScan && !isJpPromoScan;
+  let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0, gradedNoIdentityOut = 0;
   const clean = sold.filter(i => {
     const t = i?.title?.[0] ?? '';
     if (!titleFilter(t)) { gradedOut++;     return false; }
@@ -1483,9 +1492,12 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 30) {
     if (isOpScan && !hasOnePieceKeyword(t))                  { opNoKeywordOut++; return false; }
     // Pokemon JP promo: require the full SKU (e.g. "098/SV-P") in the title
     if (isJpPromoScan && !titleContainsCardNumber(t, card.card_number)) { jpPromoNoSkuOut++; return false; }
+    // Graded scans: require the card number in the title. Drop bogus
+    // same-grade-different-card listings that pass the grade filter alone.
+    if (isGradedScan && card.card_number && !titleContainsCardNumber(t, card.card_number)) { gradedNoIdentityOut++; return false; }
     return true;
   });
-  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + card._gradeFilter.company + ' ' + card._gradeFilter.grade : ''}`);
+  console.log(`[Yamo] Finding sold: ${sold.length} | filtered_by_grade=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''}${isGradedScan ? ` | graded_no_identity=${gradedNoIdentityOut}` : ''} | clean=${clean.length}${card._gradeFilter ? ' | gradeFilter=' + (card._gradeFilter.company || card._gradeFilter.mode) + ' ' + card._gradeFilter.grade : ''}`);
 
   if (clean.length === 0) throw new Error('Finding: 0 results after graded/lot filter');
 
@@ -1629,7 +1641,13 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
     const isOpScan = card._tcgCategory === 'OnePiece';
     // Same JP-promo SKU filter logic as the Finding-API path above.
     const isJpPromoScan = !isOpScan && /\b\d{1,3}\/[A-Z]{1,4}-?P\b/i.test(card.card_number || '');
-    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0;
+    // Graded scans: enforce card identity in the title (number must appear).
+    // Same fix as Finding-API path — see scan 557223c4 (Eevee TG11/TG30 CGC
+    // 8.5 was returning 10 random CGC 8.5 Japanese cards because grade alone
+    // is too weak a match). Scoped to non-OP / non-JP-promo because those
+    // paths already enforce their own number checks.
+    const isGradedScan = !!card._gradeFilter && !isOpScan && !isJpPromoScan;
+    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0, gradedNoIdentityOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
       if (!titleFilter(t))    { gradedOut++;     return false; }
@@ -1646,10 +1664,15 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       if (isOpScan && !hasOnePieceKeyword(t))                          { opNoKeywordOut++; return false; }
       // Pokemon JP promo: require the full SKU (e.g. "098/SV-P") in the title
       if (isJpPromoScan && !titleContainsCardNumber(t, card.card_number)) { jpPromoNoSkuOut++; return false; }
+      // Graded scans: same number-must-appear rule. Drops the
+      // same-grade-different-card listings eBay returns when the strict
+      // query yields nothing (Eevee TG11/TG30 CGC 8.5 → 10 random CGC 8.5
+      // listings; with this check, all rejected → peer fallback runs).
+      if (isGradedScan && card.card_number && !titleContainsCardNumber(t, card.card_number)) { gradedNoIdentityOut++; return false; }
       return true;
     });
 
-    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
+    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''}${isGradedScan ? ` | graded_no_identity=${gradedNoIdentityOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
 
     let identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
 
