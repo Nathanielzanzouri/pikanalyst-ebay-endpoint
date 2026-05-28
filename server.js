@@ -8,6 +8,7 @@ const crypto  = require('crypto');
 const sharp   = require('sharp');
 const { POKEMON_NAMES, pokemonToEN, pokemonToFR, isPokemonName } = require('./pokemon-names');
 const { POKEMON_SETS, findSetInText, getSetCandidates, bucketListingsBySet, getNumberForSet, getThumbForSet, getJpEraCandidates, getThumbForJpEra, getNumberCandidates, getThumbForNumber, getSetNameForNumber, filterNumberCandidatesByLanguage } = require('./pokemon-sets');
+const { detectTrainerCard } = require('./trainer-names');
 
 // Build multi-set picker variants for a Pokemon scan. Detection order, most
 // to least robust:
@@ -1203,6 +1204,35 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
   }
   const topSet = Object.values(setVotes).sort((a, b) => b.count - a.count)[0] || null;
   if (topSet) console.log(`[Lakkot] Set vote: "${topSet.name}" (${topSet.series}) — ${topSet.count} votes`);
+
+  // ─── Trainer / Supporter card fallback ───
+  // Pokémon TCG also has Supporter / Trainer cards featuring human characters
+  // (Gym Leaders, Champions, Team admins, Professors, etc.) — Misty's Spirit,
+  // Erika's Welcome, Cynthia's Power, and so on. These aren't Pokémon, so the
+  // name vote above ignores them, and we'd fall back to a noisy generic query
+  // (e.g. "mewtwo pokemon card" when the actual card is a Trainer that just
+  // happens to mention Mewtwo in adjacent Lens results).
+  //
+  // We only fire this fallback when the Pokémon vote returned nothing solid,
+  // so it's purely additive — scans that already work continue to work.
+  // Reference scan: b45794c9 (Misty's Spirit SR 108/081 Abyss Eye M5).
+  if (!topNameEN && !bestNumber) {
+    const trainer = detectTrainerCard(visualMatches, targetLang);
+    if (trainer) {
+      console.log('[Lakkot] Trainer fallback: detected character "' + trainer.character_en + '" (' + trainer.via + ', ' + trainer.votes + ' votes) | number: ' + (trainer.card_number || 'unknown'));
+      return {
+        nameEN: trainer.character_en,
+        nameFR: trainer.character_fr,
+        number: trainer.card_number,
+        isPromo: false,
+        votes: trainer.votes,
+        totalMatches: 0,
+        set: topSet ? { name: topSet.name, series: topSet.series, code: topSet.code } : null,
+        selectedTitle,
+        isTrainerCard: true,   // surfaced so downstream can know
+      };
+    }
+  }
 
   return {
     nameEN: topNameEN,
