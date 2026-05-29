@@ -1139,7 +1139,34 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
     }
   }
 
-  if (Object.keys(nameVotes).length === 0) return null;
+  // No Pokémon name was voted on — try the Trainer/Supporter card fallback
+  // BEFORE returning null. Cards featuring human characters (Misty's Spirit,
+  // Cynthia's Power, etc.) never hit the Pokémon-name vote because those
+  // names aren't Pokémon. Without this hook, we'd return null here and the
+  // route would fall through to `lens-card` which uses the raw Lens product
+  // name (often a noisy eBay listing title like "Pokemon Misty Card en
+  // vente" → bogus query). Reference scan: 42ed7054.
+  //
+  // Confidence-gated inside detectTrainerCard: requires a possessive pattern
+  // OR ≥2 trainer mentions, so single ambiguous mentions don't fire.
+  if (Object.keys(nameVotes).length === 0) {
+    const trainer = detectTrainerCard(visualMatches, targetLang);
+    if (trainer) {
+      console.log('[Lakkot] Trainer fallback (early-return path): "' + trainer.character_en + '" via ' + trainer.via + ' (' + trainer.votes + ' votes) | number: ' + (trainer.card_number || 'unknown'));
+      return {
+        nameEN: trainer.character_en,
+        nameFR: trainer.character_fr,
+        number: trainer.card_number,
+        isPromo: false,
+        votes: trainer.votes,
+        totalMatches: 0,
+        set: null,
+        selectedTitle: null,
+        isTrainerCard: true,
+      };
+    }
+    return null;
+  }
 
   // Get the most voted English name
   const sorted = Object.entries(nameVotes).sort((a, b) => b[1] - a[1]);
