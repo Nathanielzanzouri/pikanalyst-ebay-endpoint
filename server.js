@@ -725,6 +725,13 @@ const CARD_NUMBER_RE = {
 function isTCGCard(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
+  // Negative gate FIRST: if the text obviously looks like a sneaker
+  // (Nike/Adidas/Jordan/Dunk/AF1/etc.), it is NOT a TCG card — even if the
+  // sneaker SKU happens to contain a digits-slash-digits substring that
+  // CARD_NUMBER_RE would match. Reference scan 6e705753 (Nike Dunk Low
+  // "DD1391-100 / DD1503-101 / CW1590..." was misclassified as Pokemon
+  // because the substring "100 / DD1503" matched the card-number regex).
+  if (isShoeTitle(text)) return false;
   // Card number pattern is a strong signal
   if (CARD_NUMBER_RE.test(text)) return true;
   // Brand keywords
