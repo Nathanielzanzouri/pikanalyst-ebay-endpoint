@@ -393,9 +393,10 @@ async function validateAndCount(token, res) {
   return user;
 }
 
-// ─── In-memory cache (30 min) ─────────────────────────────────────────────────
+// ─── In-memory cache (12 h, env-overridable via SCAN_CACHE_TTL_MS) ───────────
 const _cache = new Map();
-const CACHE_TTL = 30 * 60 * 1000;
+const CACHE_TTL = parseInt(process.env.SCAN_CACHE_TTL_MS, 10) || (12 * 60 * 60 * 1000);
+console.log('[Lakkot] Scan cache TTL:', CACHE_TTL, 'ms (', (CACHE_TTL / 3600000).toFixed(1), 'h)');
 function cacheGet(key) {
   const entry = _cache.get(key);
   if (!entry) return null;
@@ -480,11 +481,15 @@ function applyLanguageToQuery(baseQuery, language) {
 }
 
 function getMarketsForLanguage(language) {
+  // EBAY_MARKETS_OVERRIDE lets us restore 4-market behaviour in 30 s via Render
+  // env without redeploying code. Format: comma-separated market IDs.
+  const envOverride = process.env.EBAY_MARKETS_OVERRIDE;
+  if (envOverride) return envOverride.split(',').map(s => s.trim()).filter(Boolean);
   switch (language) {
-    case 'JP':    return ['EBAY_FR', 'EBAY_US', 'EBAY_DE', 'EBAY_GB'];
-    case 'FR':    return ['EBAY_FR', 'EBAY_GB', 'EBAY_DE'];
-    case 'EN':    return ['EBAY_US', 'EBAY_GB', 'EBAY_FR'];
-    case 'WORLD': default: return ['EBAY_FR', 'EBAY_GB', 'EBAY_US', 'EBAY_DE'];
+    case 'JP':    return ['EBAY_FR', 'EBAY_US'];
+    case 'FR':    return ['EBAY_FR', 'EBAY_GB'];
+    case 'EN':    return ['EBAY_US', 'EBAY_GB'];
+    case 'WORLD': default: return ['EBAY_FR', 'EBAY_US'];
   }
 }
 
@@ -1831,16 +1836,22 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
   // scan_logs.ebay_source tells us whether the Finding API still works in
   // production (Finding succeeded) or everything is running on the Browse
   // fallback (Finding threw / returned 0). Purely observational.
+  // EBAY_SKIP_FINDING=false re-enables the Finding-first path in 30 s via
+  // Render env. Default is to skip (Finding's 5000/day global quota is
+  // saturated in production — observed scans all fall back to Browse).
+  const skipFinding = process.env.EBAY_SKIP_FINDING !== 'false';
   let findingError = null;
-  try {
-    if (ebayAppId) {
-      const r = await fetchEbayFinding(card, language, dateRange);
-      if (r) r._ebaySource = 'finding';
-      return r;
+  if (!skipFinding) {
+    try {
+      if (ebayAppId) {
+        const r = await fetchEbayFinding(card, language, dateRange);
+        if (r) r._ebaySource = 'finding';
+        return r;
+      }
+    } catch (e) {
+      findingError = e.message;
+      console.warn('[Yamo] Finding API failed:', e.message, '→ trying Browse API...');
     }
-  } catch (e) {
-    findingError = e.message;
-    console.warn('[Yamo] Finding API failed:', e.message, '→ trying Browse API...');
   }
   if (ebayAppId && certId) {
     const token = await getEbayOAuthToken();
