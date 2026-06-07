@@ -504,6 +504,9 @@ const GRADING_KEYWORDS = [
   // Keldeo grading (number-required: "Keldeo" is also a Pokémon name —
   // bare "keldeo" would false-positive every raw Keldeo card listing).
   'keldeo 9', 'keldeo 9.5', 'keldeo 10', 'keldeo9', 'keldeo10',
+  // Nova grading (French, 2024+) — "nova" is unambiguous in card listings
+  // (0 false positives in 60 days of scan_logs, confirmed via SQL audit).
+  'nova', 'nova 9', 'nova 9.5', 'nova 10', 'nova9', 'nova10',
   // Collect Aura
   'collectaura', 'collect aura', 'collect-aura', 'ca grade', 'ca 9', 'ca 10',
   // French grading companies
@@ -528,9 +531,10 @@ function computeGradingFields(detectedGrade, result) {
     return { variant: 'Raw', gradingCompany: null, grade: null, matchType: 'raw' };
   }
   const via = result && result.graded_via;
-  const matchType = via === 'strict' ? 'perfect'
-    : via === 'peer' ? 'peer'
-    : via === 'none' ? 'none'
+  const matchType = via === 'strict'       ? 'perfect'
+    : via === 'peer'                       ? 'peer'
+    : via === 'raw_fallback'               ? 'raw_for_graded'
+    : via === 'none'                       ? 'none'
     : 'none';
   return {
     variant: 'Graded',
@@ -545,7 +549,7 @@ function computeGradingFields(detectedGrade, result) {
 // graders at the same numerical grade — using PSA data as a CGC/BGS/ACE proxy
 // would mislead the user about value.
 const PEER_GRADERS = [
-  'cgc', 'bgs', 'beckett', 'sgc', 'ace', 'pca',
+  'cgc', 'bgs', 'beckett', 'sgc', 'ace', 'pca', 'nova',
   'collectaura', 'collect aura', 'ccc', 'hga', 'pfx', 'fcg', 'sfg',
 ];
 
@@ -558,14 +562,36 @@ const PEER_GRADERS = [
 //                        non-PSA-only proxy finds nothing. A PSA-inclusive
 //                        grade-N price, clearly labeled as a proxy, beats
 //                        showing the user no price at all.
-function makePeerGradedTitleFilter(grade, { includePsa = false } = {}) {
+function makePeerGradedTitleFilter(grade, { includePsa = false, pokemonName = null } = {}) {
   const gradeStr = String(grade).toLowerCase();
+  // Reduce the name to first significant word (e.g. "Mega Skarmory ex" → "skarmory")
+  // so suffixes like "ex/V/VMAX/Promo" don't block legitimate matches that omit them.
+  const nameStr = pokemonName ? extractPokemonRoot(pokemonName) : null;
   return (title) => {
     const lower = title.toLowerCase();
     if (!lower.includes(gradeStr)) return false;
+    if (nameStr && !lower.includes(nameStr)) return false;
     if (lower.includes('psa')) return includePsa;        // PSA kept only in peer-all mode
     return PEER_GRADERS.some((c) => lower.includes(c));
   };
+}
+
+// Extract the canonical Pokémon root from a card_name like "Mega Skarmory ex"
+// or "Pikachu VMAX" → "skarmory" / "pikachu". The root is the longest non-suffix
+// word; we drop "mega", "ex", "v", "vmax", "vstar", "gx" tokens before picking.
+function extractPokemonRoot(name) {
+  if (!name) return null;
+  const SUFFIX_TOKENS = new Set([
+    'mega', 'm', 'ex', 'v', 'vmax', 'vstar', 'gx', 'tag', 'team', 'star',
+    'sr', 'sar', 'ar', 'ir', 'ur', 'rr', 'cr', 'fa', 'full', 'art', 'promo',
+  ]);
+  const words = String(name).toLowerCase().split(/\s+/).filter(Boolean);
+  const significant = words.filter(w => !SUFFIX_TOKENS.has(w));
+  // Pick the longest significant word (heuristic: the actual name is usually
+  // the longest token after dropping suffixes).
+  if (!significant.length) return words[0] || null;
+  significant.sort((a, b) => b.length - a.length);
+  return significant[0];
 }
 
 // When the "grading" feature flag is on and Gemini detected the user's card
@@ -582,11 +608,11 @@ function makeGradedTitleFilter(gradeFilter) {
   }
   // Peer-fallback mode: any non-PSA grader at the same grade
   if (gradeFilter.mode === 'peer' && gradeFilter.grade) {
-    return makePeerGradedTitleFilter(gradeFilter.grade);
+    return makePeerGradedTitleFilter(gradeFilter.grade, { pokemonName: gradeFilter.pokemonName });
   }
   // Peer-all mode: last-resort — any grader (incl. PSA) at the same grade
   if (gradeFilter.mode === 'peer-all' && gradeFilter.grade) {
-    return makePeerGradedTitleFilter(gradeFilter.grade, { includePsa: true });
+    return makePeerGradedTitleFilter(gradeFilter.grade, { includePsa: true, pokemonName: gradeFilter.pokemonName });
   }
   if (!gradeFilter.company || !gradeFilter.grade) {
     return (title) => !isGradedCard(title);
@@ -1168,11 +1194,31 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
                 : `${promoMatch[1].toUpperCase()} ${promoMatch[2]}`;
               nameWithNumber.push({ name: lower, nameEN: en, number: promoNum, title, lang: titleLang, isPromo: true });
             } else {
-              // Try "Promo" + number pattern: "Evoli 173 Promo" or "Promo 173"
-              const promoNumMatch = title.match(/\bpromo\b[^0-9]*(\d{2,4})\b|\b(\d{2,4})\s+promo\b/i);
-              if (promoNumMatch) {
-                const pNum = promoNumMatch[1] || promoNumMatch[2];
-                nameWithNumber.push({ name: lower, nameEN: en, number: `Promo ${pNum}`, title, lang: titleLang, isPromo: true });
+              // Masaki / Vending promo style: title contains "No. 094",
+              // "No.94", "Vending 94", or "Masaki Promo 094" — bare digit
+              // with promo context. Only fire when title also mentions
+              // "masaki" or "vending" to avoid grabbing random digits.
+              // Checked BEFORE the generic "Promo NNN" pattern below so that
+              // "Masaki Promo 1999" doesn't get misextracted as number 1999.
+              const titleLower = title.toLowerCase();
+              const isMasakiOrVending = titleLower.includes('masaki') || titleLower.includes('vending');
+              let masakiMatched = false;
+              if (isMasakiOrVending) {
+                const masakiMatch = title.match(/\b(?:no\.?\s*|vending\s+|masaki\s+(?:vending\s+)?(?:promo\s+)?)(\d{1,3})\b/i);
+                if (masakiMatch) {
+                  // Zero-pad to 3 digits so "94" → "094" matches canonical format.
+                  const padded = masakiMatch[1].padStart(3, '0');
+                  nameWithNumber.push({ name: lower, nameEN: en, number: padded, title, lang: titleLang, isPromo: true });
+                  masakiMatched = true;
+                }
+              }
+              if (!masakiMatched) {
+                // Try "Promo" + number pattern: "Evoli 173 Promo" or "Promo 173"
+                const promoNumMatch = title.match(/\bpromo\b[^0-9]*(\d{2,4})\b|\b(\d{2,4})\s+promo\b/i);
+                if (promoNumMatch) {
+                  const pNum = promoNumMatch[1] || promoNumMatch[2];
+                  nameWithNumber.push({ name: lower, nameEN: en, number: `Promo ${pNum}`, title, lang: titleLang, isPromo: true });
+                }
               }
             }
           }
@@ -1988,6 +2034,37 @@ async function handleCard(item, sellerPrice, language = 'WORLD', dateRange = 30)
   };
 }
 
+// Last-resort fallback for graded scans: when no graded data is found across
+// strict + peer + peer-all attempts, retry as a raw-card query for the SAME
+// card. Surfaces the raw market price with a `graded_via: 'raw_fallback'` tag
+// + a `gradedRawFallback` object so the frontend can show a warning banner
+// (so the user knows the graded card's true value may be higher).
+async function tryRawFallback(item, originalGradeFilter, sellerPrice, language, dateRange) {
+  let rawQuery = item.ebay_search || '';
+  const co = originalGradeFilter?.company;
+  const gr = originalGradeFilter?.grade;
+  if (co) rawQuery = rawQuery.replace(new RegExp('\\s+' + co + '\\s*\\d*(\\.\\d+)?', 'ig'), '');
+  if (gr) rawQuery = rawQuery.replace(new RegExp('\\s+' + gr + '\\b', 'g'), '');
+  rawQuery = rawQuery.replace(/\s+/g, ' ').trim();
+  const rawItem = { ...item, ebay_search: rawQuery, _gradeFilter: null };
+  console.log('[Lakkot/grading] raw fallback — re-query as raw:', rawQuery);
+  const rawResult = await handleCard(rawItem, sellerPrice, language, dateRange);
+  if ((rawResult.ebay_sales_count ?? 0) > 0) {
+    rawResult.graded = originalGradeFilter;
+    rawResult.graded_via = 'raw_fallback';
+    rawResult.gradedRawFallback = {
+      detectedCompany: co ?? null,
+      detectedGrade:   gr ?? null,
+    };
+    console.log('[Lakkot/grading] raw fallback: matched | sales:', rawResult.ebay_sales_count);
+  } else {
+    rawResult.graded = originalGradeFilter;
+    rawResult.graded_via = 'none';
+    console.log('[Lakkot/grading] raw fallback: 0 results, returning none');
+  }
+  return rawResult;
+}
+
 async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manualCardOverride, language = 'WORLD', dateRange = 30, gradeFilter = null, tcgCategory = null }) {
   const rawTitle = streamTitle?.trim() ?? '';
   const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
@@ -2065,13 +2142,17 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     if (item.ebay_search && !item.ebay_search.includes(gradeFilter.grade)) {
       item.ebay_search = (item.ebay_search + ' ' + gradeFilter.grade).trim();
     }
-    item._gradeFilter = gradeFilter;
+    item._gradeFilter = { ...gradeFilter, pokemonName: item.card_name };
     item.graded = { company: null, grade: gradeFilter.grade };
     console.log('[Lakkot/grading] handleAnalyze grade-only peer mode | query:', item.ebay_search);
     const peerResult = await handleCard(item, sellerPrice, language, dateRange);
-    peerResult.graded = item.graded;
-    peerResult.graded_via = (peerResult.ebay_sales_count ?? 0) > 0 ? 'peer' : 'none';
-    return peerResult;
+    if ((peerResult.ebay_sales_count ?? 0) > 0) {
+      peerResult.graded = item.graded;
+      peerResult.graded_via = 'peer';
+      return peerResult;
+    }
+    // Raw fallback — same card, no grade filter
+    return tryRawFallback(item, { company: null, grade: gradeFilter.grade }, sellerPrice, language, dateRange);
   }
 
   // Grading feature flag: when Gemini detected a slab, append the grade to the
@@ -2085,48 +2166,47 @@ async function handleAnalyze({ imageBase64, streamTitle, sellerPrice, mode, manu
     item.graded = gradeFilter; // surface in response so panel can label "vs eBay PSA 10"
     console.log('[Lakkot/grading] handleAnalyze using gradeFilter:', gradeFilter, '| query:', item.ebay_search);
 
-    // Try strict company+grade first.
+    // Tier 1 — strict company+grade.
     const strictResult = await handleCard(item, sellerPrice, language, dateRange);
     if ((strictResult.ebay_sales_count ?? 0) > 0) {
       strictResult.graded_via = 'strict';
       return strictResult;
     }
 
-    // Peer fallback: boutique graders (CollectAura, HGA, etc.) often have
-    // zero eBay sold listings even when correctly identified. Retry with a
-    // broader filter — any non-PSA grader at the same grade. PSA excluded
-    // because PSA carries a 30-100% premium that would mislead the user.
+    // Tier 2 — peer (non-PSA) WITH pokemonName check.
     console.log('[Lakkot/grading] strict returned 0; trying peer fallback at grade', gradeFilter.grade);
     const peerItem = {
       ...item,
-      // Drop the company from the query so eBay's relevance returns a mix of graders
       ebay_search: item.ebay_search.replace(new RegExp('\\s+' + gradeFilter.company + '\\s+', 'i'), ' '),
-      _gradeFilter: { mode: 'peer', grade: gradeFilter.grade },
+      _gradeFilter: { mode: 'peer', grade: gradeFilter.grade, pokemonName: item.card_name },
     };
     const peerResult = await handleCard(peerItem, sellerPrice, language, dateRange);
     if ((peerResult.ebay_sales_count ?? 0) > 0) {
-      peerResult.graded = gradeFilter;          // keep detected company in response (panel shows "CollectAura 10 detected")
+      peerResult.graded = gradeFilter;
       peerResult.graded_via = 'peer';
       console.log('[Lakkot/grading] peer fallback: peer | sales:', peerResult.ebay_sales_count);
       return peerResult;
     }
 
-    // Tier 3 — peer-all: even non-PSA peers had zero sales. Some cards (esp.
-    // One Piece) trade almost entirely as PSA, so a non-PSA proxy finds
-    // nothing. Last resort: include PSA. Still labeled graded_via:'peer' so
-    // the panel shows the "proxy — no <company> sales" disclaimer. A
-    // grade-N price beats no price.
+    // Tier 3 — peer-all (incl. PSA) WITH pokemonName check.
     console.log('[Lakkot/grading] peer (non-PSA) returned 0; trying peer-all (incl. PSA) at grade', gradeFilter.grade);
     const peerAllItem = {
       ...item,
       ebay_search: item.ebay_search.replace(new RegExp('\\s+' + gradeFilter.company + '\\s+', 'i'), ' '),
-      _gradeFilter: { mode: 'peer-all', grade: gradeFilter.grade },
+      _gradeFilter: { mode: 'peer-all', grade: gradeFilter.grade, pokemonName: item.card_name },
     };
     const peerAllResult = await handleCard(peerAllItem, sellerPrice, language, dateRange);
-    peerAllResult.graded = gradeFilter;
-    peerAllResult.graded_via = (peerAllResult.ebay_sales_count ?? 0) > 0 ? 'peer' : 'none';
-    console.log('[Lakkot/grading] peer-all fallback:', peerAllResult.graded_via, '| sales:', peerAllResult.ebay_sales_count);
-    return peerAllResult;
+    if ((peerAllResult.ebay_sales_count ?? 0) > 0) {
+      peerAllResult.graded = gradeFilter;
+      peerAllResult.graded_via = 'peer';
+      console.log('[Lakkot/grading] peer-all fallback: peer | sales:', peerAllResult.ebay_sales_count);
+      return peerAllResult;
+    }
+
+    // Tier 4 — RAW fallback (same card, no grade filter). Surfaces raw price
+    // with a warning so user knows graded value may be higher.
+    console.log('[Lakkot/grading] peer-all returned 0; trying raw fallback');
+    return tryRawFallback(item, gradeFilter, sellerPrice, language, dateRange);
   }
 
   return handleCard(item, sellerPrice, language, dateRange);
