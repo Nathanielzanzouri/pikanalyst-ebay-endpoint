@@ -501,6 +501,9 @@ const GRADING_KEYWORDS = [
   'ccc', 'hga', 'pfx', 'fcg', 'sfg',
   // ACE grading (with number to avoid false positives)
   'ace 10', 'ace 9', 'ace 8',
+  // Keldeo grading (number-required: "Keldeo" is also a Pokémon name —
+  // bare "keldeo" would false-positive every raw Keldeo card listing).
+  'keldeo 9', 'keldeo 9.5', 'keldeo 10', 'keldeo9', 'keldeo10',
   // Collect Aura
   'collectaura', 'collect aura', 'collect-aura', 'ca grade', 'ca 9', 'ca 10',
   // French grading companies
