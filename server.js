@@ -689,6 +689,33 @@ function isSpecialEdition(title) {
   ].some(kw => lower.includes(kw));
 }
 
+// Reject listings whose primary item is an accessory rather than a card:
+// acrylic display cases, art prints, fan-art / custom-made replicas, playmats.
+// Conservative keyword list — validated against 60 days of scan_logs
+// (8055 listings examined, 8 matches, 0 false positives). See
+// docs/superpowers/specs/2026-06-07-accessory-filter-low-confidence-design.md.
+function isCardAccessory(title) {
+  const lower = title.toLowerCase();
+  const accessoryKeywords = [
+    // Acrylic — "acrylic" always points at a decorative product
+    'acrylic case', 'acrylic frame', 'acrylic display', 'acrylic holder',
+    // Prints / reproductions / fan-derived art — clearly not real cards
+    'art print', 'wall art', 'poster print', 'canvas print', 'wood print',
+    'oil painting', 'signed art', 'painting print',
+    'replica', 'proxy card', 'custom card', 'fan art',
+    // Gaming accessories — distinct products
+    'playmat', 'play mat',
+    // Specific pattern from scan 5bad0dfe
+    'anime frame',
+  ];
+  const hasAccessoryKw = accessoryKeywords.some(kw => lower.includes(kw));
+  if (!hasAccessoryKw) return false;
+  // Exemption: a graded slab listing might legitimately mention "case"
+  // (the slab IS a case). Don't reject if a strong graded signal is present.
+  const hasGradedSignal = /\b(psa|cgc|bgs|sgc|beckett|graded\s+\d|cert\s*#)\b/i.test(lower);
+  return !hasGradedSignal;
+}
+
 // ─── TCG card detection (unified scan router) ────────────────────────────────
 const TCG_BRAND_KEYWORDS = [
   'pokemon', 'pokémon', 'pocket monsters', 'pocket monster',
@@ -1716,7 +1743,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
     // is too weak a match). Scoped to non-OP / non-JP-promo because those
     // paths already enforce their own number checks.
     const isGradedScan = !!card._gradeFilter && !isOpScan && !isJpPromoScan;
-    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0, gradedNoIdentityOut = 0;
+    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, accessoryOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0, gradedNoIdentityOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
       if (!titleFilter(t))    { gradedOut++;     return false; }
@@ -1725,6 +1752,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       if (isFigurine(t))      { figuresOut++;    return false; }
       if (isMultiChoice(t))   { multichoiceOut++;return false; }
       if (isSpecialEdition(t)){ specialOut++;    return false; }
+      if (isCardAccessory(t)) { accessoryOut++;  return false; }
       // OP-specific filters (only when category=OnePiece). See Finding-API
       // equivalent above for full rationale.
       if (isOpScan && isOnePieceCrossGame(t))                          { opCrossGameOut++; return false; }
@@ -1741,7 +1769,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       return true;
     });
 
-    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''}${isGradedScan ? ` | graded_no_identity=${gradedNoIdentityOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
+    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | accessory=${accessoryOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''}${isGradedScan ? ` | graded_no_identity=${gradedNoIdentityOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
 
     let identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
 
@@ -1813,11 +1841,15 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       };
     }).filter(l => l.price != null);
 
+    // Low-confidence threshold env-overridable via LOW_CONFIDENCE_THRESHOLD
+    // for instant rollback / tuning without redeploying. Default 3 sales.
+    const lowConfThreshold = parseInt(process.env.LOW_CONFIDENCE_THRESHOLD, 10) || 3;
     return {
       market_price_usd: Math.round(median * 100) / 100,
       price_low_usd:    Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
       price_high_usd:   Math.round(prices[Math.floor(prices.length * 0.90)] * 100) / 100,
       ebay_sales_count: prices.length,
+      low_confidence:   prices.length < lowConfThreshold,
       gradedOut,
       markets,
       price_source:     'ebay',
