@@ -199,6 +199,21 @@ async function logScan({ userEmail, userName, platform, domTitle, imageBase64, c
   }
 }
 
+// Trim a listings[] array down to the fields we keep in scan_logs.ebay_results
+// for later QA. Includes imageUrl + itemUrl + country so admin dashboards can
+// preview thumbnails and link straight to the eBay listing (without storing
+// every field returned by Browse).
+function trimListingsForLog(listings) {
+  return (listings || []).slice(0, 10).map(l => ({
+    title:    l.title,
+    price:    l.price,
+    soldDate: l.soldDate || null,
+    imageUrl: l.imageUrl || null,
+    itemUrl:  l.itemUrl  || null,
+    country:  l.country  || null,
+  }));
+}
+
 // ─── Gemini diagnostic endpoints (temp, no auth) ─────────────────────────────
 // /diag/gemini-models — lists models the configured key can access.
 // /diag/gemini-ping   — sends a 1-line text prompt to confirm key + model work
@@ -4292,7 +4307,7 @@ app.post('/scan', async (req, res) => {
             ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR')
             : 'NO_DATA';
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
-          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
+          const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
           const productLabel = [opIdentity.character, opIdentity.card_number].filter(Boolean).join(' ');
           const logId = await logScan({
@@ -4425,7 +4440,7 @@ app.post('/scan', async (req, res) => {
           }
 
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
-          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
+          const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
 
           // Multi-set ambiguity (if any) was already handled BEFORE the eBay
@@ -4492,7 +4507,7 @@ app.post('/scan', async (req, res) => {
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
-          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
+          const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
@@ -4557,7 +4572,7 @@ app.post('/scan', async (req, res) => {
           const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
 
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
-          const ebayTopResults = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
+          const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
@@ -4612,7 +4627,7 @@ app.post('/scan', async (req, res) => {
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
         const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
-        const ebayTopResults2 = (result.listings || []).slice(0, 10).map(l => ({ title: l.title, price: l.price, soldDate: l.soldDate || null }));
+        const ebayTopResults2 = trimListingsForLog(result.listings);
         const _gf = computeGradingFields(detectedGrade, result);
         const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
