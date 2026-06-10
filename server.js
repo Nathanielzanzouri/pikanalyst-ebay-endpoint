@@ -521,6 +521,10 @@ const GRADING_KEYWORDS = [
   'nova', 'nova 9', 'nova 9.5', 'nova 10', 'nova9', 'nova10',
   // Collect Aura
   'collectaura', 'collect aura', 'collect-aura', 'ca grade', 'ca 9', 'ca 10',
+  // Aura (CollectAura abbreviation seen in seller titles, both orders + FR
+  // comma decimal). Number-required to avoid matching the word "aura" alone.
+  'aura 9', 'aura 9.5', 'aura 10',
+  '9 aura', '9.5 aura', '9,5 aura', '10 aura',
   // French grading companies
   'pca', 'pca 9', 'pca9', 'pca 10', 'pca10',
   'carte gradée', 'carte gradee', 'cartes gradées', 'cartes gradees',
