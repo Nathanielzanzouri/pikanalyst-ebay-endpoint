@@ -479,13 +479,10 @@ async function claudeFetch(body, maxRetries = 3) {
   throw new Error('Claude API overloaded after retries (529)');
 }
 
-// ─── Currency normalisation ───────────────────────────────────────────────────
-const USD_TO_EUR = 0.92;
-function toEur(price, currency) {
-  if (currency === 'EUR') return price;
-  if (currency === 'USD') return Math.round(price * USD_TO_EUR * 100) / 100;
-  return price;
-}
+// ─── Currency normalisation + bid_range helpers (price-stats module) ─────────
+// See price-stats.js. Centralises currency conversion (EUR/USD/GBP, others
+// excluded with a warning) and the bid_range stats added 2026-06-11.
+const { toEur, computeBidRange } = require('./price-stats');
 
 // ─── Language helpers ─────────────────────────────────────────────────────────
 function applyLanguageToQuery(baseQuery, language) {
@@ -1863,7 +1860,8 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
     identityItems.forEach((item, idx) => {
       const raw = parseFloat(item.price?.value);
       const cur = item.price?.currency ?? 'EUR';
-      const eur = isNaN(raw) ? '?' : toEur(raw, cur).toFixed(2);
+      const eurNum = isNaN(raw) ? null : toEur(raw, cur);
+      const eur = eurNum != null ? eurNum.toFixed(2) : '?';
       console.log(`${idx + 1}. [€${eur} (${cur} ${item.price?.value})] [${item._market}] ${item.title} | lastSoldDate=${item.lastSoldDate ?? 'null'} itemEndDate=${item.itemEndDate ?? 'null'}`);
     });
 
@@ -1908,12 +1906,19 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
     // Low-confidence threshold env-overridable via LOW_CONFIDENCE_THRESHOLD
     // for instant rollback / tuning without redeploying. Default 3 sales.
     const lowConfThreshold = parseInt(process.env.LOW_CONFIDENCE_THRESHOLD, 10) || 3;
+    // TODO: rename *_usd → *_eur. These fields have been EUR-normalised since
+    // toEur landed; the _usd suffix is legacy from an old SerpAPI epoch and is
+    // kept verbatim for extension compatibility until a coordinated rename.
     return {
       market_price_usd: Math.round(median * 100) / 100,
       price_low_usd:    Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
       price_high_usd:   Math.round(prices[Math.floor(prices.length * 0.90)] * 100) / 100,
       ebay_sales_count: prices.length,
       low_confidence:   prices.length < lowConfThreshold,
+      // bid_range — additive object for the web /scan page. Extension ignores.
+      // Derived from the SAME `prices` array + `listings` already built above,
+      // so values are byte-identical to existing fields on shared inputs.
+      bid_range:        computeBidRange(prices, listings, dateRange),
       gradedOut,
       markets,
       price_source:     'ebay',
