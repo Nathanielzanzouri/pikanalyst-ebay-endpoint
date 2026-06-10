@@ -31,13 +31,15 @@ function percentileSimple(sortedArray, p) {
 }
 
 // max_bid rounding rule:
-//   median * 1.15, rounded:
+//   value passed in (= p75 since 2026-06-11), rounded:
 //     >= 100€ → nearest 5€
 //     <  100€ → nearest 1€
-function roundMaxBid(median) {
-  if (median == null) return null;
-  // Clean FP noise before rounding (50 * 1.15 → 57.4999999… not 57.5 in IEEE 754).
-  const target = Math.round(median * 1.15 * 100) / 100;
+// Was median * 1.15 before — replaced by p75 of cleaned comps (the price
+// most successful bidders actually paid for the upper-quartile listings).
+function roundMaxBid(value) {
+  if (value == null) return null;
+  // Clean FP noise before rounding.
+  const target = Math.round(value * 100) / 100;
   const step = target >= 100 ? 5 : 1;
   return Math.round(target / step) * step;
 }
@@ -52,14 +54,17 @@ function computeBidRange(sortedPrices, listings, windowDays) {
   const n = sortedPrices.length;
   const medianRaw = n > 0 ? sortedPrices[Math.floor(n / 2)] : null;
   const p25Raw    = percentileSimple(sortedPrices, 0.25);
+  const p75Raw    = percentileSimple(sortedPrices, 0.75);
   const median    = medianRaw != null ? Math.round(medianRaw * 100) / 100 : null;
   const p25       = p25Raw    != null ? Math.round(p25Raw    * 100) / 100 : null;
-  const max_bid   = roundMaxBid(median);
+  const p75       = p75Raw    != null ? Math.round(p75Raw    * 100) / 100 : null;
+  const max_bid   = roundMaxBid(p75); // since 2026-06-11: p75 instead of median*1.15
   const markets   = [...new Set((listings || []).map(l => l && l.country).filter(Boolean))];
   return {
     n,
     p25,
     median,
+    p75,
     max_bid,
     window_days: windowDays,
     markets,

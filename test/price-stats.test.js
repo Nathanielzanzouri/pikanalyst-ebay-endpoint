@@ -74,67 +74,77 @@ test('percentileSimple: p=0 returns first element', () => {
   assert.strictEqual(percentileSimple([1, 2, 3], 0.0), 1);
 });
 
-// ─── roundMaxBid ─────────────────────────────────────────────────────────────
+// ─── roundMaxBid (since 2026-06-11: pure value rounding, no *1.15) ───────────
 test('roundMaxBid: null in → null out', () => {
   assert.strictEqual(roundMaxBid(null), null);
 });
 
-test('roundMaxBid: median < ~87 (target < 100€) rounds to nearest 1€', () => {
-  // 50 * 1.15 = 57.5 → step 1 → 58 (Math.round half-up in JS)
-  assert.strictEqual(roundMaxBid(50), 58);
+test('roundMaxBid: value < 100 rounds to nearest 1€', () => {
+  assert.strictEqual(roundMaxBid(57.4), 57);
+  assert.strictEqual(roundMaxBid(57.6), 58);
+  assert.strictEqual(roundMaxBid(80), 80);
+  assert.strictEqual(roundMaxBid(99), 99);
+  assert.strictEqual(roundMaxBid(99.4), 99);
 });
 
-test('roundMaxBid: median giving target exactly 100 rounds to 5€ step', () => {
-  // floor case: 87 * 1.15 = 100.05 → step 5 → round(100.05/5)*5 = 20*5 = 100
-  assert.strictEqual(roundMaxBid(87), 100);
+test('roundMaxBid: value exactly 100 rounds to 5€ step', () => {
+  assert.strictEqual(roundMaxBid(100), 100);
 });
 
-test('roundMaxBid: median 86 keeps step 1€ (target 98.9 < 100)', () => {
-  // 86 * 1.15 = 98.9 → step 1 → round(98.9) = 99
-  assert.strictEqual(roundMaxBid(86), 99);
+test('roundMaxBid: value 99.6 still under 100 → nearest 1€', () => {
+  // Edge: target < 100 → step 1. Math.round(99.6) = 100 (note: yields 100 even though target was <100)
+  assert.strictEqual(roundMaxBid(99.6), 100);
 });
 
-test('roundMaxBid: median 100 → 115 (already 5€ aligned)', () => {
-  assert.strictEqual(roundMaxBid(100), 115);
+test('roundMaxBid: value 148 → nearest 5€ = 150', () => {
+  assert.strictEqual(roundMaxBid(148), 150);
 });
 
-test('roundMaxBid: median 200 → 230 (5€ aligned)', () => {
-  assert.strictEqual(roundMaxBid(200), 230);
+test('roundMaxBid: value 122 → nearest 5€ = 120', () => {
+  // (122 = 5*24 + 2 → nearest 5 below)
+  assert.strictEqual(roundMaxBid(122), 120);
 });
 
-test('roundMaxBid: median 99 with target 113.85 → nearest 5 = 115', () => {
-  // 99 * 1.15 = 113.85 → step 5 → round(113.85/5)*5 = round(22.77)*5 = 23*5 = 115
-  assert.strictEqual(roundMaxBid(99), 115);
+test('roundMaxBid: value 122.5 → nearest 5€ = 125 (.5 rounds up in JS)', () => {
+  assert.strictEqual(roundMaxBid(122.5), 125);
+});
+
+test('roundMaxBid: value 200 → 200', () => {
+  assert.strictEqual(roundMaxBid(200), 200);
 });
 
 // ─── computeBidRange ─────────────────────────────────────────────────────────
-test('computeBidRange: n=0 returns shape with nulls + confidence=low', () => {
+test('computeBidRange: n=0 returns shape with nulls + confidence=low + p75 null', () => {
   const r = computeBidRange([], [], 30);
   assert.deepStrictEqual(r, {
-    n: 0, p25: null, median: null, max_bid: null,
+    n: 0, p25: null, median: null, p75: null, max_bid: null,
     window_days: 30, markets: [], confidence: 'low',
   });
 });
 
-test('computeBidRange: n=1 returns single-value across percentiles', () => {
+test('computeBidRange: n=1 returns single-value across percentiles (max_bid = p75 = value)', () => {
   const r = computeBidRange([42], [{ country: 'FR' }], 30);
   assert.strictEqual(r.n, 1);
   assert.strictEqual(r.p25, 42);
   assert.strictEqual(r.median, 42);
-  assert.strictEqual(r.max_bid, 48); // 42*1.15 = 48.3 → step 1 → 48
+  assert.strictEqual(r.p75, 42);
+  assert.strictEqual(r.max_bid, 42); // p75 = 42 → step 1 → 42
   assert.deepStrictEqual(r.markets, ['FR']);
   assert.strictEqual(r.confidence, 'low');
 });
 
-test('computeBidRange: n=4 has confidence=low', () => {
+test('computeBidRange: n=4 has confidence=low + p75 matches percentileSimple', () => {
+  // floor(4*0.75) = 3 → arr[3] = 4
   const r = computeBidRange([1, 2, 3, 4], [], 30);
   assert.strictEqual(r.n, 4);
+  assert.strictEqual(r.p75, 4);
   assert.strictEqual(r.confidence, 'low');
 });
 
-test('computeBidRange: n=5 has confidence=ok', () => {
+test('computeBidRange: n=5 has confidence=ok + p75 = arr[3] (floor(5*0.75))', () => {
   const r = computeBidRange([1, 2, 3, 4, 5], [], 30);
   assert.strictEqual(r.n, 5);
+  assert.strictEqual(r.p75, 4);
   assert.strictEqual(r.confidence, 'ok');
 });
 
@@ -144,13 +154,22 @@ test('computeBidRange: markets deduped from listings', () => {
     { country: 'US' }, { country: null }, { country: 'GB' },
   ];
   const r = computeBidRange([10, 20, 30], listings, 90);
-  // order depends on iteration; assert as Set
   assert.deepStrictEqual(new Set(r.markets), new Set(['FR', 'GB', 'US']));
 });
 
 test('computeBidRange: window_days passed through', () => {
   const r = computeBidRange([10], [], 90);
   assert.strictEqual(r.window_days, 90);
+});
+
+test('computeBidRange: max_bid is p75 (rounded), NOT median*1.15', () => {
+  // 8-element array — p75 index = floor(8*0.75) = 6 → arr[6] = 100
+  // median index = floor(8/2) = 4 → arr[4] = 50
+  const prices = [10, 20, 30, 40, 50, 60, 100, 200];
+  const r = computeBidRange(prices, [], 30);
+  assert.strictEqual(r.median, 50);
+  assert.strictEqual(r.p75, 100);
+  assert.strictEqual(r.max_bid, 100); // round(100 to nearest 5) = 100
 });
 
 // ─── Regression fixture: median computed in bid_range matches the historic
