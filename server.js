@@ -479,10 +479,11 @@ async function claudeFetch(body, maxRetries = 3) {
   throw new Error('Claude API overloaded after retries (529)');
 }
 
-// ─── Currency normalisation + bid_range helpers (price-stats module) ─────────
+// ─── Currency normalisation + bid_range + verdict (price-stats module) ──────
 // See price-stats.js. Centralises currency conversion (EUR/USD/GBP, others
-// excluded with a warning) and the bid_range stats added 2026-06-11.
-const { toEur, computeBidRange } = require('./price-stats');
+// excluded with a warning), the bid_range stats, and the single source of
+// truth for DEAL/FAIR/OVER thresholds (±15% symmetric).
+const { toEur, computeBidRange, computeVerdict } = require('./price-stats');
 
 // ─── Language helpers ─────────────────────────────────────────────────────────
 function applyLanguageToQuery(baseQuery, language) {
@@ -3326,9 +3327,7 @@ app.post('/scan/gemini', async (req, res) => {
   // --- Map to CARD_RESULT and compute verdict ---
   const result = mapToCardResult(parsed);
   const mp = result.market_price;
-  const verdict = mp && ask
-    ? (ask / mp < 0.90 ? 'DEAL' : ask / mp > 1.10 ? 'OVER' : 'FAIR')
-    : 'NO_DATA';
+  const verdict = computeVerdict(ask, mp);
 
   console.log(
     '[Lakkot/Gemini]',
@@ -3839,7 +3838,7 @@ app.post('/scan/gemini-stream', async (req, res) => {
     const mp = (merged.ebay_market_price && merged.ebay_market_price > 0 ? merged.ebay_market_price : null)
             ?? (merged.pricecharting_price && merged.pricecharting_price > 0 ? merged.pricecharting_price : null)
             ?? (merged.cardmarket_price && merged.cardmarket_price > 0 ? merged.cardmarket_price : null);
-    const verdict = mp && ask ? (ask / mp < 0.90 ? 'DEAL' : ask / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+    const verdict = computeVerdict(ask, mp);
 
     // --- Log row INSERT (fast: ~50-150ms) — must complete before `done` so
     //     the client has a scanLogId to attach feedback to. Image upload
@@ -4312,9 +4311,7 @@ app.post('/scan', async (req, res) => {
             tcgCategory: 'OnePiece',
           }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
-          const v = mp && sellerPrice
-            ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR')
-            : 'NO_DATA';
+          const v = computeVerdict(sellerPrice, mp);
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
@@ -4429,7 +4426,7 @@ app.post('/scan', async (req, res) => {
           // eBay sold price
           const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
-          const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+          const v = computeVerdict(sellerPrice, mp);
 
           // TCGPlayer price (EN cards only)
           let tcgPrice = null;
@@ -4513,7 +4510,7 @@ app.post('/scan', async (req, res) => {
           // eBay sold price — search with JP language filter
           const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'JP', dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
-          const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+          const v = computeVerdict(sellerPrice, mp);
 
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
@@ -4578,7 +4575,7 @@ app.post('/scan', async (req, res) => {
           // eBay sold price — search with FR language filter
           const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language: 'FR', dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
-          const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+          const v = computeVerdict(sellerPrice, mp);
 
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
@@ -4634,7 +4631,7 @@ app.post('/scan', async (req, res) => {
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
         const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: cleanedName, sellerPrice, mode: 'cards', manualCardOverride: cleanedName, language, dateRange, gradeFilter: detectedGrade }));
         const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
-        const v = mp && sellerPrice ? (sellerPrice / mp < 0.90 ? 'DEAL' : sellerPrice / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+        const v = computeVerdict(sellerPrice, mp);
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
         const ebayTopResults2 = trimListingsForLog(result.listings);
         const _gf = computeGradingFields(detectedGrade, result);
@@ -4761,7 +4758,7 @@ app.post('/scan', async (req, res) => {
       const finalCards = lowConfidence ? [] : (usesShopping ? shoppingResult.cards : (lensResult?.cards ?? []));
       const medianPrice = lowConfidence ? null : (shoppingResult.medianPrice ?? lensResult?.medianPrice ?? null);
       const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
-      const webVerdict = medianPrice && sellerPrice ? (sellerPrice / medianPrice < 0.90 ? 'DEAL' : sellerPrice / medianPrice > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+      const webVerdict = computeVerdict(sellerPrice, medianPrice);
       const lensMatchTitles3 = (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || '');
       const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, shoppingQuery: loggedShoppingQuery, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length, lensMatches: lensMatchTitles3, lensSelected: productName, langToggle: language, country, productCategory: 'Other', variant: 'Raw', gradingCompany: null, grade: null, matchType: medianPrice ? 'raw' : 'none' });
 
@@ -4876,7 +4873,7 @@ app.post('/scan', async (req, res) => {
       const v = mp ? 'NO_DATA' : 'NO_DATA'; // manual lookups don't have asking price for verdict
       if (mp) {
         const askP = result.seller_asking_price ?? null;
-        const verdict = mp && askP ? (askP / mp < 0.90 ? 'DEAL' : askP / mp > 1.10 ? 'OVER' : 'FAIR') : 'NO_DATA';
+        const verdict = computeVerdict(askP, mp);
         scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0, langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: mp ? 'raw' : 'none' });
       } else {
         scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA', langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: 'none' });

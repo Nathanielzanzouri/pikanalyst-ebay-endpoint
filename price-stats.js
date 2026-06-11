@@ -30,18 +30,19 @@ function percentileSimple(sortedArray, p) {
   return sortedArray[idx];
 }
 
-// max_bid rounding rule:
-//   value passed in (= p75 since 2026-06-11), rounded:
-//     >= 100€ → nearest 5€
-//     <  100€ → nearest 1€
-// Was median * 1.15 before — replaced by p75 of cleaned comps (the price
-// most successful bidders actually paid for the upper-quartile listings).
-function roundMaxBid(value) {
-  if (value == null) return null;
-  // Clean FP noise before rounding.
-  const target = Math.round(value * 100) / 100;
-  const step = target >= 100 ? 5 : 1;
-  return Math.round(target / step) * step;
+// Verdict thresholds (±15% symmetric since 2026-06-11). Used by both the
+// extension and the web — single source of truth for DEAL/FAIR/OVER calls.
+const DEAL_THRESHOLD = 0.85; // asking < median * 0.85 → DEAL
+const OVER_THRESHOLD = 1.15; // asking > median * 1.15 → OVER
+
+// Compute DEAL/FAIR/OVER verdict from an asking price and a median market
+// price. Returns 'NO_DATA' if either is null/0/NaN.
+function computeVerdict(asking, median) {
+  if (!median || !asking || isNaN(asking) || isNaN(median)) return 'NO_DATA';
+  const ratio = asking / median;
+  if (ratio < DEAL_THRESHOLD) return 'DEAL';
+  if (ratio > OVER_THRESHOLD) return 'OVER';
+  return 'FAIR';
 }
 
 // Build the bid_range object added to /scan CARD_RESULT responses.
@@ -53,19 +54,17 @@ function roundMaxBid(value) {
 function computeBidRange(sortedPrices, listings, windowDays) {
   const n = sortedPrices.length;
   const medianRaw = n > 0 ? sortedPrices[Math.floor(n / 2)] : null;
-  const p25Raw    = percentileSimple(sortedPrices, 0.25);
-  const p75Raw    = percentileSimple(sortedPrices, 0.75);
   const median    = medianRaw != null ? Math.round(medianRaw * 100) / 100 : null;
-  const p25       = p25Raw    != null ? Math.round(p25Raw    * 100) / 100 : null;
-  const p75       = p75Raw    != null ? Math.round(p75Raw    * 100) / 100 : null;
-  const max_bid   = roundMaxBid(p75); // since 2026-06-11: p75 instead of median*1.15
-  const markets   = [...new Set((listings || []).map(l => l && l.country).filter(Boolean))];
+  // Display thresholds — integer-rounded for live-bidding cognitive ease.
+  // The verdict logic itself compares the raw ratio (no rounding edge cases).
+  const deal_below = median != null ? Math.round(median * DEAL_THRESHOLD) : null;
+  const over_above = median != null ? Math.round(median * OVER_THRESHOLD) : null;
+  const markets    = [...new Set((listings || []).map(l => l && l.country).filter(Boolean))];
   return {
     n,
-    p25,
     median,
-    p75,
-    max_bid,
+    deal_below,
+    over_above,
     window_days: windowDays,
     markets,
     confidence: n >= 5 ? 'ok' : 'low',
@@ -75,8 +74,10 @@ function computeBidRange(sortedPrices, listings, windowDays) {
 module.exports = {
   USD_TO_EUR,
   GBP_TO_EUR,
+  DEAL_THRESHOLD,
+  OVER_THRESHOLD,
   toEur,
   percentileSimple,
-  roundMaxBid,
+  computeVerdict,
   computeBidRange,
 };
