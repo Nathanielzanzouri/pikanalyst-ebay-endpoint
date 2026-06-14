@@ -4046,7 +4046,7 @@ app.post('/scan', async (req, res) => {
     }
 
     try {
-      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 30, country = null, multiSetEnabled = false, promoEnabled = false } = params;
+      let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 30, country = null, multiSetEnabled = false, promoEnabled = false, client = null } = params;
       // If client sent a full frame (scan zone active), use it as the original for logging
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
@@ -4081,7 +4081,7 @@ app.post('/scan', async (req, res) => {
         const unsupportedReason = isBooster(rawTitle) ? 'sealed' : isMultiChoice(rawTitle) ? 'multi' : null;
         if (unsupportedReason) {
           const messages = { sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice, productCategory: 'Other', variant: null, gradingCompany: null, grade: null, matchType: null });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice, productCategory: 'Other', variant: null, gradingCompany: null, grade: null, matchType: null });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
         }
       }
@@ -4144,7 +4144,7 @@ app.post('/scan', async (req, res) => {
         const langName = UNSUPPORTED_LANGS[rawDetected];
         console.log('[Lakkot/unsupported-lang] detected', rawDetected, '(' + langName + ') — refusing');
         const logId = await logScan({
-          userEmail: scanUser?.email, userName: scanUser?.name,
+          userEmail: scanUser?.email, userName: scanUser?.name, platform: client,
           domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64,
           route: 'lang-unsupported',
           resultType: 'UNSUPPORTED',
@@ -4317,7 +4317,7 @@ app.post('/scan', async (req, res) => {
           const _gf = computeGradingFields(detectedGrade, result);
           const productLabel = [opIdentity.character, opIdentity.card_number].filter(Boolean).join(' ');
           const logId = await logScan({
-            userEmail: scanUser?.email, userName: scanUser?.name,
+            userEmail: scanUser?.email, userName: scanUser?.name, platform: client,
             domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64,
             route: 'lens-card-onepiece-vote',
             productName: productLabel,
@@ -4404,7 +4404,7 @@ app.post('/scan', async (req, res) => {
             const pickerVariants = buildPokemonMultiSetPicker(lensResult.visualMatches, vote, 'EN');
             if (pickerVariants) {
               console.log('[Lakkot/multi-set] EN — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
-              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
               return res.json({
                 type: 'CARD_RESULT',                 // sidepanel treats as a normal result so the picker renders
                 card_name: vote.nameEN,
@@ -4454,7 +4454,7 @@ app.post('/scan', async (req, res) => {
           // point means the user's scan is unambiguous OR the feature flag
           // is off, so we proceed normally with the single voted card.
 
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
             type: 'CARD_RESULT',
@@ -4489,7 +4489,7 @@ app.post('/scan', async (req, res) => {
             const pickerVariants = buildPokemonMultiSetPicker(lensResult.visualMatches, vote, 'JP');
             if (pickerVariants) {
               console.log('[Lakkot/multi-set] JP — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
-              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote-multiset-pending', productName: vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
               return res.json({
                 type: 'CARD_RESULT',
                 card_name: vote.nameEN,
@@ -4515,7 +4515,7 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           // Flag when JP toggle couldn't find a JP-specific number (fell back to EN/FR promo)
           const langMismatch = vote.isPromo ? 'EN promo — JP version not found' : null;
@@ -4554,7 +4554,7 @@ app.post('/scan', async (req, res) => {
             const pickerVariants = buildPokemonMultiSetPicker(lensResult.visualMatches, vote, 'FR');
             if (pickerVariants) {
               console.log('[Lakkot/multi-set] FR — returning picker with', pickerVariants.length, 'tiles, no eBay query yet');
-              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote-multiset-pending', productName: vote.nameFR || vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
+              const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote-multiset-pending', productName: vote.nameFR || vote.nameEN, lensProductName: productName, resultType: 'MULTI_SET_PICKER', askingPrice: sellerPrice, verdict: 'NO_DATA', lensMatches: (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || ''), lensSelected: vote.selectedTitle, langToggle: language, country, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: null, gradingCompany: null, grade: null, matchType: null });
               return res.json({
                 type: 'CARD_RESULT',
                 card_name: vote.nameEN,
@@ -4580,7 +4580,7 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
-          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+          const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
             type: 'CARD_RESULT',
@@ -4635,7 +4635,7 @@ app.post('/scan', async (req, res) => {
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
         const ebayTopResults2 = trimListingsForLog(result.listings);
         const _gf = computeGradingFields(detectedGrade, result);
-        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
+        const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
       }
 
@@ -4760,7 +4760,7 @@ app.post('/scan', async (req, res) => {
       const webRoute = !productName ? 'lens-failed' : usesShopping ? 'lens-web-shopping' : 'lens-web-fallback';
       const webVerdict = computeVerdict(sellerPrice, medianPrice);
       const lensMatchTitles3 = (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || '');
-      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, shoppingQuery: loggedShoppingQuery, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length, lensMatches: lensMatchTitles3, lensSelected: productName, langToggle: language, country, productCategory: 'Other', variant: 'Raw', gradingCompany: null, grade: null, matchType: medianPrice ? 'raw' : 'none' });
+      const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: webRoute, productName, lensProductName: productName, shoppingQuery: loggedShoppingQuery, resultType: medianPrice ? 'WEB_RESULT' : 'NO_DATA', marketPrice: medianPrice, askingPrice: sellerPrice, verdict: webVerdict, sourcesCount: finalCards.length, lensMatches: lensMatchTitles3, lensSelected: productName, langToggle: language, country, productCategory: 'Other', variant: 'Raw', gradingCompany: null, grade: null, matchType: medianPrice ? 'raw' : 'none' });
 
       return res.json({
         type: 'WEB_RESULT',
@@ -4874,9 +4874,9 @@ app.post('/scan', async (req, res) => {
       if (mp) {
         const askP = result.seller_asking_price ?? null;
         const verdict = computeVerdict(askP, mp);
-        scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0, langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: mp ? 'raw' : 'none' });
+        scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, platform: params.client ?? null, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: result.ebay_search ?? params.cardName, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, verdict, ebaySalesCount: result.ebay_sales_count ?? 0, langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: mp ? 'raw' : 'none' });
       } else {
-        scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA', langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: 'none' });
+        scanLogIdOut = await logScan({ userEmail: manualUser?.email, userName: manualUser?.name, platform: params.client ?? null, domTitle: params.cardName, route: 'manual-lookup', productName: result.card_name, ebayQuery: params.cardName, resultType: 'NO_DATA', verdict: 'NO_DATA', langToggle: params.language, productCategory: 'Pokemon', variant: 'Raw', gradingCompany: null, grade: null, matchType: 'none' });
       }
     } else {
       return res.status(400).json({ error: 'unknown_type', type });
