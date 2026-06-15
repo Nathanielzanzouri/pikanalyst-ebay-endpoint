@@ -363,6 +363,68 @@ app.get('/diag/finding-test', async (req, res) => {
   }
 });
 
+// TEMPORARY diagnostic — confirms SerpApi's eBay engine returns the same
+// "sold listings" data as the public eBay sold URL. Same SERPAPI_KEY we
+// already use for Lens. Delete after validation.
+//   /diag/serpapi-ebay-test?q=mew+327/190&domain=ebay.fr&num=20
+app.get('/diag/serpapi-ebay-test', async (req, res) => {
+  if (!process.env.SERPAPI_KEY) return res.status(500).json({ error: 'SERPAPI_KEY missing' });
+  const q = (req.query.q || 'mew 327/190').toString();
+  const domain = (req.query.domain || 'ebay.fr').toString();
+  const num = parseInt(req.query.num, 10) || 20;
+  const params = new URLSearchParams({
+    engine: 'ebay',
+    _nkw: q,
+    ebay_domain: domain,
+    show_only: 'Sold',           // sold listings only (= LH_Sold=1)
+    _ipg: String(num),
+    api_key: process.env.SERPAPI_KEY,
+  });
+  try {
+    const t0 = Date.now();
+    const r = await fetch('https://serpapi.com/search.json?' + params, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    const elapsed = Date.now() - t0;
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      return res.json({ ok: false, status: r.status, elapsed_ms: elapsed, body_preview: text.slice(0, 400) });
+    }
+    const data = await r.json();
+    const organic = data?.organic_results ?? data?.search_results ?? [];
+    const meta = data?.search_metadata ?? {};
+    const info = data?.search_information ?? {};
+    // Heuristic price + date extraction from SerpApi eBay results
+    const sample = organic.slice(0, 10).map(i => ({
+      title:      i.title,
+      price:      (i.price && (i.price.extracted ?? i.price.value)) ?? i.price ?? null,
+      currency:   i.price?.currency ?? null,
+      condition:  i.condition,
+      sold_date:  i.sold_date ?? i.date ?? null,  // shape may differ
+      seller:     i.seller?.username ?? i.seller_username ?? null,
+      country:    i.location ?? i.shipping_location ?? null,
+      thumb:      i.thumbnail,
+      link:       i.link,
+    }));
+    res.json({
+      ok: true,
+      status: meta.status,
+      elapsed_ms: elapsed,
+      serpapi_id: meta.id,
+      ebay_url_scraped: meta.ebay_url,
+      query: q,
+      domain,
+      total_results: info.total_results,
+      organic_count: organic.length,
+      sample,
+      // Optionally include the first raw item for shape inspection
+      raw_first_item: organic[0] ?? null,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Version probe — returns true only when sneaker-id is loaded, i.e. this build
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
