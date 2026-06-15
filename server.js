@@ -299,6 +299,70 @@ app.get('/diag/gemini-ping', async (req, res) => {
   }
 });
 
+// TEMPORARY diagnostic — confirms Finding API access + returns raw items so
+// we can verify "real sold listings only" before re-enabling Finding on the
+// hot path. Delete after validation. No auth — only takes a query string.
+//   /diag/finding-test?q=mew+327/190&market=EBAY-FR&days=30
+app.get('/diag/finding-test', async (req, res) => {
+  const q = (req.query.q || 'mew 327/190').toString();
+  const market = (req.query.market || 'EBAY-FR').toString();
+  const days = parseInt(req.query.days, 10) || 90;
+  const ebayAppId = process.env.EBAY_APP_ID;
+  if (!ebayAppId) return res.status(500).json({ error: 'EBAY_APP_ID missing' });
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const qs = [
+    `GLOBAL-ID=${market}`,
+    'OPERATION-NAME=findCompletedItems',
+    'SERVICE-VERSION=1.0.0',
+    `SECURITY-APPNAME=${encodeURIComponent(ebayAppId)}`,
+    'RESPONSE-DATA-FORMAT=JSON',
+    `keywords=${encodeURIComponent(q)}`,
+    'paginationInput.entriesPerPage=20',
+    'sortOrder=EndTimeSoonest',
+    'itemFilter(0).name=SoldItemsOnly',
+    'itemFilter(0).value=true',
+    'itemFilter(1).name=EndTimeFrom',
+    `itemFilter(1).value=${since}`,
+  ].join('&');
+  try {
+    const t0 = Date.now();
+    const r = await fetch(`https://svcs.ebay.com/services/search/FindingService/v1?${qs}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const elapsed = Date.now() - t0;
+    const status = r.status;
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      return res.json({ ok: false, status, elapsed_ms: elapsed, body_preview: text.slice(0, 400) });
+    }
+    const data = await r.json();
+    const root = data?.findCompletedItemsResponse?.[0];
+    const ack  = root?.ack?.[0];
+    const errMsg = root?.errorMessage?.[0]?.error?.[0]?.message?.[0];
+    const errId  = root?.errorMessage?.[0]?.error?.[0]?.errorId?.[0];
+    const items = root?.searchResult?.[0]?.item ?? [];
+    const sample = items.slice(0, 10).map(i => ({
+      title:        i.title?.[0],
+      price:        i.sellingStatus?.[0]?.currentPrice?.[0]?.__value__,
+      currency:     i.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'],
+      sellingState: i.sellingStatus?.[0]?.sellingState?.[0],  // "EndedWithSales" = sold
+      endTime:      i.listingInfo?.[0]?.endTime?.[0],
+      country:      i.country?.[0],
+    }));
+    res.json({
+      ok: ack === 'Success',
+      status, elapsed_ms: elapsed,
+      ack, errId: errId ?? null, errMsg: errMsg ?? null,
+      query: q, market, days, since,
+      total_items_returned: items.length,
+      total_sold_state: items.filter(i => i.sellingStatus?.[0]?.sellingState?.[0] === 'EndedWithSales').length,
+      sample,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Version probe — returns true only when sneaker-id is loaded, i.e. this build
 // has the SKU-based sneaker pipeline. Used to verify which build Render is running.
 app.get('/version', (req, res) => {
