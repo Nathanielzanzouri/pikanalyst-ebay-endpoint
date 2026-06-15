@@ -394,8 +394,9 @@ app.get('/diag/serpapi-ebay-test', async (req, res) => {
     const organic = data?.organic_results ?? data?.search_results ?? [];
     const meta = data?.search_metadata ?? {};
     const info = data?.search_information ?? {};
+    const sliceN = parseInt(req.query.slice, 10) || 10;
     // Heuristic price + date extraction from SerpApi eBay results
-    const sample = organic.slice(0, 10).map(i => ({
+    const sample = organic.slice(0, sliceN).map(i => ({
       title:      i.title,
       price:      (i.price && (i.price.extracted ?? i.price.value)) ?? i.price ?? null,
       currency:   i.price?.currency ?? null,
