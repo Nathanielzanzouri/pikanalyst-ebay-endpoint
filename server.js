@@ -735,6 +735,33 @@ function isSpecialEdition(title) {
   ].some(kw => lower.includes(kw));
 }
 
+// Reject TAG TEAM Pokémon cards (two Pokémon paired on one card, "X & Y GX")
+// when the user is scanning a single-Pokémon card. TAG TEAMs share part of the
+// name with the single card (e.g. Reshiram GX SM137 vs Reshiram & Charizard GX
+// 016/173) and pollute the median via eBay's loose relevance matching.
+// Scan ee706ec5: 9 of 10 returned listings were tag teams, median €47 instead
+// of the real ~€12 for the SM137 promo.
+function isTagTeamCard(title) {
+  if (!title) return false;
+  // Explicit "Tag Team" keyword in title.
+  if (/\btag\s*team\b/i.test(title)) return true;
+  // Two adjacent words connected by &/et/and immediately followed by GX
+  // (with optional space or hyphen). Examples that match:
+  //   "Reshiram & Charizard GX", "Reshiram et Dracaufeu GX",
+  //   "Pikachu and Eevee GX", "Reshiram & Charizard-GX"
+  if (/\b[a-zA-Zéèêëàâäïîôöùûüç]+\s+(?:&|et|and)\s+[a-zA-Zéèêëàâäïîôöùûüç]+[\s-]*gx\b/i.test(title)) return true;
+  return false;
+}
+
+// True when the user is intentionally scanning a tag team — used to exempt
+// tag-team listings from the isTagTeamCard filter. Symmetric with the listing
+// detector (same regex), so a user query like "Reshiram & Charizard GX SM12a"
+// is treated as a tag-team scan and tag-team listings stay in the median.
+function userIsScanningTagTeam(card) {
+  const haystack = ((card && card.card_name) || '') + ' ' + ((card && card.ebay_search) || '');
+  return isTagTeamCard(haystack);
+}
+
 // Reject listings whose primary item is an accessory rather than a card:
 // acrylic display cases, art prints, fan-art / custom-made replicas, playmats.
 // Conservative keyword list — validated against 60 days of scan_logs
@@ -1809,7 +1836,10 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
     // is too weak a match). Scoped to non-OP / non-JP-promo because those
     // paths already enforce their own number checks.
     const isGradedScan = !!card._gradeFilter && !isOpScan && !isJpPromoScan;
-    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, accessoryOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0, gradedNoIdentityOut = 0;
+    // Tag-team filtering context: only reject tag-team listings when the
+    // user is NOT scanning a tag-team card themselves.
+    const userScansTagTeam = userIsScanningTagTeam(card);
+    let gradedOut = 0, lotOut = 0, boostersOut = 0, figuresOut = 0, multichoiceOut = 0, specialOut = 0, accessoryOut = 0, tagTeamOut = 0, opCrossGameOut = 0, opSealedOut = 0, opNoKeywordOut = 0, opNoNumberOut = 0, jpPromoNoSkuOut = 0, gradedNoIdentityOut = 0;
     const cleanItems = combined.filter(i => {
       const t = i.title ?? '';
       if (!titleFilter(t))    { gradedOut++;     return false; }
@@ -1819,6 +1849,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       if (isMultiChoice(t))   { multichoiceOut++;return false; }
       if (isSpecialEdition(t)){ specialOut++;    return false; }
       if (isCardAccessory(t)) { accessoryOut++;  return false; }
+      if (!userScansTagTeam && isTagTeamCard(t)) { tagTeamOut++; return false; }
       // OP-specific filters (only when category=OnePiece). See Finding-API
       // equivalent above for full rationale.
       if (isOpScan && isOnePieceCrossGame(t))                          { opCrossGameOut++; return false; }
@@ -1835,7 +1866,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       return true;
     });
 
-    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | accessory=${accessoryOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''}${isGradedScan ? ` | graded_no_identity=${gradedNoIdentityOut}` : ''} | clean=${cleanItems.length} | query: "${query}"`);
+    console.log(`[Pikanalyst] Browse raw: ${combined.length} | FR: ${frCount} | US: ${usCount} | DE: ${deCount} | graded=${gradedOut} | lots=${lotOut} | boosters=${boostersOut} | figurines=${figuresOut} | multichoice=${multichoiceOut} | special=${specialOut} | accessory=${accessoryOut} | tagteam=${tagTeamOut}${isOpScan ? ` | op_crossgame=${opCrossGameOut} | op_sealed=${opSealedOut} | op_no_number=${opNoNumberOut} | op_no_kw=${opNoKeywordOut}` : ''}${isGradedScan ? ` | graded_no_identity=${gradedNoIdentityOut}` : ''} | clean=${cleanItems.length} | query: "${query}" | userTagTeam=${userScansTagTeam}`);
 
     let identityItems = filterByCardIdentity(query, cleanItems, i => i.title ?? '', language);
 
@@ -4626,6 +4657,11 @@ app.post('/scan', async (req, res) => {
           .replace(/\bblack\s+star\b/gi, '')
           .replace(/\bcarte[s]?\s+/gi, '')
           .replace(/\bpok[ée]mon\b/gi, '')
+          // Strip known marketplace / seller SEO suffixes that contaminate
+          // eBay relevance. " - Collection" was responsible for scan
+          // ee706ec5 (Reshiram GX → median pulled to €47 by tag-team
+          // listings tagged "Collection"). Suffix-only — don't strip mid-string.
+          .replace(/\s*[-–—]\s*(collection|cc\s*planet|cards?\s*hunter|kinkai|pikadi-?collect|pokemoncarte|maniatcg|hamacards|pukaslab|cardmarket)\s*$/gi, '')
           .replace(/\s+/g, ' ')
           .trim();
         console.log('[Lakkot] Unified: Lens identified card →', productName, '→ cleaned:', cleanedName);
