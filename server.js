@@ -2182,7 +2182,14 @@ async function fetchPrices(card, language = 'WORLD', dateRange = 30) {
     ebay_sales_count:  ebay?.ebay_sales_count  ?? 0,
     ebay_url:          ebay?.ebay_url           ?? null,
     listings:          ebay?.listings          ?? [],
-    // Diagnostic: 'finding' | 'browse' | 'none' — which eBay API served this.
+    // Carry through fields from fetchEbayBrowse/buildBrowseShapeFromSerp so
+    // the /scan response can surface them and upsertSoldHistory has the raw
+    // SerpApi listings to insert.
+    low_confidence:    ebay?.low_confidence    ?? false,
+    bid_range:         ebay?.bid_range         ?? null,
+    _serpListings:     ebay?._serpListings     ?? null,
+    // Diagnostic: 'finding' | 'browse' | 'serpapi' | 'none' — which eBay
+    // source served this result.
     ebay_source:       ebay?._ebaySource        ?? 'none',
   };
 }
