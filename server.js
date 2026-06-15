@@ -214,6 +214,46 @@ function trimListingsForLog(listings) {
   }));
 }
 
+// Idempotent upsert of SerpApi listings into ebay_sold_history. Called fire-
+// and-forget after a successful SerpApi scan to accumulate the price history
+// over time (used by /card/history for the graph + recent-sales gallery).
+// Failures are logged but NEVER thrown — a Supabase outage must not break
+// the scan response.
+async function upsertSoldHistory({ cardName, cardNumber, language, marketDomain, listings }) {
+  if (!cardName || !cardNumber || !Array.isArray(listings) || !listings.length) return;
+  try {
+    const rows = listings.map(l => {
+      const eur = toEur(l.price_orig, l.currency_orig);
+      if (eur == null || eur <= 0) return null;
+      return {
+        card_name:      cardName,
+        card_number:    cardNumber,
+        language:       language || 'WORLD',
+        item_url:       l.item_url,
+        image_url:      l.image_url,
+        title:          l.title,
+        price_eur:      Math.round(eur * 100) / 100,
+        price_orig:     l.price_orig,
+        currency_orig:  l.currency_orig,
+        sold_date:      new Date(l.sold_date_ts).toISOString(),
+        seller_country: l.seller_country,
+        market_domain:  marketDomain,
+      };
+    }).filter(Boolean);
+    if (!rows.length) return;
+    const { error } = await supabase
+      .from('ebay_sold_history')
+      .upsert(rows, { onConflict: 'item_url', ignoreDuplicates: true });
+    if (error) {
+      console.warn('[Lakkot] upsertSoldHistory error:', error.message);
+    } else {
+      console.log('[Lakkot] upsertSoldHistory:', rows.length, 'rows for', cardName, cardNumber);
+    }
+  } catch (err) {
+    console.warn('[Lakkot] upsertSoldHistory threw:', err.message);
+  }
+}
+
 // ─── Gemini diagnostic endpoints (temp, no auth) ─────────────────────────────
 // /diag/gemini-models — lists models the configured key can access.
 // /diag/gemini-ping   — sends a 1-line text prompt to confirm key + model work
@@ -296,133 +336,6 @@ app.get('/diag/gemini-ping', async (req, res) => {
     return res.json({ status: r.status, model, grounded, body: text.slice(0, 800) });
   } catch (err) {
     return res.status(500).json({ error: err.message, model, grounded });
-  }
-});
-
-// TEMPORARY diagnostic — confirms Finding API access + returns raw items so
-// we can verify "real sold listings only" before re-enabling Finding on the
-// hot path. Delete after validation. No auth — only takes a query string.
-//   /diag/finding-test?q=mew+327/190&market=EBAY-FR&days=30
-app.get('/diag/finding-test', async (req, res) => {
-  const q = (req.query.q || 'mew 327/190').toString();
-  const market = (req.query.market || 'EBAY-FR').toString();
-  const days = parseInt(req.query.days, 10) || 90;
-  const ebayAppId = process.env.EBAY_APP_ID;
-  if (!ebayAppId) return res.status(500).json({ error: 'EBAY_APP_ID missing' });
-  const since = new Date(Date.now() - days * 86400000).toISOString();
-  const qs = [
-    `GLOBAL-ID=${market}`,
-    'OPERATION-NAME=findCompletedItems',
-    'SERVICE-VERSION=1.0.0',
-    `SECURITY-APPNAME=${encodeURIComponent(ebayAppId)}`,
-    'RESPONSE-DATA-FORMAT=JSON',
-    `keywords=${encodeURIComponent(q)}`,
-    'paginationInput.entriesPerPage=20',
-    'sortOrder=EndTimeSoonest',
-    'itemFilter(0).name=SoldItemsOnly',
-    'itemFilter(0).value=true',
-    'itemFilter(1).name=EndTimeFrom',
-    `itemFilter(1).value=${since}`,
-  ].join('&');
-  try {
-    const t0 = Date.now();
-    const r = await fetch(`https://svcs.ebay.com/services/search/FindingService/v1?${qs}`, {
-      signal: AbortSignal.timeout(8_000),
-    });
-    const elapsed = Date.now() - t0;
-    const status = r.status;
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      return res.json({ ok: false, status, elapsed_ms: elapsed, body_preview: text.slice(0, 400) });
-    }
-    const data = await r.json();
-    const root = data?.findCompletedItemsResponse?.[0];
-    const ack  = root?.ack?.[0];
-    const errMsg = root?.errorMessage?.[0]?.error?.[0]?.message?.[0];
-    const errId  = root?.errorMessage?.[0]?.error?.[0]?.errorId?.[0];
-    const items = root?.searchResult?.[0]?.item ?? [];
-    const sample = items.slice(0, 10).map(i => ({
-      title:        i.title?.[0],
-      price:        i.sellingStatus?.[0]?.currentPrice?.[0]?.__value__,
-      currency:     i.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'],
-      sellingState: i.sellingStatus?.[0]?.sellingState?.[0],  // "EndedWithSales" = sold
-      endTime:      i.listingInfo?.[0]?.endTime?.[0],
-      country:      i.country?.[0],
-    }));
-    res.json({
-      ok: ack === 'Success',
-      status, elapsed_ms: elapsed,
-      ack, errId: errId ?? null, errMsg: errMsg ?? null,
-      query: q, market, days, since,
-      total_items_returned: items.length,
-      total_sold_state: items.filter(i => i.sellingStatus?.[0]?.sellingState?.[0] === 'EndedWithSales').length,
-      sample,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// TEMPORARY diagnostic — confirms SerpApi's eBay engine returns the same
-// "sold listings" data as the public eBay sold URL. Same SERPAPI_KEY we
-// already use for Lens. Delete after validation.
-//   /diag/serpapi-ebay-test?q=mew+327/190&domain=ebay.fr&num=20
-app.get('/diag/serpapi-ebay-test', async (req, res) => {
-  if (!process.env.SERPAPI_KEY) return res.status(500).json({ error: 'SERPAPI_KEY missing' });
-  const q = (req.query.q || 'mew 327/190').toString();
-  const domain = (req.query.domain || 'ebay.fr').toString();
-  const num = parseInt(req.query.num, 10) || 20;
-  const params = new URLSearchParams({
-    engine: 'ebay',
-    _nkw: q,
-    ebay_domain: domain,
-    show_only: 'Sold',           // sold listings only (= LH_Sold=1)
-    _ipg: String(num),
-    api_key: process.env.SERPAPI_KEY,
-  });
-  try {
-    const t0 = Date.now();
-    const r = await fetch('https://serpapi.com/search.json?' + params, {
-      signal: AbortSignal.timeout(15_000),
-    });
-    const elapsed = Date.now() - t0;
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      return res.json({ ok: false, status: r.status, elapsed_ms: elapsed, body_preview: text.slice(0, 400) });
-    }
-    const data = await r.json();
-    const organic = data?.organic_results ?? data?.search_results ?? [];
-    const meta = data?.search_metadata ?? {};
-    const info = data?.search_information ?? {};
-    const sliceN = parseInt(req.query.slice, 10) || 10;
-    // Heuristic price + date extraction from SerpApi eBay results
-    const sample = organic.slice(0, sliceN).map(i => ({
-      title:      i.title,
-      price:      (i.price && (i.price.extracted ?? i.price.value)) ?? i.price ?? null,
-      currency:   i.price?.currency ?? null,
-      condition:  i.condition,
-      sold_date:  i.sold_date ?? i.date ?? null,  // shape may differ
-      seller:     i.seller?.username ?? i.seller_username ?? null,
-      country:    i.location ?? i.shipping_location ?? null,
-      thumb:      i.thumbnail,
-      link:       i.link,
-    }));
-    res.json({
-      ok: true,
-      status: meta.status,
-      elapsed_ms: elapsed,
-      serpapi_id: meta.id,
-      ebay_url_scraped: meta.ebay_url,
-      query: q,
-      domain,
-      total_results: info.total_results,
-      organic_count: organic.length,
-      sample,
-      // Optionally include the first raw item for shape inspection
-      raw_first_item: organic[0] ?? null,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -611,6 +524,7 @@ async function claudeFetch(body, maxRetries = 3) {
 // excluded with a warning), the bid_range stats, and the single source of
 // truth for DEAL/FAIR/OVER thresholds (±15% symmetric).
 const { toEur, computeBidRange, computeVerdict } = require('./price-stats');
+const { fetchEbaySerpApi: serpApiSold } = require('./price-serpapi');
 
 // ─── Language helpers ─────────────────────────────────────────────────────────
 function applyLanguageToQuery(baseQuery, language) {
@@ -887,6 +801,25 @@ function isTagTeamCard(title) {
 function userIsScanningTagTeam(card) {
   const haystack = ((card && card.card_name) || '') + ' ' + ((card && card.ebay_search) || '');
   return isTagTeamCard(haystack);
+}
+
+// Same Pokémon card number can map to different language variants:
+//   - "Pikachu 173/165" exists in both SV: Scarlet & Violet 151 (EN) and
+//     "SV2a: Pokemon Card 151" (JP).
+// SerpApi/eBay return both variants when we query by number, polluting the
+// median across language tiers (JP version ~€30, EN version ~€80).
+// Rejects the wrong-language variant on EN/FR scans. JP scans already pass
+// through the upstream JP-keyword filter elsewhere.
+function isWrongLanguageVersion(title, scanLanguage) {
+  if (!title) return false;
+  const lower = title.toLowerCase();
+  if (scanLanguage === 'EN') {
+    return /\b(japanese|japonaise|japonais|jpn|sv2a|sv4a|s11a|s12a|s8a|s9a)\b/i.test(lower);
+  }
+  if (scanLanguage === 'FR') {
+    return /\b(japanese|japonaise|japonais|jpn|sv2a|sv4a|s11a|s12a|s8a|s9a|english only|eng only)\b/i.test(lower);
+  }
+  return false;
 }
 
 // Reject listings whose primary item is an accessory rather than a card:
@@ -2093,9 +2026,115 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
   throw new Error('Browse: 0 results for all queries and markets');
 }
 
+// Convert SerpApi sold listings into the exact return shape that
+// fetchEbayBrowse produces — so downstream code (handleCard, computeBidRange,
+// the /scan response builder, the Chrome extension) doesn't notice the
+// source swap. Same filter chain, same toEur, same outlier removal.
+function buildBrowseShapeFromSerp(serpResult, card, language, dateRange) {
+  if (!serpResult || !Array.isArray(serpResult.listings)) return null;
+  const titleFilter = makeGradedTitleFilter(card._gradeFilter);
+  const isOpScan = card._tcgCategory === 'OnePiece';
+  const isJpPromoScan = !isOpScan && /\b\d{1,3}\/[A-Z]{1,4}-?P\b/i.test(card.card_number || '');
+  const isGradedScan = !!card._gradeFilter && !isOpScan && !isJpPromoScan;
+  const userScansTagTeam = userIsScanningTagTeam(card);
+
+  let gradedOut=0, lotOut=0, boostersOut=0, figuresOut=0, multichoiceOut=0, specialOut=0, accessoryOut=0, tagTeamOut=0, wrongLangOut=0, opCrossGameOut=0, opSealedOut=0, opNoKeywordOut=0, opNoNumberOut=0, jpPromoNoSkuOut=0, gradedNoIdentityOut=0;
+  const cleanItems = serpResult.listings.filter(i => {
+    const t = i.title ?? '';
+    if (!titleFilter(t))    { gradedOut++;     return false; }
+    if (isLot(t))           { lotOut++;        return false; }
+    if (isBooster(t))       { boostersOut++;   return false; }
+    if (isFigurine(t))      { figuresOut++;    return false; }
+    if (isMultiChoice(t))   { multichoiceOut++;return false; }
+    if (isSpecialEdition(t)){ specialOut++;    return false; }
+    if (isCardAccessory(t)) { accessoryOut++;  return false; }
+    if (!userScansTagTeam && isTagTeamCard(t)) { tagTeamOut++; return false; }
+    if (isWrongLanguageVersion(t, language)) { wrongLangOut++; return false; }
+    if (isOpScan && isOnePieceCrossGame(t))                          { opCrossGameOut++; return false; }
+    if (isOpScan && isOnePieceSealedProduct(t))                      { opSealedOut++;    return false; }
+    if (isOpScan && !titleContainsCardNumber(t, card.card_number))   { opNoNumberOut++;  return false; }
+    if (isOpScan && !hasOnePieceKeyword(t))                          { opNoKeywordOut++; return false; }
+    if (isJpPromoScan && !titleContainsCardNumber(t, card.card_number)) { jpPromoNoSkuOut++; return false; }
+    if (isGradedScan && card.card_number && !titleContainsCardNumber(t, card.card_number)) { gradedNoIdentityOut++; return false; }
+    return true;
+  });
+
+  let identityItems = filterByCardIdentity(card.ebay_search || card.card_name || '', cleanItems, i => i.title ?? '', language);
+
+  if (dateRange && dateRange < 365) {
+    const cutoff = Date.now() - dateRange * 86400000;
+    identityItems = identityItems.filter(i => i.sold_date_ts >= cutoff);
+  }
+
+  console.log(`[Pikanalyst] SerpApi: ${serpResult.listings.length} raw | clean=${cleanItems.length} | identity=${identityItems.length} | dropped graded=${gradedOut} lots=${lotOut} boosters=${boostersOut} figurines=${figuresOut} multichoice=${multichoiceOut} special=${specialOut} accessory=${accessoryOut} tagteam=${tagTeamOut} wronglang=${wrongLangOut}`);
+
+  if (!identityItems.length) return null;
+
+  const rawPrices = identityItems
+    .map(i => toEur(i.price_orig, i.currency_orig))
+    .filter(v => v != null && v > 0);
+  if (!rawPrices.length) return null;
+
+  const prices = removeOutliers(rawPrices).sort((a, b) => a - b);
+  if (!prices.length) return null;
+  const median = prices[Math.floor(prices.length / 2)];
+
+  const listings = identityItems.slice(0, 10).map(i => {
+    const priceEur = toEur(i.price_orig, i.currency_orig);
+    return {
+      title:       i.title ?? '',
+      price:       priceEur != null ? Math.round(priceEur * 100) / 100 : null,
+      soldDate:    i.sold_date_ts ? new Date(i.sold_date_ts).toISOString() : null,
+      imageUrl:    i.image_url ?? null,
+      itemUrl:     i.item_url ?? null,
+      country:     i.seller_country ?? null,
+      listingType: i.buying_format === 'auction' ? 'Auction' : 'Fixed Price',
+      bidCount:    null,
+    };
+  }).filter(l => l.price != null);
+
+  const lowConfThreshold = parseInt(process.env.LOW_CONFIDENCE_THRESHOLD, 10) || 3;
+  const markets = [serpResult.domain];
+
+  return {
+    market_price_usd: Math.round(median * 100) / 100,
+    price_low_usd:    Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
+    price_high_usd:   Math.round(prices[Math.floor(prices.length * 0.90)] * 100) / 100,
+    ebay_sales_count: prices.length,
+    low_confidence:   prices.length < lowConfThreshold,
+    bid_range:        computeBidRange(prices, listings, dateRange),
+    gradedOut,
+    markets,
+    price_source:     'ebay',
+    ebay_url:         serpResult.ebay_url || `https://${serpResult.domain}/sch/i.html?_nkw=${encodeURIComponent(card.ebay_search || card.card_name || '')}&LH_Sold=1&LH_Complete=1`,
+    listings,
+    _serpListings:    identityItems,
+  };
+}
+
 async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const certId    = process.env.EBAY_CERT_ID;
+  // EBAY_SOURCE selects the data source. Default 'serpapi' since 2026-06-15
+  // (SerpApi's eBay engine = same backend as ebay.fr/sch/...&LH_Sold=1, the
+  // only reliable way to get truly-sold listings).
+  // Set EBAY_SOURCE=browse on Render to roll back to Browse API in 30 s.
+  const source = (process.env.EBAY_SOURCE || 'serpapi').toLowerCase();
+
+  if (source === 'serpapi') {
+    try {
+      const query = card.ebay_search || buildSearchQuery(card);
+      const serp  = await serpApiSold({ query, language });
+      const built = buildBrowseShapeFromSerp(serp, card, language, dateRange);
+      if (built) {
+        built._ebaySource = 'serpapi';
+        return built;
+      }
+    } catch (e) {
+      console.warn('[Lakkot] SerpApi eBay failed:', e.message, '→ falling back to Browse');
+    }
+  }
+
   // _ebaySource diagnostic: tag which API actually served the result, so
   // scan_logs.ebay_source tells us whether the Finding API still works in
   // production (Finding succeeded) or everything is running on the Browse
@@ -3245,6 +3284,119 @@ app.post('/scan/cardmarket', async (req, res) => {
     console.warn('[Lakkot] Cardmarket fetch failed:', err.message);
     return res.json({ cardmarket: null });
   }
+});
+
+// ─── /card/history — price-evolution graph + recent-sales for lakkot.com ────
+// Returns aggregated medians by bucket (day/week/month) + the top N most
+// recent listings. Reads from ebay_sold_history, populated by
+// upsertSoldHistory after every SerpApi scan. Web-only (extension ignores).
+const _cardHistoryCache = new Map();
+const CARD_HISTORY_TTL = 30 * 60 * 1000;
+function cardHistoryCacheGet(key) {
+  const entry = _cardHistoryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CARD_HISTORY_TTL) { _cardHistoryCache.delete(key); return null; }
+  return entry.data;
+}
+function cardHistoryCacheSet(key, data) { _cardHistoryCache.set(key, { data, ts: Date.now() }); }
+
+// Compute the trend label by comparing the median of the first 4 buckets vs
+// the last 4 buckets. Returns null when fewer than 8 buckets are available.
+function computeTrendLabel(chartData) {
+  if (!Array.isArray(chartData) || chartData.length < 8) return null;
+  const half = Math.floor(chartData.length / 2);
+  const firstHalf = chartData.slice(0, Math.min(4, half));
+  const lastHalf  = chartData.slice(-Math.min(4, half));
+  const med = arr => {
+    const sorted = arr.map(b => b.median_eur).filter(v => v != null).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+  const before = med(firstHalf);
+  const after  = med(lastHalf);
+  if (before == null || after == null || before === 0) return null;
+  const pctChange = (after - before) / before;
+  if (pctChange >= 0.10) return 'rising';
+  if (pctChange <= -0.10) return 'falling';
+  return 'stable';
+}
+
+app.get('/card/history', async (req, res) => {
+  const token       = (req.query.token || '').toString();
+  const cardName    = (req.query.card_name || '').toString().trim();
+  const cardNumber  = (req.query.card_number || '').toString().trim();
+  const language    = (req.query.language || 'WORLD').toString();
+  const bucket      = ['day', 'week', 'month'].includes((req.query.bucket || '').toString())
+    ? req.query.bucket.toString() : 'week';
+  const sinceDays   = Math.min(parseInt(req.query.since_days, 10) || 180, 365);
+  const recentLimit = Math.min(parseInt(req.query.recent_limit, 10) || 20, 100);
+
+  if (!token) return res.status(401).json({ error: 'token required' });
+  if (!cardName || !cardNumber) return res.status(400).json({ error: 'card_name and card_number required' });
+
+  const { data: user } = await supabase.from('users').select('id').eq('token', token).single();
+  if (!user) return res.status(401).json({ error: 'invalid token' });
+
+  const cacheKey = `${cardName}|${cardNumber}|${language}|${bucket}|${sinceDays}|${recentLimit}`;
+  const cached = cardHistoryCacheGet(cacheKey);
+  if (cached) return res.json(cached);
+
+  const sinceIso = new Date(Date.now() - sinceDays * 86400000).toISOString();
+
+  const { data: chartRows, error: chartErr } = await supabase.rpc('card_history_chart', {
+    p_card_name:   cardName,
+    p_card_number: cardNumber,
+    p_language:    language,
+    p_bucket:      bucket,
+    p_since_iso:   sinceIso,
+  });
+  if (chartErr) console.warn('[Lakkot] /card/history chart RPC error:', chartErr.message);
+
+  const { data: recentRows, error: recentErr } = await supabase
+    .from('ebay_sold_history')
+    .select('title, price_eur, sold_date, image_url, item_url, seller_country')
+    .eq('card_name', cardName)
+    .eq('card_number', cardNumber)
+    .eq('language', language)
+    .gte('sold_date', sinceIso)
+    .order('sold_date', { ascending: false })
+    .limit(recentLimit);
+  if (recentErr) console.warn('[Lakkot] /card/history recent error:', recentErr.message);
+
+  const { count: nTotal } = await supabase
+    .from('ebay_sold_history')
+    .select('id', { count: 'exact', head: true })
+    .eq('card_name', cardName)
+    .eq('card_number', cardNumber)
+    .eq('language', language);
+  const { data: firstSeenRow } = await supabase
+    .from('ebay_sold_history')
+    .select('sold_date')
+    .eq('card_name', cardName)
+    .eq('card_number', cardNumber)
+    .eq('language', language)
+    .order('sold_date', { ascending: true })
+    .limit(1);
+
+  const chartData = (chartRows || []).map(r => ({
+    bucket_start: r.bucket_start,
+    median_eur:   r.median_eur != null ? Math.round(r.median_eur * 100) / 100 : null,
+    n:            r.n,
+  }));
+
+  const response = {
+    card_name:    cardName,
+    card_number:  cardNumber,
+    language,
+    chart_data:   chartData,
+    recent_sales: recentRows || [],
+    trend:        computeTrendLabel(chartData),
+    first_seen:   firstSeenRow?.[0]?.sold_date ?? null,
+    n_total:      nTotal ?? 0,
+  };
+
+  cardHistoryCacheSet(cacheKey, response);
+  res.json(response);
 });
 
 // ─── Scan history per user ───────────────────────────────────────────────────
@@ -4473,6 +4625,13 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
+          upsertSoldHistory({
+            cardName:     opIdentity.character || result.card_name || '',
+            cardNumber:   opIdentity.card_number || result.card_number || '',
+            language,
+            marketDomain: result.markets?.[0] || null,
+            listings:     result._serpListings || [],
+          }).catch(() => {});
           const productLabel = [opIdentity.character, opIdentity.card_number].filter(Boolean).join(' ');
           const logId = await logScan({
             userEmail: scanUser?.email, userName: scanUser?.name, platform: client,
@@ -4606,6 +4765,13 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
+          upsertSoldHistory({
+            cardName:     vote?.nameEN || result.card_name || productName || '',
+            cardNumber:   vote?.number || (result.card_number || ''),
+            language,
+            marketDomain: result.markets?.[0] || null,
+            listings:     result._serpListings || [],
+          }).catch(() => {});
 
           // Multi-set ambiguity (if any) was already handled BEFORE the eBay
           // query — we returned a picker-only response there. Reaching this
@@ -4673,6 +4839,13 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
+          upsertSoldHistory({
+            cardName:     vote?.nameEN || result.card_name || productName || '',
+            cardNumber:   vote?.number || (result.card_number || ''),
+            language,
+            marketDomain: result.markets?.[0] || null,
+            listings:     result._serpListings || [],
+          }).catch(() => {});
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-jp-vote', productName: `${vote.nameEN} ${vote.number || ''} (JP)`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           // Flag when JP toggle couldn't find a JP-specific number (fell back to EN/FR promo)
@@ -4738,6 +4911,13 @@ app.post('/scan', async (req, res) => {
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
           const _gf = computeGradingFields(detectedGrade, result);
+          upsertSoldHistory({
+            cardName:     vote?.nameFR || vote?.nameEN || result.card_name || productName || '',
+            cardNumber:   vote?.number || (result.card_number || ''),
+            language,
+            marketDomain: result.markets?.[0] || null,
+            listings:     result._serpListings || [],
+          }).catch(() => {});
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
           return res.json({
@@ -4798,6 +4978,13 @@ app.post('/scan', async (req, res) => {
         const lensMatchTitles2 = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
         const ebayTopResults2 = trimListingsForLog(result.listings);
         const _gf = computeGradingFields(detectedGrade, result);
+        upsertSoldHistory({
+          cardName:     result.card_name || productName || '',
+          cardNumber:   result.card_number || '',
+          language,
+          marketDomain: result.markets?.[0] || null,
+          listings:     result._serpListings || [],
+        }).catch(() => {});
         const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
         return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
       }
