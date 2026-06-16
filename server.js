@@ -2522,7 +2522,7 @@ app.post('/auth/google', async (req, res) => {
     // Find or create user by email
     const { data: existing } = await supabase
       .from('users')
-      .select('id, token, plan, scan_count, scan_reset_at, scan_limit_override, name, picture')
+      .select('id, token, plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override, name, picture')
       .eq('email', email)
       .single();
 
@@ -2538,31 +2538,29 @@ app.post('/auth/google', async (req, res) => {
       const { data: newUser, error: insertError } = await supabase
         .from('users')
         .insert({ email, name, picture, plan: 'free' })
-        .select('id, token, plan, scan_count, scan_reset_at, scan_limit_override')
+        .select('id, token, plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override')
         .single();
       if (insertError) throw insertError;
       user = newUser;
     }
 
-    // Reset monthly count if new month
-    const month = currentMonth();
-    if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
-      await supabase.from('users').update({ scan_count: 0, scan_reset_at: month }).eq('id', user.id);
-      user.scan_count = 0;
-    }
-
     const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
+    const used = (user.plan === 'free')
+      ? (user.free_scans_used ?? 0)
+      : (user.monthly_scans_used ?? 0);
 
-    console.log('[Lakkot] Google auth OK:', email, '| plan:', user.plan, '| scans:', user.scan_count + '/' + limit);
+    console.log('[Lakkot] Google auth OK:', email, '| plan:', user.plan, '| scans:', used + '/' + limit);
 
     return res.json({
-      token: user.token,
+      token:          user.token,
       email,
       name,
       picture,
-      plan: user.plan || 'free',
-      scanCount: user.scan_count,
-      scanLimit: limit,
+      plan:           user.plan || 'free',
+      scanCount:      used,                                // back-compat for extension
+      scanLimit:      limit,
+      topupBalance:   user.topup_balance ?? 0,
+      remaining:      Math.max(0, limit - used) + (user.topup_balance ?? 0),
     });
   } catch (err) {
     console.error('[Lakkot] /auth/google error:', err.message);
@@ -2715,21 +2713,31 @@ app.get('/me', async (req, res) => {
 
   const { data: user } = await supabase
     .from('users')
-    .select('email, plan, scan_count, scan_reset_at, scan_limit_override')
+    .select('email, plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override')
     .eq('token', token)
     .single();
 
   if (!user) return res.status(401).json({ error: 'invalid_token' });
 
-  // Reset count if it's a new month
-  const month = currentMonth();
-  let scanCount = user.scan_count;
-  if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) scanCount = 0;
-
+  // Read the right counter based on plan. Free plan uses lifetime
+  // free_scans_used (never resets); pro/power use monthly_scans_used
+  // (reset by Stripe billing cycle webhook).
   const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
-  const remaining = Math.max(0, limit - scanCount);
+  const used = (user.plan === 'free')
+    ? (user.free_scans_used ?? 0)
+    : (user.monthly_scans_used ?? 0);
+  const topup = user.topup_balance ?? 0;
+  const remaining = Math.max(0, limit - used) + topup;
 
-  return res.json({ email: user.email, plan: user.plan, scan_count: scanCount, limit, remaining });
+  return res.json({
+    email:          user.email,
+    plan:           user.plan,
+    scan_count:     used,          // back-compat field name (extension reads this)
+    limit,
+    remaining,
+    plan_remaining: Math.max(0, limit - used),
+    topup_balance:  topup,
+  });
 });
 
 async function handleMatchListings({ imageBase64, listings }) {
@@ -4375,12 +4383,28 @@ app.post('/scan', async (req, res) => {
           });
         }
 
-        // Build a quota object for the response. Prefer the RPC's own shape
-        // when present; otherwise compute from PLAN_LIMITS as a fallback.
-        const planLimit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
-        quota = rpcResult?.quota
-          ? { ...rpcResult.quota, limit: rpcResult.quota.limit ?? planLimit }
-          : { count: null, remaining: rpcResult?.remaining ?? null, limit: planLimit };
+        // After the RPC mutation, re-read the user's counters to build a
+        // quota object that's always consistent regardless of what the RPC
+        // returns. Extension (old code) reads quota.remaining + quota.limit
+        // for display; need real numbers, not nulls.
+        const { data: updated } = await supabase
+          .from('users')
+          .select('plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override')
+          .eq('id', user.id)
+          .single();
+        const planLimit = (updated?.scan_limit_override) ?? (PLAN_LIMITS[updated?.plan] ?? PLAN_LIMITS.free);
+        const used = (updated?.plan === 'free')
+          ? (updated?.free_scans_used ?? 0)
+          : (updated?.monthly_scans_used ?? 0);
+        const topup = updated?.topup_balance ?? 0;
+        quota = {
+          count:          used,
+          limit:          planLimit,
+          remaining:      Math.max(0, planLimit - used) + topup,
+          plan_remaining: Math.max(0, planLimit - used),
+          topup_balance:  topup,
+          plan:           updated?.plan ?? user.plan,
+        };
       }
     }
 
