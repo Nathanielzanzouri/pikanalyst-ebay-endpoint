@@ -397,8 +397,14 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Plan monthly limits
-const PLAN_LIMITS = { free: 20, pro: 200, power: 1500 };
+// Plan limits (updated 2026-06-16 with new pricing tiers from Lovable):
+//   free  → 20 scans lifetime (via free_scans_used, never resets)
+//   pro   → 100 scans / month (via monthly_scans_used, resets at billing cycle)
+//   power → 250 scans / month (via monthly_scans_used)
+// + topup_balance (never expires) for pro/power overflow
+// Used for display purposes (/me, /auth/google response). The actual
+// quota enforcement is in the consume_scan Supabase RPC.
+const PLAN_LIMITS = { free: 20, pro: 100, power: 250 };
 
 // Get current month as YYYY-MM string
 function currentMonth() { return new Date().toISOString().slice(0, 7); }
@@ -4338,27 +4344,43 @@ app.post('/scan', async (req, res) => {
 
   // unified: auto-detect item type and route to correct pricing pipeline
   if (type === 'unified') {
-    // Track quota — increment scan count and return remaining
+    // Track quota via consume_scan RPC — single source of truth shared with
+    // the Lovable scan-proxy (web) so web + extension never double-count.
+    // RPC handles: free_scans_used (lifetime, 20), monthly_scans_used (pro/
+    // power), topup_balance (overflow). See spec from Lovable migration
+    // 2026-06-16. Falls back to allowing the scan if RPC errors — we never
+    // block a paying user because of a transient backend issue.
     let quota = null;
     let scanUser = null;
     if (token) {
-      const { data: user } = await supabase.from('users').select('id, email, name, plan, scan_count, scan_reset_at, scan_limit_override').eq('token', token).single();
+      const { data: user } = await supabase
+        .from('users')
+        .select('id, email, name, plan, scan_limit_override')
+        .eq('token', token)
+        .single();
       scanUser = user;
       if (user) {
-        const month = currentMonth();
-        if (!user.scan_reset_at || user.scan_reset_at.slice(0, 7) !== month) {
-          await supabase.from('users').update({ scan_count: 1, scan_reset_at: month }).eq('id', user.id);
-          user.scan_count = 1;
-        } else {
-          await supabase.from('users').update({ scan_count: user.scan_count + 1 }).eq('id', user.id);
-          user.scan_count += 1;
+        const { data: rpcResult, error: rpcError } = await supabase.rpc('consume_scan', { p_user_id: user.id });
+        if (rpcError) {
+          console.warn('[Lakkot] consume_scan RPC error:', rpcError.message, '— fail-open (allowing scan)');
+        } else if (rpcResult && (rpcResult.blocked === true || rpcResult.allowed === false)) {
+          // RPC says blocked — surface the reason so the client can show the
+          // right CTA (Free → upgrade; Pro/Power → top-up + upgrade-to-Power).
+          const planLimit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
+          return res.json({
+            type: 'LIMIT_REACHED',
+            reason: rpcResult.reason || 'quota_exhausted',
+            plan: user.plan,
+            quota: rpcResult.quota || { count: planLimit, remaining: 0, limit: planLimit },
+          });
         }
-        const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
-        quota = { count: user.scan_count, remaining: Math.max(0, limit - user.scan_count), limit };
 
-        if (user.scan_count > limit) {
-          return res.json({ type: 'LIMIT_REACHED', quota });
-        }
+        // Build a quota object for the response. Prefer the RPC's own shape
+        // when present; otherwise compute from PLAN_LIMITS as a fallback.
+        const planLimit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
+        quota = rpcResult?.quota
+          ? { ...rpcResult.quota, limit: rpcResult.quota.limit ?? planLimit }
+          : { count: null, remaining: rpcResult?.remaining ?? null, limit: planLimit };
       }
     }
 
