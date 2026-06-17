@@ -2118,6 +2118,85 @@ function buildBrowseShapeFromSerp(serpResult, card, language, dateRange) {
   };
 }
 
+// Tier-2 cache backed by ebay_sold_history Supabase table. When a scan comes
+// in for a card we've recently fetched (last 7 days), serve the median from
+// stored listings instead of calling SerpApi again. Saves 30-50% of SerpApi
+// calls in steady-state. The listings themselves are immutable (a sale is a
+// sale), and within a 7-day window the price distribution is stable enough
+// for confident bidding decisions. Data older than 7 days triggers a fresh
+// SerpApi call which adds new listings on top of the existing history.
+//
+// TTL is configurable via EBAY_DB_CACHE_TTL_DAYS env (default 7).
+// Disable entirely with EBAY_USE_DB_CACHE=false.
+async function tryDbCache(card, language, dateRange) {
+  if (process.env.EBAY_USE_DB_CACHE === 'false') return null;
+  const cardName = card.card_name;
+  const cardNumber = card.card_number;
+  if (!cardName || !cardNumber) return null;
+
+  const ttlDays = parseInt(process.env.EBAY_DB_CACHE_TTL_DAYS, 10) || 7;
+  const minSamples = parseInt(process.env.LOW_CONFIDENCE_THRESHOLD, 10) || 3;
+  const cutoffSoldDate = new Date(Date.now() - dateRange * 86400000).toISOString();
+
+  try {
+    const { data: rows, error } = await supabase
+      .from('ebay_sold_history')
+      .select('title, price_eur, sold_date, image_url, item_url, seller_country, market_domain, captured_at')
+      .eq('card_name', cardName)
+      .eq('card_number', cardNumber)
+      .eq('language', language || 'WORLD')
+      .gte('sold_date', cutoffSoldDate)
+      .order('sold_date', { ascending: false })
+      .limit(120);
+    if (error) {
+      console.warn('[Lakkot] DB cache query error:', error.message);
+      return null;
+    }
+    if (!rows || rows.length < minSamples) return null;
+
+    // Freshness gate: is our most recent capture within the TTL window?
+    // If not, eBay has had time to record new sales we haven't seen yet —
+    // fall through to SerpApi to refresh.
+    const mostRecentCaptureMs = rows.reduce((max, r) => {
+      const ts = r.captured_at ? new Date(r.captured_at).getTime() : 0;
+      return ts > max ? ts : max;
+    }, 0);
+    const ageDays = (Date.now() - mostRecentCaptureMs) / 86400000;
+    if (ageDays > ttlDays) {
+      console.log(`[Lakkot] DB cache STALE (last capture ${ageDays.toFixed(1)}d > ${ttlDays}d) for ${cardName} ${cardNumber} → SerpApi`);
+      return null;
+    }
+
+    // Build a serpResult-shaped object and run it through the same
+    // filter + median + bid_range pipeline as a fresh SerpApi response.
+    const serpLike = {
+      listings: rows.map(r => ({
+        title:           r.title || '',
+        item_url:        r.item_url,
+        image_url:       r.image_url,
+        price_orig:      r.price_eur,
+        currency_orig:   'EUR',
+        sold_date_ts:    new Date(r.sold_date).getTime(),
+        seller_country:  r.seller_country,
+        condition:       null,
+        seller_username: null,
+        buying_format:   null,
+      })),
+      domain:      rows[0]?.market_domain || 'db_cache',
+      ebay_url:    null,
+      total_found: rows.length,
+    };
+    const built = buildBrowseShapeFromSerp(serpLike, card, language, dateRange);
+    if (built) {
+      console.log(`[Lakkot] DB cache HIT for ${cardName} ${cardNumber} (${rows.length} rows, fresh ${ageDays.toFixed(1)}d) — saved 1 SerpApi call`);
+    }
+    return built;
+  } catch (e) {
+    console.warn('[Lakkot] tryDbCache threw:', e.message);
+    return null;
+  }
+}
+
 async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
   const ebayAppId = process.env.EBAY_APP_ID;
   const certId    = process.env.EBAY_CERT_ID;
@@ -2128,6 +2207,13 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
   const source = (process.env.EBAY_SOURCE || 'serpapi').toLowerCase();
 
   if (source === 'serpapi') {
+    // Tier 2 — check the ebay_sold_history table for a fresh-enough sample
+    // before paying for a SerpApi call. See tryDbCache for the TTL logic.
+    const cached = await tryDbCache(card, language, dateRange);
+    if (cached) {
+      cached._ebaySource = 'db_cache';
+      return cached;
+    }
     try {
       const query = card.ebay_search || buildSearchQuery(card);
       const serp  = await serpApiSold({ query, language });
