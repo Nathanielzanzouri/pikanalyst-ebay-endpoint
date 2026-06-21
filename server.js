@@ -2687,6 +2687,48 @@ app.post('/stripe/checkout', async (req, res) => {
   }
 });
 
+// ─── Stripe: top-up checkout ─────────────────────────────────────────────────
+// One-time payment for +20 scans (€6.99). Available only to pro/power users
+// who already have a stripe_customer_id (i.e. went through a subscription
+// checkout at least once). Free users must upgrade first — they don't get
+// a top-up path by design (top-ups are an overflow product, not a primary
+// monetization). The webhook (purchase_type='topup') credits topup_balance
+// via the add_topup RPC.
+app.post('/stripe/checkout-topup', async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(401).json({ error: 'missing_token' });
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('email, plan, stripe_customer_id')
+    .eq('token', token)
+    .single();
+
+  if (!user) return res.status(401).json({ error: 'invalid_token' });
+  if (user.plan === 'free') {
+    return res.status(403).json({ error: 'upgrade_required', message: 'Top-ups are available for Pro and Power plans. Upgrade first.' });
+  }
+  if (!user.stripe_customer_id) {
+    return res.status(400).json({ error: 'no_customer', message: 'No Stripe customer on file. Complete a subscription first.' });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      customer: user.stripe_customer_id,
+      line_items: [{ price: STRIPE_PRICE_IDS.topup, quantity: 1 }],
+      success_url: 'https://lakkot.com/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: 'https://lakkot.com/pricing',
+      metadata: { email: user.email, purchase_type: 'topup' },
+    });
+    console.log('[Lakkot] Stripe topup checkout created:', session.id, '| email:', user.email);
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error('[Lakkot] Stripe topup checkout error:', err.message);
+    return res.status(500).json({ error: 'checkout_failed', detail: err.message });
+  }
+});
+
 // ─── Stripe: billing portal ──────────────────────────────────────────────────
 // Lets a paying user manage their subscription themselves — cancel, update
 // card, download invoices, switch plan. Required by French consumer law
@@ -2748,16 +2790,52 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (re
     return res.status(400).json({ error: 'invalid_signature' });
   }
 
-  console.log('[Lakkot] Stripe webhook event:', event.type);
+  console.log('[Lakkot] Stripe webhook event:', event.type, event.id);
+
+  // Idempotency: Stripe retries webhooks on non-2xx or timeout. Without this,
+  // a retried checkout.session.completed for a top-up would credit +20 scans
+  // twice. We insert the event.id first; PRIMARY KEY conflict (code 23505)
+  // means we already processed it.
+  const { error: dupErr } = await supabase
+    .from('stripe_webhook_events')
+    .insert({ event_id: event.id, event_type: event.type, payload: event });
+  if (dupErr) {
+    if (dupErr.code === '23505') {
+      console.log('[Lakkot] Stripe webhook: duplicate event, skipping', event.id);
+      return res.json({ received: true, duplicate: true });
+    }
+    console.error('[Lakkot] Stripe webhook: idempotency insert failed:', dupErr.message);
+    // Soft-fail: continue processing — losing one webhook row is better than
+    // dropping a paid checkout. Worst case: same event processed twice (rare).
+  }
 
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const email = session.customer_email || session.metadata?.email;
-    const plan = session.metadata?.plan || 'pro';
     const customerId = session.customer;
+    const purchaseType = session.metadata?.purchase_type || 'subscription';
 
-    if (email) {
-      // Plan upgrade: change plan and set new limit
+    if (purchaseType === 'topup') {
+      // One-time top-up purchase: credit +20 scans to topup_balance.
+      // RPC: add_topup(_stripe_customer_id, _amount) — looks up user by
+      // stripe_customer_id (which must already exist since only pro/power
+      // can buy top-ups, see /stripe/checkout-topup).
+      if (!customerId) {
+        console.error('[Lakkot] Stripe webhook: topup without customer id, skipping');
+      } else {
+        const { error } = await supabase.rpc('add_topup', {
+          _stripe_customer_id: customerId,
+          _amount: 20,
+        });
+        if (error) {
+          console.error('[Lakkot] Stripe webhook: topup credit failed:', error.message);
+        } else {
+          console.log('[Lakkot] Stripe webhook: topup +20 scans for customer', customerId);
+        }
+      }
+    } else if (email) {
+      // Subscription upgrade: change plan and set new limit
+      const plan = session.metadata?.plan || 'pro';
       const newLimit = PLAN_LIMITS[plan] || 200;
       const { error } = await supabase
         .from('users')
