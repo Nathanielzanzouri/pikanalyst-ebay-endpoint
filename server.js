@@ -2658,8 +2658,9 @@ app.post('/auth/google', async (req, res) => {
 // LIVE price IDs (not secret — safe in source). These must match the live
 // STRIPE_SECRET_KEY this server runs with, or checkout fails with "No such price".
 const STRIPE_PRICE_IDS = {
-  pro:   'price_1TX4ZxGZw1nrPqC9veIVB053', // Lakkot Pro — €9.99/mo / 200 scans (live)
-  power: 'price_1TX4aJGZw1nrPqC96PZn8Dym', // Lakkot Power — €39.99/mo / 1500 scans (live)
+  pro:   'price_1TiwnQGZw1nrPqC9zoaTUDm3', // Lakkot Pro — €14.99/mo / 100 scans (live)
+  power: 'price_1TiwqGGZw1nrPqC9rhH63Kn1', // Lakkot Power — €29.99/mo / 250 scans (live)
+  topup: 'price_1TiwruGZw1nrPqC9Ly0Bm7ao', // Lakkot Top-up — €6.99 one-time / +20 scans (live)
 };
 
 app.post('/stripe/checkout', async (req, res) => {
