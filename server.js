@@ -1219,6 +1219,20 @@ function isForeignPromoTitle(title, targetLang) {
   return false;
 }
 
+// Normalize standard "N/M" card numbers to zero-padded form ("8/64" → "008/064")
+// so the vote at extractPokemonFromMatches treats them as the same number.
+// Without this, Lens variants of the same card ("Karte japanisch ... 8/64" and
+// "CHARIZARD/BRAIXEN GX 008/064") split their votes and lose to a single stray
+// secret-rare title (067/064 SR) by insertion-order tiebreak. Only touches
+// pure "digits/digits" — promo formats (SVP027, 098/SV-P, etc.) keep their
+// existing shape since those go through normalizePromoNumber instead.
+function normalizeCardNumber(raw) {
+  if (!raw) return raw;
+  const m = String(raw).trim().match(/^(\d{1,3})\s*\/\s*(\d{1,3})$/);
+  if (m) return `${m[1].padStart(3, '0')}/${m[2].padStart(3, '0')}`;
+  return raw;
+}
+
 function normalizePromoNumber(raw) {
   if (!raw) return raw;
   const s = String(raw).trim();
@@ -1283,13 +1297,13 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
           // Verify it's not a date
           const afterIdx = title.indexOf(numMatch[0]) + numMatch[0].length;
           if (title[afterIdx] !== '/') {
-            nameWithNumber.push({ name: lower, nameEN: en, number: numMatch[1], title, lang: titleLang });
+            nameWithNumber.push({ name: lower, nameEN: en, number: normalizeCardNumber(numMatch[1]), title, lang: titleLang });
           }
         } else {
           // Try dash-separated format: "033-106-SV8-B" → "033/106"
           const dashMatch = title.match(dashNumRe);
           if (dashMatch) {
-            nameWithNumber.push({ name: lower, nameEN: en, number: `${dashMatch[1]}/${dashMatch[2]}`, title, lang: titleLang });
+            nameWithNumber.push({ name: lower, nameEN: en, number: normalizeCardNumber(`${dashMatch[1]}/${dashMatch[2]}`), title, lang: titleLang });
           } else {
             // Try promo code: SVP044, SVPFR 044, etc.
             const promoMatch = title.match(PROMO_CODE_RE);
