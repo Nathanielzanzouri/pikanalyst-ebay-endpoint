@@ -2668,6 +2668,85 @@ app.post('/auth/google', async (req, res) => {
   }
 });
 
+// ─── Email magic-link auth ───────────────────────────────────────────────────
+// Mirror of /auth/google but for users who don't have a Google account.
+// The flow:
+//   1. Frontend (lakkot.com via Lovable) calls supabase.auth.signInWithOtp({ email })
+//   2. Supabase emails the user a magic link
+//   3. User clicks the link → Supabase auto-creates a session (JWT)
+//   4. Frontend grabs session.access_token and POSTs here
+//   5. We validate the JWT against Supabase Auth (service-role client),
+//      extract the email, then find/create the Lakkot user row by email
+//      and return the same payload shape as /auth/google
+// Same-email login is intentional: a user who first signed in with Google
+// and later uses email magic link with the same address lands on the same
+// `users` row (Lakkot account is keyed by email, not by auth provider).
+app.post('/auth/email', async (req, res) => {
+  const { supabase_jwt } = req.body;
+  if (!supabase_jwt) {
+    return res.status(400).json({ error: 'missing_token' });
+  }
+
+  try {
+    const { data, error } = await supabase.auth.getUser(supabase_jwt);
+    if (error || !data?.user?.email) {
+      console.warn('[Lakkot] /auth/email: invalid JWT:', error?.message);
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    const email = data.user.email;
+    // user_metadata is set by Supabase when the OAuth provider supplies a
+    // name/avatar — for plain magic link it's usually empty. Fall back to
+    // the local-part of the email so the UI has something to display.
+    const meta = data.user.user_metadata || {};
+    const name = meta.full_name || meta.name || email.split('@')[0];
+    const picture = meta.avatar_url || meta.picture || null;
+
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id, token, plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override, name, picture')
+      .eq('email', email)
+      .single();
+
+    let user;
+    if (existing) {
+      if (existing.name !== name || existing.picture !== picture) {
+        await supabase.from('users').update({ name, picture }).eq('id', existing.id);
+      }
+      user = existing;
+    } else {
+      const { data: newUser, error: insertError } = await supabase
+        .from('users')
+        .insert({ email, name, picture, plan: 'free' })
+        .select('id, token, plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override')
+        .single();
+      if (insertError) throw insertError;
+      user = newUser;
+    }
+
+    const limit = user.scan_limit_override ?? (PLAN_LIMITS[user.plan] ?? PLAN_LIMITS.free);
+    const used = (user.plan === 'free')
+      ? (user.free_scans_used ?? 0)
+      : (user.monthly_scans_used ?? 0);
+
+    console.log('[Lakkot] Email magic-link auth OK:', email, '| plan:', user.plan, '| scans:', used + '/' + limit);
+
+    return res.json({
+      token:        user.token,
+      email,
+      name,
+      picture,
+      plan:         user.plan || 'free',
+      scanCount:    used,
+      scanLimit:    limit,
+      topupBalance: user.topup_balance ?? 0,
+      remaining:    Math.max(0, limit - used) + (user.topup_balance ?? 0),
+    });
+  } catch (err) {
+    console.error('[Lakkot] /auth/email error:', err.message);
+    return res.status(500).json({ error: 'auth_failed' });
+  }
+});
+
 // ─── Stripe: create checkout session ─────────────────────────────────────────
 // LIVE price IDs (not secret — safe in source). These must match the live
 // STRIPE_SECRET_KEY this server runs with, or checkout fails with "No such price".
