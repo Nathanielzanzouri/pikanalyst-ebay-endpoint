@@ -1242,6 +1242,72 @@ function normalizePromoNumber(raw) {
   return s;
 }
 
+// Pull a card-number from an explicit indicator pattern: "#009", "No. 9",
+// "Nr.20". These are unambiguous (the user/seller flagged it as a card
+// number) so we trust them even without a slash. Returns 3-digit-padded
+// string or null. Tried for every title, regardless of language.
+function extractIndicatorNumber(title) {
+  if (!title) return null;
+  // "#009", "# 9", "#9" — hash prefix
+  let m = title.match(/#\s*0*(\d{1,3})\b/);
+  if (m) return m[1].padStart(3, '0');
+  // "No.009", "No. 9", "Nr. 9" — number prefix (FR/EN/DE)
+  m = title.match(/\b(?:no|nr)\.?\s*0*(\d{1,3})\b/i);
+  if (m) return m[1].padStart(3, '0');
+  return null;
+}
+
+// Pull a bare card-number from a JP-detected title. Japanese retro sets
+// (Base Set, Team Rocket, Neo, e-Series) print numbers without a slash —
+// the canonical form is just "009", not "9/82". Western/EN/FR titles
+// already use slash format so they go through the cardNumRe path.
+//
+// Guards exclude common noise: grading scores (PSA 10, BGS 9.5), prices
+// (10€, $20), percentages, unit suffixes (g/k), and 4-digit years (already
+// excluded by \d{1,3}). Set context is required (passed by caller) so a
+// random "10" in a chat title doesn't get harvested. Returns 3-digit-padded
+// string or null. Only call when titleLang === 'JP'.
+function extractJpBareNumber(title) {
+  if (!title) return null;
+  // Scan all candidate digit runs and pick the first that passes guards.
+  // Using matchAll lets us check surrounding context per candidate without
+  // anchoring at start-of-string.
+  const matches = [...title.matchAll(/\b(\d{1,3})\b/g)];
+  for (const m of matches) {
+    const num = m[1];
+    const idx = m.index;
+    const before = title.slice(Math.max(0, idx - 6), idx);
+    const after = title.slice(idx + num.length, idx + num.length + 3);
+    // Skip grading scores: "PSA 10", "BGS 9.5", "CGC 8", etc.
+    if (/\b(psa|bgs|cgc|mnt|ags|tag|ars|gma|sgc)\s*$/i.test(before)) continue;
+    // Skip prices and percentages following the number
+    if (/^\s*[%€$£¥]/.test(after)) continue;
+    // Skip unit suffixes commonly attached to numbers in product titles
+    if (/^[gk]\b|^\s*(eur|usd|gbp|jpy)\b/i.test(after)) continue;
+    // Skip ordinals: "1st", "2nd", "3rd", "4th"
+    if (/^(st|nd|rd|th)\b/i.test(after)) continue;
+    // Skip 2-digit numbers preceded by "19"/"20" (year fragments like "20" in "2024")
+    if (num.length === 2 && /(19|20)$/.test(before)) continue;
+    return num.padStart(3, '0');
+  }
+  return null;
+}
+
+// Derive a vote key from any extracted number form. The padded numerator
+// is the shared identity across formats: "020/082" and "020" and "020"-from-
+// indicator all collapse to the same key "020". Promo formats (SVP027,
+// 098/SV-P) keep their full string since their numerator alone is ambiguous
+// across promo families.
+function numberVoteKey(num) {
+  if (!num) return null;
+  const s = String(num).trim();
+  // Promo: contains uppercase letters or hyphen-suffix → not normalized
+  if (/[A-Z]/.test(s) || /-P$/i.test(s)) return s;
+  // Standard slash or bare digit: take the numerator, pad to 3
+  const m = s.match(/^(\d{1,3})/);
+  return m ? m[1].padStart(3, '0') : s;
+}
+
 function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {}) {
   const { promoMode = false } = options;
   const nameVotes = {};
@@ -1276,6 +1342,11 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
       if (isPokemonName(lower)) {
         const en = pokemonToEN(lower) || lower;
         nameVotes[en] = (nameVotes[en] || 0) + 1;
+        // Track whether any of the existing pattern branches push a number for
+        // this title-word combo. If none do, we fall through to the indicator
+        // / JP-bare fallback at the end (catches Team Rocket / Base Set style
+        // bare "009" numbers that JP retro sets use instead of "9/82").
+        const _beforeLen = nameWithNumber.length;
 
         // Promo mode: first try the Japanese promo SKU pattern (e.g. "098/SV-P").
         // If matched, that's the most specific form — use it verbatim and skip
@@ -1347,6 +1418,21 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
             }
           }
         }
+        // Fallback: nothing pushed from the standard patterns? Try the
+        // explicit "#NNN" / "No.NNN" indicators (any language), then bare
+        // 3-digit JP-retro numbering (only when title is JP-detected, so
+        // Western titles can't accidentally feed bare digits into the vote).
+        if (nameWithNumber.length === _beforeLen) {
+          const indNum = extractIndicatorNumber(title);
+          if (indNum) {
+            nameWithNumber.push({ name: lower, nameEN: en, number: indNum, title, lang: titleLang });
+          } else if (titleLang === 'JP') {
+            const bareNum = extractJpBareNumber(title);
+            if (bareNum) {
+              nameWithNumber.push({ name: lower, nameEN: en, number: bareNum, title, lang: titleLang });
+            }
+          }
+        }
       }
     }
   }
@@ -1398,14 +1484,24 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
   // language-independent for Western cards (11/102 is 11/102 in EN/FR/DE), so
   // frequency is the right signal; language is only a tiebreaker for the
   // selectedTitle / isPromo metadata.
+  // Vote by padded-numerator key so different formats of the same number
+  // collapse: "020/082" (Western slash) + bare "020" + "#020" all count
+  // toward "020". This lets JP retro bare numbers ("009", "No.009", "#009")
+  // beat a single Western slash variant ("020/082") that Lens occasionally
+  // surfaces from a cousin set with the same Pokemon.
   const numberCounts = {};
   for (const m of matchesForTop) {
-    if (m.number) numberCounts[m.number] = (numberCounts[m.number] || 0) + 1;
+    if (!m.number) continue;
+    const k = numberVoteKey(m.number);
+    if (k) numberCounts[k] = (numberCounts[k] || 0) + 1;
   }
-  const topNumber = Object.entries(numberCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-  // Among entries carrying the winning number, pick one for metadata using
-  // the same language preference as before (JP also prefers non-promo).
-  const winners = topNumber ? matchesForTop.filter(m => m.number === topNumber) : matchesForTop;
+  const topKey = Object.entries(numberCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  // Among entries with the winning key, prefer the slash form for the eBay
+  // query (more specific, e.g. "020/082" disambiguates across sets). Fall
+  // back to the bare form (JP retro 009-style) when no slash entry exists.
+  const winners = topKey ? matchesForTop.filter(m => m.number && numberVoteKey(m.number) === topKey) : matchesForTop;
+  const slashWinner = winners.find(m => m.number && m.number.includes('/'));
+  const topNumber = slashWinner ? slashWinner.number : (winners[0]?.number || null);
   let bestMatch = null;
   if (targetLang === 'JP') {
     bestMatch =
