@@ -1308,6 +1308,51 @@ function numberVoteKey(num) {
   return m ? m[1].padStart(3, '0') : s;
 }
 
+// Set-context keywords used to disambiguate "same Pokemon, same number,
+// different set" cases on the eBay query. The bare query "blastoise 009"
+// matches Team Rocket Dark Blastoise, Base Set Blastoise, AND modern
+// SV151 Blastoise ex — all return wildly different prices. Appending
+// "team rocket" or "vending" to the query filters to the right card.
+//
+// Whitelist focused on vintage sets where ambiguity is highest. Modern
+// sets (SV*, SWSH*, SM*, XY*) use long card numbers that already
+// disambiguate via "/" — no need for set context there.
+//
+// Includes JP-only sets (Vending Series, Rocket Gang) that aren't in the
+// Western-focused POKEMON_SETS database — relying on keyword frequency
+// across Lens titles instead of a sets lookup.
+const SET_CONTEXT_KEYWORDS = [
+  // Western vintage (also in POKEMON_SETS, but checked here for the JP titles
+  // that mention them, e.g. "Pokemon Japanese Team Rocket Dark Blastoise")
+  'team rocket', 'base set', 'jungle', 'fossil',
+  'neo genesis', 'neo discovery', 'neo revelation', 'neo destiny',
+  'gym heroes', 'gym challenge', 'legendary collection',
+  'expedition', 'aquapolis', 'skyridge',
+  // JP-only (NOT in POKEMON_SETS — critical for Vending Series etc.)
+  'vending', 'rocket gang', 'coro coro', 'corocoro',
+  'trozei', 'pcg', 'old back',
+];
+
+function detectSetContextKeyword(visualMatches) {
+  if (!Array.isArray(visualMatches) || visualMatches.length === 0) return null;
+  const counts = {};
+  for (const m of visualMatches.slice(0, 15)) {
+    const t = (m?.title || '').toLowerCase();
+    if (!t) continue;
+    for (const kw of SET_CONTEXT_KEYWORDS) {
+      if (t.includes(kw)) counts[kw] = (counts[kw] || 0) + 1;
+    }
+  }
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (!sorted.length || sorted[0][1] < 3) return null; // Need ≥3 votes to inject
+  // Prefer the longest matching keyword on tie (e.g. "vending machine" over
+  // "vending"). Object.entries doesn't guarantee insertion order across
+  // engines, but Node 12+ does — and we don't rely on it for correctness.
+  const topVotes = sorted[0][1];
+  const winners = sorted.filter(([_, v]) => v === topVotes).map(([k]) => k);
+  return winners.sort((a, b) => b.length - a.length)[0];
+}
+
 function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {}) {
   const { promoMode = false } = options;
   const nameVotes = {};
@@ -5111,10 +5156,12 @@ app.post('/scan', async (req, res) => {
       if (language === 'EN' && lensResult?.visualMatches) {
         const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN', { promoMode: promoEnabled });
         if (vote) {
+          const setKw = detectSetContextKeyword(lensResult.visualMatches);
+          const setSfx = setKw ? ` ${setKw}` : '';
           const voteQuery = vote.number
-            ? `${vote.nameEN} ${vote.number}`
-            : `${vote.nameEN} pokemon card`;
-          console.log(`[Lakkot] EN vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
+            ? `${vote.nameEN} ${vote.number}${setSfx}`
+            : `${vote.nameEN}${setSfx} pokemon card`;
+          console.log(`[Lakkot] EN vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number}${setKw ? ', setKw: '+setKw : ''})`);
 
           // ── Multi-set picker — Flow A (ask user, then query) ───────────
           // When the feature flag is on AND Lens matches describe ≥2 sets
@@ -5208,10 +5255,12 @@ app.post('/scan', async (req, res) => {
       if (language === 'JP' && lensResult?.visualMatches) {
         const vote = extractPokemonFromMatches(lensResult.visualMatches, 'JP', { promoMode: promoEnabled });
         if (vote) {
+          const setKw = detectSetContextKeyword(lensResult.visualMatches);
+          const setSfx = setKw ? ` ${setKw}` : '';
           const voteQuery = vote.number
-            ? `${vote.nameEN} ${vote.number} japanese`
-            : `${vote.nameEN} japanese pokemon card`;
-          console.log(`[Lakkot] JP vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
+            ? `${vote.nameEN} ${vote.number}${setSfx} japanese`
+            : `${vote.nameEN}${setSfx} japanese pokemon card`;
+          console.log(`[Lakkot] JP vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number}${setKw ? ', setKw: '+setKw : ''})`);
 
           // Multi-set picker (JP variant — disambiguates by era suffix, see
           // buildPokemonMultiSetPicker). Detective Pikachu 098/SV-P vs Mega
@@ -5280,10 +5329,12 @@ app.post('/scan', async (req, res) => {
         const vote = extractPokemonFromMatches(lensResult.visualMatches, 'FR', { promoMode: promoEnabled });
         if (vote) {
           // Use French name for eBay query — French cards are listed with FR names on eBay France
+          const setKw = detectSetContextKeyword(lensResult.visualMatches);
+          const setSfx = setKw ? ` ${setKw}` : '';
           const voteQuery = vote.number
-            ? `${vote.nameFR} ${vote.number}`
-            : `${vote.nameFR} carte pokemon`;
-          console.log(`[Lakkot] FR vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number})`);
+            ? `${vote.nameFR} ${vote.number}${setSfx}`
+            : `${vote.nameFR}${setSfx} carte pokemon`;
+          console.log(`[Lakkot] FR vote query: "${voteQuery}" (${vote.nameEN} / ${vote.nameFR}, number: ${vote.number}${setKw ? ', setKw: '+setKw : ''})`);
 
           // Multi-set picker (FR — Western set lineage, same as EN. Real case:
           // Ronflex Jungle 27/64 vs Jungle 11/64 Holo vs Base Set 2 30/130 —
