@@ -4767,7 +4767,11 @@ app.post('/scan', async (req, res) => {
         .single();
       scanUser = user;
       if (user) {
-        const { data: rpcResult, error: rpcError } = await supabase.rpc('consume_scan', { p_user_id: user.id });
+        // RPC expects _token (uuid), not p_user_id — verified via PGRST202
+        // "Could not find the function public.consume_scan(p_user_id)".
+        // The old param name caused silent fail-open: every scan bypassed
+        // the counter, leaving pro users unlimited and free users past 20.
+        const { data: rpcResult, error: rpcError } = await supabase.rpc('consume_scan', { _token: token });
         if (rpcError) {
           console.warn('[Lakkot] consume_scan RPC error:', rpcError.message, '— fail-open (allowing scan)');
         } else if (rpcResult && (rpcResult.blocked === true || rpcResult.allowed === false)) {
