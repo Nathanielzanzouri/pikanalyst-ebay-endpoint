@@ -106,6 +106,7 @@ const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
 const { extractProductIdentity } = require('./ai-product-id');
 const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
+const { fetchListingsForVision, isListingsV2Enabled } = require('./ai-product-listings');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
@@ -4667,7 +4668,7 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson }) {
     try {
       // Upload original image to Supabase Storage
       let imageUrl = null;
@@ -4737,6 +4738,18 @@ app.post('/scan', async (req, res) => {
         grading_company:  gradingCompany ?? null,
         grade:            grade ?? null,
         match_type:       matchType ?? null,
+        // v2 Gemini listings enrichment columns (added by Lovable SQL
+        // migration 2026-07-17). Only written on the Gemini Vision route
+        // so that scans predating the migration don't hit "column does
+        // not exist" errors — TCG/sneaker inserts stay identical to what
+        // shipped before this file existed.
+        ...(route === 'gemini-vision' ? {
+          pipeline:        'gemini',
+          listings_count:  listingsCount ?? null,
+          listings_source: listingsSource ?? null,
+          price_source:    priceSource ?? null,
+          listings_json:   listingsJson ?? null,
+        } : {}),
       }).select('id').single();
       if (insertErr) {
         console.warn('[Lakkot] scan log insert error:', insertErr.message, '| details:', insertErr.details || '');
@@ -5490,6 +5503,40 @@ app.post('/scan', async (req, res) => {
               price_range: `${vision.estimated_price_min}-${vision.estimated_price_max}€`,
               latency_ms: vision._latencyMs,
             }));
+
+            // v2 enrichment: fetch 3-5 real listings as proof and
+            // recompute the price band from actual market. Fully gated:
+            // if USE_LISTINGS_V2=false OR listings fetch fails,
+            // enrich === null → payload falls back to v1 (Gemini band only).
+            let enrich = null;
+            if (isListingsV2Enabled()) {
+              try {
+                const ebayToken = await getEbayOAuthToken().catch(() => null);
+                enrich = await fetchListingsForVision({
+                  vision,
+                  country,
+                  ebayToken,
+                  // Pass the Shopping caller as a closure to avoid a
+                  // circular require between server.js and the module.
+                  shoppingCaller: (q, c) => handleGoogleShopping(q, c),
+                });
+              } catch (err) {
+                console.warn('[Lakkot listings] enrichment failed:', err.message);
+                enrich = null;
+              }
+            }
+            const listings = enrich?.listings || [];
+            const marketPriceMin = enrich?.market_price_min ?? null;
+            const marketPriceMax = enrich?.market_price_max ?? null;
+            const priceSource = enrich?.price_source || 'gemini';
+            const listingsSource = enrich?.listings_source || 'none';
+            // marketPrice for logScan: use the listings-derived midpoint
+            // when we have one (better signal than Gemini's guess), else
+            // fall back to Gemini's band midpoint.
+            const logMarketPrice = (marketPriceMin != null && marketPriceMax != null)
+              ? (marketPriceMin + marketPriceMax) / 2
+              : (vision.estimated_price_min + vision.estimated_price_max) / 2;
+
             const logId = await logScan({
               userEmail:      scanUser?.email,
               userName:       scanUser?.name,
@@ -5502,13 +5549,13 @@ app.post('/scan', async (req, res) => {
               lensProductName: productName,
               shoppingQuery:  vision.query_shopping || null,
               resultType:     'ESTIMATION_RESULT',
-              marketPrice:    (vision.estimated_price_min + vision.estimated_price_max) / 2,
+              marketPrice:    logMarketPrice,
               askingPrice:    sellerPrice,
               // Explicitly no verdict on the Gemini path — estimations are
               // not backed by real sales data, showing STEAL/FAIR/OVERPRICED
               // would be misleading.
               verdict:        'ESTIMATION',
-              sourcesCount:   0,
+              sourcesCount:   listings.length,
               lensMatches:    (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || ''),
               lensSelected:   productName,
               langToggle:     language,
@@ -5518,6 +5565,12 @@ app.post('/scan', async (req, res) => {
               gradingCompany: null,
               grade:          null,
               matchType:      'estimation',
+              // v2 fields — safe to pass even if the columns don't exist
+              // yet on Supabase; logScan strips unknowns.
+              listingsCount:  listings.length,
+              listingsSource,
+              priceSource,
+              listingsJson:   listings.length ? listings : null,
             });
             return res.json({
               type: 'ESTIMATION_RESULT',
@@ -5535,6 +5588,11 @@ app.post('/scan', async (req, res) => {
               sellerPrice,
               streamCurrency,
               pipeline:              'gemini',
+              // v2 enrichment fields — absent/empty means v1 behavior client-side
+              listings,
+              market_price_min:      marketPriceMin,
+              market_price_max:      marketPriceMax,
+              price_source:          priceSource,
               quota,
               scanLogId:             logId,
             });
