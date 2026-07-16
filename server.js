@@ -5493,7 +5493,13 @@ app.post('/scan', async (req, res) => {
       //
       // Any failure here (flag off, no key, timeout, invalid JSON, low
       // confidence, etc.) → falls through to the legacy path below.
-      if (isGeminiVisionEnabled()) {
+      // Scoped to web clients only during v2 rollout: the Chrome extension
+      // doesn't know how to render ESTIMATION_RESULT (needs a separate
+      // release once the web UX is validated). Sending it there today
+      // = blank screen for the user. Extension keeps the legacy Lens +
+      // Shopping path until we ship a matching update.
+      const isWebClient = client === 'web-desktop' || client === 'web-mobile';
+      if (isGeminiVisionEnabled() && isWebClient) {
         try {
           const vision = await identifyProductVision(imageBase64);
           if (vision && vision.category !== 'tcg_card' && vision.category !== 'sneakers') {
