@@ -105,6 +105,7 @@ const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
 const { extractProductIdentity } = require('./ai-product-id');
+const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
@@ -5462,6 +5463,94 @@ app.post('/scan', async (req, res) => {
       // Google Shopping. Lets us debug "what did Google see" without re-running
       // the scan.
       let loggedShoppingQuery = null;
+
+      // ── Gemini Vision pipeline (feature-flagged) ─────────────────────
+      // For non-TCG / non-sneaker items, Lens + Shopping regularly returns
+      // "visually similar cousins from other brands" (documented failure
+      // case: Burton sandal → Lens saw Scholl + Mango + Ipanema; Hermès
+      // backpack → basket diluted by generic bags). We ask Gemini Vision
+      // to identify the product AND give a EUR price band in one call, and
+      // return the estimation directly as a distinct result shape — no
+      // Shopping/eBay call on this branch.
+      //
+      // Router: keep Lens-based TCG/sneaker routing (routes 1 & 2 above)
+      // untouched. If Gemini says the category is actually tcg_card or
+      // sneakers, we still show the estimation on this call — the user
+      // (or a future v2) can re-scan; we don't want to double-call APIs.
+      //
+      // Any failure here (flag off, no key, timeout, invalid JSON, low
+      // confidence, etc.) → falls through to the legacy path below.
+      if (isGeminiVisionEnabled()) {
+        try {
+          const vision = await identifyProductVision(imageBase64);
+          if (vision && vision.category !== 'tcg_card' && vision.category !== 'sneakers') {
+            console.log('[Lakkot vision] identity →', JSON.stringify({
+              category: vision.category, brand: vision.brand, product_name: vision.product_name,
+              variant: vision.variant, conf: vision.confidence, price_conf: vision.price_confidence,
+              price_range: `${vision.estimated_price_min}-${vision.estimated_price_max}€`,
+              latency_ms: vision._latencyMs,
+            }));
+            const logId = await logScan({
+              userEmail:      scanUser?.email,
+              userName:       scanUser?.name,
+              platform:       client,
+              domTitle:       rawTitle,
+              imageBase64:    originalImageBase64,
+              croppedImageBase64,
+              route:          'gemini-vision',
+              productName:    vision.display_title || vision.product_name,
+              lensProductName: productName,
+              shoppingQuery:  vision.query_shopping || null,
+              resultType:     'ESTIMATION_RESULT',
+              marketPrice:    (vision.estimated_price_min + vision.estimated_price_max) / 2,
+              askingPrice:    sellerPrice,
+              // Explicitly no verdict on the Gemini path — estimations are
+              // not backed by real sales data, showing STEAL/FAIR/OVERPRICED
+              // would be misleading.
+              verdict:        'ESTIMATION',
+              sourcesCount:   0,
+              lensMatches:    (lensResult?.visualMatches || []).slice(0, 15).map(m => m.title || ''),
+              lensSelected:   productName,
+              langToggle:     language,
+              country,
+              productCategory: vision.category,
+              variant:        vision.variant || null,
+              gradingCompany: null,
+              grade:          null,
+              matchType:      'estimation',
+            });
+            return res.json({
+              type: 'ESTIMATION_RESULT',
+              display_title:         vision.display_title || vision.product_name,
+              product_name:          vision.product_name,
+              brand:                 vision.brand,
+              variant:               vision.variant,
+              category:              vision.category,
+              confidence:            vision.confidence,
+              estimated_price_min:   vision.estimated_price_min,
+              estimated_price_max:   vision.estimated_price_max,
+              price_confidence:      vision.price_confidence,
+              query_shopping:        vision.query_shopping,
+              query_ebay:            vision.query_ebay,
+              sellerPrice,
+              streamCurrency,
+              pipeline:              'gemini',
+              quota,
+              scanLogId:             logId,
+            });
+          }
+          // Gemini said tcg_card or sneakers → intentionally fall through
+          // to the legacy path. Route 1/2 detection above already had a
+          // chance; if we're here they didn't fire. The legacy Shopping
+          // path is a better fit than trusting a Gemini price band for
+          // categories where we have real market data.
+          if (vision) {
+            console.log('[Lakkot vision] category=' + vision.category + ' → fall through to legacy pipeline');
+          }
+        } catch (err) {
+          console.warn('[Lakkot vision] error, falling back to legacy:', err.message);
+        }
+      }
 
       // AI-first product identification: one Gemini Flash Lite call reads the
       // Lens titles and produces a clean Shopping query + structured identity
