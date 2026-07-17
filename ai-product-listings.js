@@ -124,6 +124,62 @@ function passesPriceFilter(priceEur, geminiMin, geminiMax) {
   return priceEur >= lower && priceEur <= upper;
 }
 
+// Words that are too generic to distinguish one product from another —
+// they'd let a "Chanel eyeliner" pass a "Chanel 19 bag" filter. Extended
+// as we spot false positives in prod.
+const GENERIC_TOKENS = new Set([
+  // FR product nouns
+  'sac', 'sacs', 'main', 'montre', 'montres', 'bijou', 'bijoux',
+  'vetement', 'vetements', 'chaussure', 'chaussures',
+  // EN product nouns
+  'bag', 'bags', 'watch', 'watches', 'shoe', 'shoes',
+  // Other noise
+  'pokemon', 'accessoire', 'accessoires', 'accessory', 'accessories',
+  'edition', 'collection', 'authentic', 'authentique', 'occasion',
+  'used', 'new', 'neuf', 'seconde',
+  // Colors alone are too weak (a "bleu" Chanel eyeliner and a "bleu" bag
+  // would both match) — needs a model marker to distinguish.
+  'bleu', 'noir', 'blanc', 'rouge', 'vert', 'jaune', 'rose', 'gris',
+  'blue', 'black', 'white', 'red', 'green', 'yellow', 'pink', 'grey',
+]);
+
+// Build the list of tokens that MUST anchor the listing to the scanned
+// product. Two rules:
+// 1) Include tokens from Gemini's product_name and variant.
+// 2) Drop the brand itself (already handled by the brand filter) and
+//    anything in GENERIC_TOKENS.
+// 3) Number-like tokens (19, 30, 555, JR9806…) are always kept — they're
+//    the strongest anchors for luxury lines named after a number.
+function extractDistinguishingTokens(vision) {
+  if (!vision) return [];
+  const brandNorm = normalize(vision.brand || '');
+  const brandWords = new Set(brandNorm.split(' ').filter(w => w.length >= 2));
+  const rawText = `${vision.product_name || ''} ${vision.variant || ''}`;
+  const words = normalize(rawText).split(' ');
+  const seen = new Set();
+  const tokens = [];
+  for (const w of words) {
+    if (w.length < 2) continue;
+    if (brandWords.has(w)) continue;
+    if (GENERIC_TOKENS.has(w)) continue;
+    if (seen.has(w)) continue;
+    seen.add(w);
+    tokens.push(w);
+  }
+  return tokens;
+}
+
+// The listing must contain at least ONE distinguishing token from the
+// identified product. This is the filter that rejects false positives
+// like "Chanel eyeliner" for a "Chanel 19 Denim bag" scan — same brand,
+// price band even overlaps in some cases, but no shared model/variant
+// keyword.
+function passesModelFilter(title, distinguishingTokens) {
+  if (!distinguishingTokens || distinguishingTokens.length === 0) return true;
+  const nt = normalize(title);
+  return distinguishingTokens.some(tok => nt.includes(tok));
+}
+
 // ─── Google Shopping wrapper ─────────────────────────────────────────────
 // Takes the raw handleGoogleShopping return shape and maps it to our
 // listings shape. handleGoogleShopping already handles counterfeits and
@@ -205,59 +261,43 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   const marketplace = getEbayMarketplace(country);
   const geminiMin = Number(vision.estimated_price_min) || 0;
   const geminiMax = Number(vision.estimated_price_max) || 0;
+  // Distinguishing tokens from product_name + variant. Any listing whose
+  // title contains ZERO of these is rejected — this is what stopped the
+  // "Chanel eyeliner" from showing up as proof for a "Chanel 19 Denim bag"
+  // scan (both match brand + price band, but no shared model/variant token).
+  const modelTokens = extractDistinguishingTokens(vision);
+  console.log(`[Lakkot listings] distinguishing tokens for filter:`, modelTokens.join(', '));
 
-  // Helper: apply the brand + price filters, return top 5.
-  const filterAndRank = (raw, capAt = 5) => {
+  // Helper: apply the 3 filters (brand + price + model), return top capAt.
+  const CAP = 8;
+  const filterAndRank = (items, capAt = CAP) => {
     const kept = [];
-    for (const item of raw) {
-      if (!passesBrandFilter(item.title, vision.brand)) continue;
-      if (!passesPriceFilter(item.price, geminiMin, geminiMax)) continue;
+    const rejected = { brand: 0, price: 0, model: 0 };
+    for (const item of items) {
+      if (!passesBrandFilter(item.title, vision.brand)) { rejected.brand++; continue; }
+      if (!passesPriceFilter(item.price, geminiMin, geminiMax)) { rejected.price++; continue; }
+      if (!passesModelFilter(item.title, modelTokens)) { rejected.model++; continue; }
       kept.push(item);
       if (kept.length >= capAt) break;
     }
-    return kept;
+    return { kept, rejected };
   };
 
-  // ── Priority source: Lens visual_matches (already fetched upstream) ──
-  // Zero-cost enrichment for fashion / luxury when Lens has surfaced real
-  // marketplace listings. Only fires for the whitelisted categories; other
-  // categories skip straight to Shopping/eBay so we don't regress niches
-  // where Lens is unreliable (coins, antiques, sports cards).
+  // ── Lens source: use visualMatches already fetched upstream for luxury.
+  // For non-luxury categories the mapping still runs — but we typically get
+  // nothing usable so lensListings ends up empty and we fall through to the
+  // Shopping/eBay fetch below. Cost of the check is negligible.
   let lensListings = [];
   if (USE_LENS_CARDS_FOR.has(vision.category) && Array.isArray(lensCards) && lensCards.length > 0) {
     const mapped = mapLensCardsToListings(lensCards);
-    lensListings = filterAndRank(mapped);
-    console.log(`[Lakkot listings] lens-priority category=${vision.category} raw_cards=${lensCards.length} mapped=${mapped.length} kept=${lensListings.length}`);
-    // Enough directly from Lens — return without any SerpApi/eBay call.
-    if (lensListings.length >= 3) {
-      const prices = lensListings.map(x => x.price).filter(p => p > 0);
-      return {
-        listings: lensListings,
-        market_price_min: Math.round(Math.min(...prices) * 100) / 100,
-        market_price_max: Math.round(Math.max(...prices) * 100) / 100,
-        price_source: 'listings',
-        listings_source: 'lens',
-      };
-    }
+    console.log(`[Lakkot listings] lens mapped=${mapped.length} from ${lensCards.length} raw cards`);
+    lensListings = mapped;  // filter later, after merging with Shopping
   }
 
-  // Query 1 — use Gemini's primary query (query_ebay for eBay, query_shopping
-  // for Shopping — each is optimized differently in the Gemini prompt).
+  // Primary query: for eBay use query_ebay, for Shopping use query_shopping.
   const primaryQuery = source === 'ebay'
     ? (vision.query_ebay || vision.query_shopping || '').trim()
     : (vision.query_shopping || vision.query_ebay || '').trim();
-
-  if (!primaryQuery) {
-    console.warn('[Lakkot listings] no query available for source', source);
-    // We may still have 1-2 Lens listings above — surface them anyway.
-    return {
-      listings: lensListings,
-      market_price_min: null,
-      market_price_max: null,
-      price_source: 'gemini',
-      listings_source: lensListings.length ? 'lens' : 'none',
-    };
-  }
 
   // Hard timeout 6s (spec) — never block the estimation response.
   const runWithTimeout = (p, ms) => Promise.race([
@@ -265,43 +305,43 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
     new Promise((_, rej) => setTimeout(() => rej(new Error('listings_timeout')), ms)),
   ]);
 
-  let raw = [];
-  try {
-    if (source === 'ebay') {
-      if (!ebayToken) throw new Error('no_ebay_token');
-      raw = await runWithTimeout(
-        fetchEbayBrowseListings({ query: primaryQuery, marketplace, ebayToken }),
-        6000
-      );
-    } else {
-      const shoppingRes = await runWithTimeout(shoppingCaller(primaryQuery, country), 6000);
-      raw = mapShoppingCards(shoppingRes?.cards || []);
+  // ── Fallback source: Shopping (default) or eBay Browse — always fired
+  // now, not conditional on Lens count. Ancien flow's strength was merging
+  // BOTH sources; we do the same and let the filters drop noise.
+  let fallbackRaw = [];
+  if (primaryQuery) {
+    try {
+      if (source === 'ebay') {
+        if (ebayToken) {
+          fallbackRaw = await runWithTimeout(
+            fetchEbayBrowseListings({ query: primaryQuery, marketplace, ebayToken }),
+            6000
+          );
+        } else {
+          console.warn('[Lakkot listings] no ebay token — skipping fallback');
+        }
+      } else {
+        const shoppingRes = await runWithTimeout(shoppingCaller(primaryQuery, country), 6000);
+        fallbackRaw = mapShoppingCards(shoppingRes?.cards || []);
+      }
+    } catch (err) {
+      console.warn('[Lakkot listings] fallback fetch failed:', err.message);
+      fallbackRaw = [];   // fall through — we may still have Lens listings
     }
-  } catch (err) {
-    console.warn('[Lakkot listings] primary fetch failed:', err.message);
-    // Same as no-query case — surface any Lens listings we already got.
-    return {
-      listings: lensListings,
-      market_price_min: null,
-      market_price_max: null,
-      price_source: 'gemini',
-      listings_source: lensListings.length ? 'lens' : 'none',
-    };
   }
 
-  // Merge Lens listings first, then fallback source, deduping by link so
-  // that the same URL never shows twice. Pass the merged list to
-  // filterAndRank so brand+price filters apply uniformly.
+  // Merge Lens + fallback, dedupe by URL (or title as backup key).
   const seenLinks = new Set();
   const merged = [];
-  for (const item of [...lensListings, ...raw]) {
+  for (const item of [...lensListings, ...fallbackRaw]) {
     const key = item.link || (item.source + ':' + item.title);
     if (seenLinks.has(key)) continue;
     seenLinks.add(key);
     merged.push(item);
   }
-  let kept = filterAndRank(merged);
-  console.log(`[Lakkot listings] source=${source} lens_kept=${lensListings.length} raw=${raw.length} merged=${merged.length} kept=${kept.length}`);
+  const filtered = filterAndRank(merged);
+  let kept = filtered.kept;
+  console.log(`[Lakkot listings] source=${source} lens=${lensListings.length} fallback=${fallbackRaw.length} merged=${merged.length} kept=${kept.length} rejected(brand=${filtered.rejected.brand},price=${filtered.rejected.price},model=${filtered.rejected.model})`);
 
   // Retry once with a broader query if 0 kept AND we have a brand to keep
   // in the query (per spec: the retry MUST retain the brand — otherwise
@@ -339,16 +379,17 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
           const shoppingRes = await runWithTimeout(shoppingCaller(broadQuery, country), 6000);
           retryRaw = mapShoppingCards(shoppingRes?.cards || []);
         }
-        // Re-merge with Lens listings so we don't lose them in the retry
-        // (dedupe by link across all three sources: lens + primary + retry).
-        const retryMerged = [];
-        for (const item of [...lensListings, ...raw, ...retryRaw]) {
+        // Re-merge with Lens + primary fallback, dedupe by link so the
+        // retry only ADDS new items.
+        const retryMerged = [...merged];
+        for (const item of retryRaw) {
           const key = item.link || (item.source + ':' + item.title);
           if (seenLinks.has(key)) continue;
           seenLinks.add(key);
           retryMerged.push(item);
         }
-        kept = filterAndRank(retryMerged);
+        const retryFiltered = filterAndRank(retryMerged);
+        kept = retryFiltered.kept;
         console.log(`[Lakkot listings] retry raw=${retryRaw.length} merged=${retryMerged.length} kept=${kept.length}`);
       } catch (err) {
         console.warn('[Lakkot listings] retry fetch failed:', err.message);
@@ -397,5 +438,7 @@ module.exports = {
   getEbayMarketplace,
   passesBrandFilter,   // exported for unit tests
   passesPriceFilter,
+  passesModelFilter,
+  extractDistinguishingTokens,
   LISTINGS_SOURCE_BY_CATEGORY,
 };
