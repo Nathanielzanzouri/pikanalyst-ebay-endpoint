@@ -5524,7 +5524,10 @@ app.post('/scan', async (req, res) => {
                   ebayToken,
                   // Pass the Shopping caller as a closure to avoid a
                   // circular require between server.js and the module.
-                  shoppingCaller: (q, c) => handleGoogleShopping(q, c),
+                  // Wrap through _timedShopping so this call counts toward
+                  // scan_logs.serpapi_calls / timing_shopping_ms — otherwise
+                  // Gemini-path scans under-report Shopping API usage.
+                  shoppingCaller: (q, c) => _timedShopping(_scanTimings, () => handleGoogleShopping(q, c)),
                   // Lens cards are already fetched upstream (handleGoogleLens
                   // above) — hand them over so fashion/luxury categories
                   // can reuse them as priority listings source without a
