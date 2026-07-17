@@ -5525,6 +5525,11 @@ app.post('/scan', async (req, res) => {
                   // Pass the Shopping caller as a closure to avoid a
                   // circular require between server.js and the module.
                   shoppingCaller: (q, c) => handleGoogleShopping(q, c),
+                  // Lens cards are already fetched upstream (handleGoogleLens
+                  // above) — hand them over so fashion/luxury categories
+                  // can reuse them as priority listings source without a
+                  // second SerpApi Shopping call.
+                  lensCards: lensResult?.cards || [],
                 });
               } catch (err) {
                 console.warn('[Lakkot listings] enrichment failed:', err.message);
