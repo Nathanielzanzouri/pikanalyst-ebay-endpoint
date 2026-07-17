@@ -40,15 +40,14 @@ function getListingsSource(category) {
 // zero extra SerpApi call in the nominal case; Shopping only fires as a
 // fallback when Lens surfaces fewer than 3 items after filtering.
 //
-// Not enabled for coins/antiques/sports_card (dealer-specialist markets
-// where Lens rarely surfaces real listings — eBay remains the primary
-// source there).
-const USE_LENS_CARDS_FOR = new Set([
-  'bags_accessories',
-  'jewelry_watches',
-  'fashion_women',
-  'fashion_men',
-]);
+// Enabled for any category routed to Google Shopping — Lens surfaces
+// priced listings from Fnac/Darty/Rakuten for electronics, Cultura/King
+// Jouet for toys, Vestiaire/Farfetch for luxury, etc. Skipped for the
+// eBay-specialist categories (coins, antiques, sports_card) where the
+// listings come from eBay Browse directly.
+function shouldUseLensCards(category) {
+  return getListingsSource(category) === 'google_shopping';
+}
 
 // SerpApi Lens returns prices with a currency SYMBOL, not ISO code. Map to
 // what toEur() expects.
@@ -288,7 +287,7 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   // nothing usable so lensListings ends up empty and we fall through to the
   // Shopping/eBay fetch below. Cost of the check is negligible.
   let lensListings = [];
-  if (USE_LENS_CARDS_FOR.has(vision.category) && Array.isArray(lensCards) && lensCards.length > 0) {
+  if (shouldUseLensCards(vision.category) && Array.isArray(lensCards) && lensCards.length > 0) {
     const mapped = mapLensCardsToListings(lensCards);
     console.log(`[Lakkot listings] lens mapped=${mapped.length} from ${lensCards.length} raw cards`);
     lensListings = mapped;  // filter later, after merging with Shopping
