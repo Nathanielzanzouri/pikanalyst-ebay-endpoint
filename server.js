@@ -5501,7 +5501,14 @@ app.post('/scan', async (req, res) => {
       const isWebClient = client === 'web-desktop' || client === 'web-mobile';
       if (isGeminiVisionEnabled() && isWebClient) {
         try {
-          const vision = await identifyProductVision(imageBase64);
+          // Feed Lens visual-match titles to Gemini as seller consensus
+          // context so it can vote on ambiguous variants (Rolex 41 vs 36,
+          // Funko #78 vs #01, Louis Vuitton Speedy 30 vs 25...).
+          const lensTitlesForVision = (lensResult?.visualMatches || [])
+            .slice(0, 15)
+            .map(m => m?.title || '')
+            .filter(t => t.length > 0);
+          const vision = await identifyProductVision(imageBase64, { lensTitles: lensTitlesForVision });
           if (vision && vision.category !== 'tcg_card' && vision.category !== 'sneakers') {
             console.log('[Lakkot vision] identity →', JSON.stringify({
               category: vision.category, brand: vision.brand, product_name: vision.product_name,

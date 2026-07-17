@@ -38,7 +38,12 @@ const CATEGORIES = [
   'home_garden', 'food_drinks', 'other',
 ];
 
-const SYSTEM_PROMPT = [
+// Base prompt. Lens context titles are appended by buildPrompt() when
+// available — they act as a consensus check that catches Gemini's
+// variant-level errors on subtle products (a "Rolex 41" scanned but ID'd
+// as "36mm", a "Funko #78" ID'd as "#01"). The prompt tells Gemini to
+// prefer whichever variant / size / number the Lens titles agree on.
+const BASE_PROMPT = [
   "Tu es un expert en produits de collection et d'occasion vendus en live shopping",
   "(Whatnot, Voggt). On te montre un screenshot d'un live de vente, souvent flou,",
   "avec parfois des overlays d'interface par-dessus le produit.",
@@ -93,7 +98,37 @@ const SYSTEM_PROMPT = [
   "  sauf pour les produits encore en retail courant.",
   "- Ne JAMAIS inventer une référence précise : si tu hésites entre deux modèles,",
   "  choisis le plus probable et baisse confidence en conséquence.",
+  "- CRUCIAL sur les variantes (taille en mm/ml, numéro dans une série #NN,",
+  "  référence catalogue, année) : si des titres de vendeurs sont fournis en",
+  "  contexte ci-dessous, PRIVILÉGIE le variant qui apparaît le plus souvent",
+  "  dans ces titres plutôt que ta propre estimation visuelle (une Rolex 41mm",
+  "  et une 36mm se ressemblent, un Funko #01 et un #78 aussi — le consensus",
+  "  textuel des vendeurs est plus fiable que le pixel-matching sur ces cas).",
 ].join('\n');
+
+// Prepend the Lens titles as a "seller context" block so Gemini can vote
+// on ambiguous variants (see the "CRUCIAL sur les variantes" rule). We
+// keep at most 15 titles (matching the Lens slice we use elsewhere) and
+// bail out cleanly when none are provided so the pure-image path still
+// works.
+function buildPrompt(lensTitles) {
+  if (!Array.isArray(lensTitles) || lensTitles.length === 0) {
+    return BASE_PROMPT;
+  }
+  const cleaned = lensTitles
+    .map(t => (typeof t === 'string' ? t : (t?.title || '')))
+    .filter(t => t && t.length > 0)
+    .slice(0, 15);
+  if (cleaned.length === 0) return BASE_PROMPT;
+  const contextBlock = [
+    "",
+    "CONTEXTE — titres de vendeurs / retailers qui montrent des produits",
+    "visuellement similaires (Google Lens visual matches). Utilise ce contexte",
+    "pour désambiguïser les variantes subtiles (taille, référence, numéro) :",
+    ...cleaned.map((t, i) => `  ${i + 1}. ${t}`),
+  ].join('\n');
+  return BASE_PROMPT + '\n' + contextBlock;
+}
 
 // ─── JSON schema (Gemini responseSchema) ─────────────────────────────────
 // Forces structured output — Gemini fills each field. String fields default
@@ -197,16 +232,21 @@ async function identifyProductVision(imageBase64, opts = {}) {
     return null;
   }
 
-  const cacheKey = hashImage(imageBase64);
+  // Cache key includes both the image AND the lens titles: a rescan with
+  // fresh Lens context should re-run Gemini so the consensus check runs
+  // on the new titles, not on a stale cached identity.
+  const lensTitles = Array.isArray(opts.lensTitles) ? opts.lensTitles : [];
+  const cacheKey = hashImage(imageBase64) + '|' + lensTitles.slice(0, 5).join('|').slice(0, 200);
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
   const t0 = Date.now();
+  const promptText = buildPrompt(lensTitles);
   const body = {
     contents: [{
       role: 'user',
       parts: [
-        { text: SYSTEM_PROMPT },
+        { text: promptText },
         { inlineData: { mimeType: 'image/jpeg', data: imageBase64 } },
       ],
     }],
