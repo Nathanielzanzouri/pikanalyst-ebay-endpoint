@@ -895,16 +895,36 @@ const CARD_NUMBER_RE = {
   }
 };
 
+// Apparel / merch keywords that veto the Pokemon TCG path even when the
+// title mentions "Pokemon". Uniqlo x Pokemon T-shirts, hoodie merch, and
+// funko-collab clothing all trip the TCG check on the pokemon keyword —
+// but they belong in the Gemini/Shopping path, not eBay-sold TCG queries.
+// Reference scan e5d9bd6f (Uniqlo "T-shirt UT Pokémon pour Homme" priced
+// against random UT tshirts at €12.90).
+const APPAREL_MERCH_KEYWORDS = [
+  // clothing
+  't-shirt', 'tshirt', 't shirt', 'tee shirt', 'sweater', 'sweatshirt',
+  'hoodie', 'sweat', 'pull', 'pullover', 'chandail', 'jersey',
+  'jacket', 'veste', 'blouson', 'coat', 'manteau',
+  'chemise', 'shirt', 'polo', 'top',
+  'jean', 'jeans', 'pantalon', 'trouser', 'trousers', 'short', 'shorts',
+  'robe', 'dress', 'skirt', 'jupe',
+  // brands that don't sell TCG cards
+  'uniqlo', 'zara', 'h&m', 'primark', 'gap', 'ralph lauren',
+];
+function isApparelOrMerch(lowerText) {
+  return APPAREL_MERCH_KEYWORDS.some(kw => lowerText.includes(kw));
+}
+
 function isTCGCard(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
-  // Negative gate FIRST: if the text obviously looks like a sneaker
-  // (Nike/Adidas/Jordan/Dunk/AF1/etc.), it is NOT a TCG card — even if the
-  // sneaker SKU happens to contain a digits-slash-digits substring that
-  // CARD_NUMBER_RE would match. Reference scan 6e705753 (Nike Dunk Low
-  // "DD1391-100 / DD1503-101 / CW1590..." was misclassified as Pokemon
-  // because the substring "100 / DD1503" matched the card-number regex).
+  // Negative gate 1: sneakers (SKU-in-title false positives — see scan 6e705753).
   if (isShoeTitle(text)) return false;
+  // Negative gate 2: apparel / retailer-collab merch. A "T-shirt Pokémon
+  // Uniqlo" contains "pokemon" (TCG brand keyword) but is fashion, not a
+  // playable card. Reference scan e5d9bd6f.
+  if (isApparelOrMerch(lower)) return false;
   // Card number pattern is a strong signal
   if (CARD_NUMBER_RE.test(text)) return true;
   // Brand keywords
