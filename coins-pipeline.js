@@ -100,22 +100,68 @@ function hardExcluded(title, vision) {
   return false;
 }
 
-// Q1 validation: both year AND denomination substrings must appear in title.
-// Q3 validation: denomination + type must appear.
+// Words we drop when extracting "distinguishing tokens" from the coin type —
+// they're too generic to distinguish one commemorative 2€ from another
+// (every 2€ commemorative from every country has "commemorative" in
+// its Gemini type field).
+const GENERIC_COIN_TOKENS = new Set([
+  'commemorative', 'commémorative', 'commemo', 'commémo',
+  'euro', 'euros', 'franc', 'francs', 'cents', 'centime', 'centimes',
+  'piece', 'pièce', 'monnaie', 'coin',
+  'ans', 'annees', 'années', 'annee', 'année', 'anniversaire',
+  'nouvelle', 'nouveau', 'neuf', 'neuve', 'ancien', 'ancienne',
+  'de', 'du', 'des', 'la', 'le', 'les', 'et', 'ou', 'a', 'à',
+  'or', 'argent',   // metal words already used in query, redundant here
+]);
+
+// Q1 validation — 4 gates. Each is strict on its own but they combine to
+// drop the noise types we've seen on the "France 2024 JO Paris" scan:
+//   sale #1 "France 2023 JO Paris 2024" was slipping through the year
+//     check because "2024" appears anyway (event year, not coin year).
+//     Now blocked by the type-token gate — a bare France 2023 sale
+//     doesn't contain "eiffel" or "tour".
+//   sales #2/#3 (Luxembourg 2024, Grèce 2024) were passing on year+denom
+//     alone. Now blocked by the country gate.
+// Q3 validation — looser: denomination + type keyword. Year is intentionally
+// dropped because Q3 fires when the year isn't reliably readable.
 function passesQueryValidation(title, vision, queryLevel) {
   const t = (title || '').toLowerCase();
   const denom = (vision.coin_denomination || '').toLowerCase();
   const type = (vision.coin_type || '').toLowerCase();
   const year = (vision.coin_year || '').toLowerCase();
+  const country = (vision.coin_country || '').toLowerCase();
+
   // Denomination check — split into tokens so "10 francs" matches "10 franc"
   // and "10-francs". Require each denom token > 1 char to be present.
   const denomTokens = denom.split(/\s+/).filter(x => x.length > 1);
   for (const tok of denomTokens) if (!t.includes(tok)) return false;
+
   if (queryLevel === 1) {
-    // Also require the year 4-digit substring
+    // Q1 gates: year + country + at least one distinguishing type token.
     if (year.length !== 4 || !t.includes(year)) return false;
+    // Country: any word ≥ 4 chars from the coin_country field must appear.
+    // Skips the check when Gemini didn't identify a country (rare).
+    if (country) {
+      const countryTokens = country.split(/\s+/).filter(x => x.length >= 4);
+      if (countryTokens.length > 0) {
+        const hit = countryTokens.some(tok => t.includes(tok));
+        if (!hit) return false;
+      }
+    }
+    // Distinguishing type token: at least one non-generic word from the
+    // type field must be in the title. Blocks "France 2023 vs France 2024"
+    // when Gemini's type has JO/Paris/Eiffel — sales missing all of those
+    // are almost certainly a different commemorative.
+    const typeTokens = type
+      .replace(/[^a-zA-ZÀ-ÿ\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3 && !GENERIC_COIN_TOKENS.has(w));
+    if (typeTokens.length > 0) {
+      const hit = typeTokens.some(tok => t.includes(tok));
+      if (!hit) return false;
+    }
   } else {
-    // Q3 — additionally require the type keyword
+    // Q3 — additionally require the first type keyword.
     if (type && !t.includes(type.toLowerCase().split(' ')[0])) return false;
   }
   return true;
