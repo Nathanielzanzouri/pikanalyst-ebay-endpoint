@@ -104,6 +104,21 @@ const BASE_PROMPT = [
   "  dans ces titres plutôt que ta propre estimation visuelle (une Rolex 41mm",
   "  et une 36mm se ressemblent, un Funko #01 et un #78 aussi — le consensus",
   "  textuel des vendeurs est plus fiable que le pixel-matching sur ces cas).",
+  "",
+  "Règles SPÉCIFIQUES coins_money :",
+  '- coin_year_readable et coin_mintmark_readable : mets false et laisse le champ',
+  "  vide si tu n'es pas SÛR à 100% que le chiffre est lisible sur l'image.",
+  "  Une année inventée est PIRE qu'une année absente (la cascade de recherche",
+  "  eBay part directement en query générique quand year_readable=false).",
+  '- coin_weight_grams et coin_fineness : uniquement si tu connais les',
+  "  caractéristiques standard du type précis (ex : 10 francs Hercule 1965-1973",
+  '  = 25g / 0.900). Sinon mets null / null.',
+  '- coin_metal : "silver", "gold", "base" (cuivre/nickel/laiton/euro courant),',
+  '  ou "unknown" si non identifiable.',
+  '- coin_graded / coin_grade_visible : true UNIQUEMENT si la pièce est visiblement',
+  "  sous coque de grading (PCGS, NGC, coque plastique avec code de grade lisible).",
+  "  NE TENTE JAMAIS d'évaluer TB/SUP/FDC depuis l'image d'une pièce brute — ",
+  "  c'est le rôle des ventes eBay filtrées par mots-clés d'état, pas le tien.",
 ].join('\n');
 
 // Prepend the Lens titles as a "seller context" block so Gemini can vote
@@ -147,11 +162,32 @@ const RESPONSE_SCHEMA = {
     estimated_price_min:   { type: 'NUMBER' },
     estimated_price_max:   { type: 'NUMBER' },
     price_confidence:      { type: 'NUMBER' },
+    // Coin-specific fields — only meaningful when category === "coins_money".
+    // For any other category Gemini returns empty strings / null and downstream
+    // code ignores them. Kept as required so the schema stays stable.
+    coin_country:          { type: 'STRING' },
+    coin_denomination:     { type: 'STRING' },
+    coin_type:             { type: 'STRING' },
+    coin_year:             { type: 'STRING' },
+    coin_year_readable:    { type: 'BOOLEAN' },
+    coin_mintmark:         { type: 'STRING' },
+    coin_mintmark_readable:{ type: 'BOOLEAN' },
+    coin_metal:            { type: 'STRING' },
+    // NUMBER fields can't be null in Gemini schema — sentinel 0 = "unknown"
+    // for weight and fineness. Consumer treats 0 as null.
+    coin_weight_grams:     { type: 'NUMBER' },
+    coin_fineness:         { type: 'NUMBER' },
+    coin_graded:           { type: 'BOOLEAN' },
+    coin_grade_visible:    { type: 'STRING' },
   },
   required: [
     'category', 'brand', 'product_name', 'variant', 'display_title',
     'query_shopping', 'query_ebay', 'confidence',
     'estimated_price_min', 'estimated_price_max', 'price_confidence',
+    'coin_country', 'coin_denomination', 'coin_type', 'coin_year',
+    'coin_year_readable', 'coin_mintmark', 'coin_mintmark_readable',
+    'coin_metal', 'coin_weight_grams', 'coin_fineness',
+    'coin_graded', 'coin_grade_visible',
   ],
 };
 
@@ -199,8 +235,10 @@ function validate(obj) {
   if (!productName) return null;
 
   const n = (v, def = 0) => (typeof v === 'number' && isFinite(v) ? v : def);
+  const nOrNull = (v) => (typeof v === 'number' && isFinite(v) && v > 0 ? v : null);
   const s = (v) => (typeof v === 'string' ? v.trim() : '');
   const conf = (v) => Math.max(0, Math.min(1, n(v, 0)));
+  const b = (v) => v === true || v === 'true';
 
   return {
     category,
@@ -214,6 +252,20 @@ function validate(obj) {
     estimated_price_min: n(obj.estimated_price_min, 0),
     estimated_price_max: n(obj.estimated_price_max, 0),
     price_confidence:    conf(obj.price_confidence),
+    // Coin fields — filled by Gemini only for category === "coins_money".
+    // Consumer treats empty strings / false / null as "not applicable".
+    coin_country:           s(obj.coin_country),
+    coin_denomination:      s(obj.coin_denomination),
+    coin_type:              s(obj.coin_type),
+    coin_year:              s(obj.coin_year),
+    coin_year_readable:     b(obj.coin_year_readable),
+    coin_mintmark:          s(obj.coin_mintmark),
+    coin_mintmark_readable: b(obj.coin_mintmark_readable),
+    coin_metal:             s(obj.coin_metal).toLowerCase(),   // "silver"|"gold"|"base"|"unknown"|""
+    coin_weight_grams:      nOrNull(obj.coin_weight_grams),
+    coin_fineness:          nOrNull(obj.coin_fineness),
+    coin_graded:            b(obj.coin_graded),
+    coin_grade_visible:     s(obj.coin_grade_visible),
     _model: MODEL,
     _source: 'gemini_vision',
   };

@@ -107,6 +107,7 @@ const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace,
 const { extractProductIdentity } = require('./ai-product-id');
 const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
 const { fetchListingsForVision, isListingsV2Enabled } = require('./ai-product-listings');
+const { analyzeCoinSales, isCoinsPipelineEnabled } = require('./coins-pipeline');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
@@ -4688,7 +4689,7 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls }) {
     try {
       // Upload original image to Supabase Storage
       let imageUrl = null;
@@ -4769,6 +4770,15 @@ app.post('/scan', async (req, res) => {
           listings_source: listingsSource ?? null,
           price_source:    priceSource ?? null,
           listings_json:   listingsJson ?? null,
+          // Coins-pipeline diagnostics. Nested spread so we ONLY set the
+          // three columns when the coins pipeline actually ran — a stray
+          // "column coins_query_level does not exist" won't blow up
+          // non-coin gemini scans before Lovable has run the migration.
+          ...(coinsQueryLevel != null ? {
+            coins_query_level:    coinsQueryLevel,
+            coins_sales_count:    coinsSalesCount ?? null,
+            coins_serpapi_calls:  coinsSerpapiCalls ?? null,
+          } : {}),
         } : {}),
       }).select('id').single();
       if (insertErr) {
@@ -5542,7 +5552,40 @@ app.post('/scan', async (req, res) => {
             // if USE_LISTINGS_V2=false OR listings fetch fails,
             // enrich === null → payload falls back to v1 (Gemini band only).
             let enrich = null;
-            if (isListingsV2Enabled()) {
+            let coinsData = null;
+            let coinsSerpapiCalls = 0;
+
+            // Specialised coins pipeline — eBay sold prices, condition
+            // buckets, metal-value floor. Runs BEFORE the generic v2 listings
+            // path so a successful coins analysis short-circuits it. If the
+            // flag is off, or coins pipeline returns null (insufficient
+            // sales), we fall through to the v2 path so the coin still gets
+            // active-listings enrichment.
+            if (vision.category === 'coins_money' && isCoinsPipelineEnabled()) {
+              try {
+                const coinsRes = await analyzeCoinSales(vision);
+                if (coinsRes) {
+                  coinsSerpapiCalls = coinsRes.serpapi_calls_used || 0;
+                  if (coinsRes.coins_data) {
+                    coinsData = coinsRes.coins_data;
+                    enrich = {
+                      listings:         coinsRes.listings || [],
+                      market_price_min: coinsRes.market_price_min,
+                      market_price_max: coinsRes.market_price_max,
+                      price_source:     'ebay_sold',
+                      listings_source:  'ebay_sold',
+                    };
+                    console.log(`[Lakkot coins] pipeline used (${coinsSerpapiCalls} SerpApi call(s)), sales=${coinsData.sales_count}, level=Q${coinsData.query_level}`);
+                  } else {
+                    console.log(`[Lakkot coins] pipeline ran but insufficient sales (${coinsSerpapiCalls} SerpApi call(s)) — falling back to v2`);
+                  }
+                }
+              } catch (err) {
+                console.warn('[Lakkot coins] pipeline error, falling back to v2:', err.message);
+              }
+            }
+
+            if (enrich === null && isListingsV2Enabled()) {
               try {
                 const ebayToken = await getEbayOAuthToken().catch(() => null);
                 enrich = await fetchListingsForVision({
@@ -5612,6 +5655,11 @@ app.post('/scan', async (req, res) => {
               listingsSource,
               priceSource,
               listingsJson:   listings.length ? listings : null,
+              // Coins pipeline diagnostics — nullable, only set for the
+              // coins_money category when USE_COINS_PIPELINE is on.
+              coinsQueryLevel:   coinsData?.query_level ?? null,
+              coinsSalesCount:   coinsData?.sales_count ?? null,
+              coinsSerpapiCalls: coinsSerpapiCalls || null,
             });
             return res.json({
               type: 'ESTIMATION_RESULT',
@@ -5634,6 +5682,10 @@ app.post('/scan', async (req, res) => {
               market_price_min:      marketPriceMin,
               market_price_max:      marketPriceMax,
               price_source:          priceSource,
+              // Coins-specific enrichment. Absent for non-coin scans.
+              // Frontend that doesn't know coins_data still renders the
+              // v2 listings + market range above.
+              coins_data:            coinsData || undefined,
               quota,
               scanLogId:             logId,
             });
