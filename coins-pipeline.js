@@ -149,13 +149,24 @@ function passesQueryValidation(title, vision, queryLevel) {
       }
     }
     // Distinguishing type token: at least one non-generic word from the
-    // type field must be in the title. Blocks "France 2023 vs France 2024"
-    // when Gemini's type has JO/Paris/Eiffel — sales missing all of those
-    // are almost certainly a different commemorative.
-    const typeTokens = type
+    // type OR variant field must be in the title. Two combined because
+    // Gemini sometimes puts the specific commemoration in coin_type
+    // ("JO Paris Tour Eiffel") and sometimes in variant ("Laskarina
+    // Bouboulina" for Greece 2025). We saw scan 0a27b331 return a
+    // Mikis Theodorakis sale for a Laskarina Bouboulina scan because
+    // the type field was empty. Also fall back to product_name if
+    // both are effectively empty after generic filtering.
+    const typeSource = [type, (vision.variant || '').toLowerCase(),
+                        (vision.product_name || '').toLowerCase()]
+                       .filter(Boolean).join(' ');
+    const brandNorm = (vision.coin_country || '').toLowerCase();
+    const typeTokens = typeSource
       .replace(/[^a-zA-ZÀ-ÿ\s]/g, ' ')
       .split(/\s+/)
-      .filter(w => w.length >= 3 && !GENERIC_COIN_TOKENS.has(w));
+      .filter(w => w.length >= 3
+                && !GENERIC_COIN_TOKENS.has(w)
+                && !brandNorm.includes(w)     // country already filtered above
+                && !denom.includes(w));       // denom already filtered above
     if (typeTokens.length > 0) {
       const hit = typeTokens.some(tok => t.includes(tok));
       if (!hit) return false;
