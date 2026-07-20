@@ -5127,13 +5127,20 @@ app.post('/scan', async (req, res) => {
       // 'WORLD' is internal-only now — it means "no specific language",
       // not a user choice.
       const SUPPORTED_LANGS = new Set(['EN', 'FR', 'JP']);
-      const UNSUPPORTED_LANGS = { DE: 'German', IT: 'Italian', ES: 'Spanish', KO: 'Korean', ZH: 'Chinese', PT: 'Portuguese' };
+      const UNSUPPORTED_LANGS = {
+        DE: { en: 'German',     fr: 'allemand' },
+        IT: { en: 'Italian',    fr: 'italien' },
+        ES: { en: 'Spanish',    fr: 'espagnol' },
+        KO: { en: 'Korean',     fr: 'coréen' },
+        ZH: { en: 'Chinese',    fr: 'chinois' },
+        PT: { en: 'Portuguese', fr: 'portugais' },
+      };
       const rawDetected = (gradeResult && typeof gradeResult.language === 'string')
         ? gradeResult.language.toUpperCase() : null;
 
       if (rawDetected && UNSUPPORTED_LANGS[rawDetected]) {
-        const langName = UNSUPPORTED_LANGS[rawDetected];
-        console.log('[Lakkot/unsupported-lang] detected', rawDetected, '(' + langName + ') — refusing');
+        const langInfo = UNSUPPORTED_LANGS[rawDetected];
+        console.log('[Lakkot/unsupported-lang] detected', rawDetected, '(' + langInfo.en + ') — refusing');
         const logId = await logScan({
           userEmail: scanUser?.email, userName: scanUser?.name, platform: client,
           domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64,
@@ -5150,8 +5157,10 @@ app.post('/scan', async (req, res) => {
         return res.json({
           type: 'UNSUPPORTED_LANGUAGE',
           detectedLanguage: rawDetected,
-          detectedLanguageName: langName,
-          message: `Lakkot doesn't support ${langName} cards yet.`,
+          detectedLanguageName: langInfo.en,
+          detectedLanguageNameFr: langInfo.fr,
+          message: `Lakkot ne supporte pas encore les cartes en ${langInfo.fr}. Nous travaillons pour l'ajouter rapidement !`,
+          messageEn: `Lakkot doesn't support ${langInfo.en} cards yet. We're working on adding it soon!`,
           quota,
           scanLogId: logId,
         });
