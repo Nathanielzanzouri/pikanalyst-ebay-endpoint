@@ -126,6 +126,13 @@ const BASE_PROMPT = [
 // keep at most 15 titles (matching the Lens slice we use elsewhere) and
 // bail out cleanly when none are provided so the pure-image path still
 // works.
+//
+// Ordering matters: the matches are ranked by visual similarity, top =
+// closest to the scanned image. Earlier prompt wording treated all 15
+// as equal-weight context, which let Gemini prefer well-known brands
+// (Tronsmart) it happened to recognize over lesser-known brands (FASR)
+// that Lens correctly surfaced in position #2. The rules below force
+// the top-3 to be respected when they carry a specific brand + model.
 function buildPrompt(lensTitles) {
   if (!Array.isArray(lensTitles) || lensTitles.length === 0) {
     return BASE_PROMPT;
@@ -138,8 +145,27 @@ function buildPrompt(lensTitles) {
   const contextBlock = [
     "",
     "CONTEXTE — titres de vendeurs / retailers qui montrent des produits",
-    "visuellement similaires (Google Lens visual matches). Utilise ce contexte",
-    "pour désambiguïser les variantes subtiles (taille, référence, numéro) :",
+    "visuellement similaires, ORDONNÉS par similarité visuelle DÉCROISSANTE",
+    "(le #1 est le plus proche de l'image que tu vois, le #15 le plus lointain).",
+    "",
+    "RÈGLES d'utilisation OBLIGATOIRES :",
+    "1. Si le TOP 3 des matches contient une marque + un modèle/référence",
+    "   spécifique (ex 'FASR V11', 'JBL Charge 5', 'Sony WH-1000XM4',",
+    "   'Ninja AF400EU'), PRÉFÈRE cette identification même si tu ne",
+    "   connais pas la marque. La ressemblance visuelle prime sur ta",
+    "   familiarité avec une marque.",
+    "2. N'utilise les matches suivants (#4-15) QUE pour désambiguïser des",
+    "   variantes subtiles (taille, coloris, année, numéro) — jamais pour",
+    "   remonter une marque plus connue qui n'apparaît pas dans le top 3.",
+    "3. Ne remonte JAMAIS spontanément le nom d'une marque simplement",
+    "   parce que tu la connais mieux. Si la marque n'est pas dans le",
+    "   top 3 des matches, elle n'est probablement pas sur l'image.",
+    "4. Si les premiers matches sont des titres génériques de plateformes",
+    "   (ex 'Enceinte Bluetooth - Photo, audio & vidéo' = catégorie",
+    "   Leboncoin, pas un produit), IGNORE-les et cherche le premier",
+    "   match qui contient une marque + modèle réels.",
+    "",
+    "Matches (ordonnés par similarité) :",
     ...cleaned.map((t, i) => `  ${i + 1}. ${t}`),
   ].join('\n');
   return BASE_PROMPT + '\n' + contextBlock;
