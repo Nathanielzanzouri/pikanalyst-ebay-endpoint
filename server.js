@@ -5530,6 +5530,9 @@ app.post('/scan', async (req, res) => {
             tcg_currency_original: (tcgPrice != null && tcgPrice > 0) ? 'USD' : null,
             sources_available: _srcEn,
             card_language: toCardLanguage(language),
+            variant: _gf.variant,                    // 'Raw' | 'Graded' | null
+            grading_company: _gf.gradingCompany,     // 'PSA' | 'CGC' | 'BGS' | ... | null
+            grade: _gf.grade,                        // '10' | '9' | ... | null
             identified_by: 'lens-en-vote',
             pokemon_votes: vote.votes,
             quota,
@@ -5606,6 +5609,9 @@ app.post('/scan', async (req, res) => {
             ebay_sales_count: result.ebay_sales_count ?? 0,
             sources_available: _srcJp,
             card_language: toCardLanguage(language),
+            variant: _gf.variant,
+            grading_company: _gf.gradingCompany,
+            grade: _gf.grade,
             identified_by: 'lens-jp-vote',
             lang_mismatch: langMismatch,
             pokemon_votes: vote.votes,
@@ -5680,6 +5686,9 @@ app.post('/scan', async (req, res) => {
             ebay_sales_count: result.ebay_sales_count ?? 0,
             sources_available: _srcFr,
             card_language: toCardLanguage(language),
+            variant: _gf.variant,
+            grading_company: _gf.gradingCompany,
+            grade: _gf.grade,
             identified_by: 'lens-fr-vote',
             pokemon_votes: vote.votes,
             quota,
@@ -5746,7 +5755,7 @@ app.post('/scan', async (req, res) => {
         }).catch(() => {});
         const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
         const _srcLens = (mp != null && mp > 0) ? ['ebay_sold'] : [];
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, sources_available: _srcLens, card_language: toCardLanguage(language), identified_by: 'lens', quota, scanLogId: logId });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, sources_available: _srcLens, card_language: toCardLanguage(language), variant: _gf.variant, grading_company: _gf.gradingCompany, grade: _gf.grade, identified_by: 'lens', quota, scanLogId: logId });
       }
 
       // Route 3: Non-card → Google Shopping for retail/resale pricing.
@@ -6200,6 +6209,11 @@ app.post('/scan', async (req, res) => {
       // params.language is only defined on the manual branch; analyze may not
       // carry a language here, so we fall back to null which the front handles.
       result.card_language = toCardLanguage(params && params.language);
+      // Manual + analyze paths don't run grade detection (text-based query,
+      // no image → no PSA slab OCR). Null tells the front to treat as raw.
+      if (result.variant == null)         result.variant = null;
+      if (result.grading_company == null) result.grading_company = null;
+      if (result.grade == null)           result.grade = null;
     }
     return res.json({ ...result, scanLogId: scanLogIdOut, quota });
   } catch (err) {
