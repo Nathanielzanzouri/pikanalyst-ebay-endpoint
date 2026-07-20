@@ -584,6 +584,12 @@ const GRADING_KEYWORDS = [
   'gem mint', 'gem mt', 'gem-mint',
   // Grade scores with company prefix (safe — require company name)
   'psa 9', 'psa 10', 'cgc 9', 'cgc 10', 'bgs 9', 'bgs 10',
+  // Chinese / Asian grading companies (added 2026-07-20). PCG = Pokemon
+  // Card Grading (Chinese), PSL = Poker Sports League / Pokemon Sammler
+  // Liga variants seen on Mega Gengar SAR scans. Both have "N 10", "N 9"
+  // scoring conventions similar to PSA.
+  'pcg 9', 'pcg 10', 'pcg9', 'pcg10',
+  'psl 9', 'psl 10', 'psl9', 'psl10',
 ];
 function isGradedCard(title) {
   const lower = title.toLowerCase();
@@ -817,16 +823,34 @@ function userIsScanningTagTeam(card) {
 //     "SV2a: Pokemon Card 151" (JP).
 // SerpApi/eBay return both variants when we query by number, polluting the
 // median across language tiers (JP version ~€30, EN version ~€80).
-// Rejects the wrong-language variant on EN/FR scans. JP scans already pass
+// Rejects wrong-language variants on EN/FR scans. JP scans already pass
 // through the upstream JP-keyword filter elsewhere.
+//
+// Beyond Japanese (already caught), the Mega Dream SV set — and modern
+// SAR/SIR reprints in general — ship simultaneously in Simplified
+// Chinese, Traditional Chinese, Korean and Indonesian. All share the
+// same card number as the English version (240/193 etc.), so an EN scan
+// used to return a mix of "Mega Impian" (Indonesian), "M2aF" (Chinese
+// Trad), "M2a KR" (Korean) alongside the English print (scan
+// 9fccafd7). Reject any of those variant markers when the scan language
+// is EN or FR.
 function isWrongLanguageVersion(title, scanLanguage) {
   if (!title) return false;
   const lower = title.toLowerCase();
+  // Language name markers, case-insensitive, word-boundaried.
+  const LANG_RE = /\b(japanese|japonaise|japonais|jpn|chinese|chinois|s.?chinois|traditional\s+chinese|simplified\s+chinese|korean|cor[ée]en|coreen|indonesian|indonesia|indo|vietnamese|thai)\b/i;
+  // Asian set / regional codes (JP-exclusive plus Mega Dream regional
+  // reprint codes MA3 / M2a / M2aF / MA3F etc.). These substrings never
+  // appear in a legit EN/FR listing.
+  const ASIAN_SET_RE = /\b(sv2a|sv4a|sv6a|sv7a|s8a|s9a|s10a|s11a|s12a|ma3f?|m2af?|pcg|mega\s+impian|kr\s+gengar|jp\s+gengar)\b/i;
   if (scanLanguage === 'EN') {
-    return /\b(japanese|japonaise|japonais|jpn|sv2a|sv4a|s11a|s12a|s8a|s9a)\b/i.test(lower);
+    return LANG_RE.test(lower) || ASIAN_SET_RE.test(lower);
   }
   if (scanLanguage === 'FR') {
-    return /\b(japanese|japonaise|japonais|jpn|sv2a|sv4a|s11a|s12a|s8a|s9a|english only|eng only)\b/i.test(lower);
+    // FR gets same filters PLUS an English-only marker exclusion.
+    return LANG_RE.test(lower)
+        || ASIAN_SET_RE.test(lower)
+        || /\b(english\s+only|eng\s+only)\b/i.test(lower);
   }
   return false;
 }
