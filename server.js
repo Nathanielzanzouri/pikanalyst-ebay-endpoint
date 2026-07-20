@@ -591,9 +591,34 @@ const GRADING_KEYWORDS = [
   'pcg 9', 'pcg 10', 'pcg9', 'pcg10',
   'psl 9', 'psl 10', 'psl9', 'psl10',
 ];
+// Number-required grader patterns. Kept OUT of GRADING_KEYWORDS because their
+// bare abbreviations would false-positive on common English/French words
+// ("price tag", "bags", etc.). The regex requires an adjacent digit so only
+// real grade mentions match — "TAG 10 High Rated", "AGS 9.5", "ACE 10".
+// Ref: scan showed a "TAG 10" listing leaking into RAW and inflating the
+// median. GetGraded is intentionally not listed here — it is already caught
+// by 'graded' via substring match ('getgraded'.includes('graded') === true).
+const GRADING_PATTERNS = [
+  /\btag\s*\d/i,
+  /\bags\s*\d/i,
+  /\bace\s*\d/i,
+];
+
 function isGradedCard(title) {
   const lower = title.toLowerCase();
-  return GRADING_KEYWORDS.some(kw => lower.includes(kw));
+  if (GRADING_KEYWORDS.some(kw => lower.includes(kw))) return true;
+  return GRADING_PATTERNS.some(re => re.test(lower));
+}
+
+// Normalise the in-scope `language` variable ('EN'/'FR'/'JP'/'WORLD'/null)
+// into the value exposed on CARD_RESULT as `card_language`. Only returns the
+// three languages Lakkot supports pricing for; anything else (WORLD, empty,
+// unknown) becomes null so the front can render an "unknown" state instead
+// of a wrong flag.
+function toCardLanguage(lang) {
+  if (!lang) return null;
+  const l = String(lang).toLowerCase();
+  return (l === 'en' || l === 'fr' || l === 'jp') ? l : null;
 }
 
 // Derive the new scan_log columns (variant/grading_company/grade/match_type)
@@ -5504,6 +5529,7 @@ app.post('/scan', async (req, res) => {
             tcg_url: tcgUrl,
             tcg_currency_original: (tcgPrice != null && tcgPrice > 0) ? 'USD' : null,
             sources_available: _srcEn,
+            card_language: toCardLanguage(language),
             identified_by: 'lens-en-vote',
             pokemon_votes: vote.votes,
             quota,
@@ -5579,6 +5605,7 @@ app.post('/scan', async (req, res) => {
             set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
             sources_available: _srcJp,
+            card_language: toCardLanguage(language),
             identified_by: 'lens-jp-vote',
             lang_mismatch: langMismatch,
             pokemon_votes: vote.votes,
@@ -5652,6 +5679,7 @@ app.post('/scan', async (req, res) => {
             set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
             sources_available: _srcFr,
+            card_language: toCardLanguage(language),
             identified_by: 'lens-fr-vote',
             pokemon_votes: vote.votes,
             quota,
@@ -5718,7 +5746,7 @@ app.post('/scan', async (req, res) => {
         }).catch(() => {});
         const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
         const _srcLens = (mp != null && mp > 0) ? ['ebay_sold'] : [];
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, sources_available: _srcLens, identified_by: 'lens', quota, scanLogId: logId });
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, sources_available: _srcLens, card_language: toCardLanguage(language), identified_by: 'lens', quota, scanLogId: logId });
       }
 
       // Route 3: Non-card → Google Shopping for retail/resale pricing.
@@ -6169,6 +6197,9 @@ app.post('/scan', async (req, res) => {
       if (_tcgOut != null && _tcgOut > 0) _src.push('tcgplayer');
       result.sources_available = _src;
       result.tcg_currency_original = (_tcgOut != null && _tcgOut > 0) ? 'USD' : null;
+      // params.language is only defined on the manual branch; analyze may not
+      // carry a language here, so we fall back to null which the front handles.
+      result.card_language = toCardLanguage(params && params.language);
     }
     return res.json({ ...result, scanLogId: scanLogIdOut, quota });
   } catch (err) {
