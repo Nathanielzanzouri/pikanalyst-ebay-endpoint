@@ -1618,9 +1618,23 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
   // Among entries with the winning key, prefer the slash form for the eBay
   // query (more specific, e.g. "020/082" disambiguates across sets). Fall
   // back to the bare form (JP retro 009-style) when no slash entry exists.
+  //
+  // If MULTIPLE slash forms share the same padded numerator (same key), pick
+  // the most frequent one — a single rogue listing with a typo/misprinted
+  // denominator ("240/080" for a real 240/193 card) must not outvote 4
+  // matches that agree on the correct denominator. Reference: scan 704a3170
+  // where match #1 had a mistyped 240/080 and won over 4 correct 240/193
+  // matches simply because it appeared first in the array.
   const winners = topKey ? matchesForTop.filter(m => m.number && numberVoteKey(m.number) === topKey) : matchesForTop;
-  const slashWinner = winners.find(m => m.number && m.number.includes('/'));
-  const topNumber = slashWinner ? slashWinner.number : (winners[0]?.number || null);
+  const slashCounts = {};
+  for (const w of winners) {
+    if (w.number && w.number.includes('/')) {
+      slashCounts[w.number] = (slashCounts[w.number] || 0) + 1;
+    }
+  }
+  const topSlashEntry = Object.entries(slashCounts).sort((a, b) => b[1] - a[1])[0];
+  const topSlashForm = topSlashEntry ? topSlashEntry[0] : null;
+  const topNumber = topSlashForm || (winners[0]?.number || null);
   let bestMatch = null;
   if (targetLang === 'JP') {
     bestMatch =
