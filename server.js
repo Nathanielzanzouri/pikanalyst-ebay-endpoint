@@ -1780,6 +1780,57 @@ async function fetchPokemonTCG(card) {
       }
     } catch (e) { continue; }
   }
+
+  // pokemontcg.io didn't have TCGPlayer prices (common on very recent
+  // releases and low-volume rares — the API stores the card metadata
+  // but not the price object). Fall back to TCGdex which mirrors both
+  // TCGPlayer and Cardmarket. Reference: scan 1d363476, Mega Gengar ex
+  // Ascended Heroes 284/217 → pokemontcg has no prices, TCGdex has
+  // marketPrice $1277.
+  try {
+    const searchName = encodeURIComponent((card.card_name || '').split(/\s+/)[0] || '');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const searchRes = await fetch(
+      `https://api.tcgdex.net/v2/en/cards?name=${searchName}`,
+      { signal: ctrl.signal }
+    );
+    clearTimeout(timer);
+    if (searchRes.ok) {
+      const arr = await searchRes.json();
+      if (Array.isArray(arr) && arr.length > 0) {
+        const paddedNum = numberPart ? String(numberPart).padStart(3, '0') : null;
+        const match = (paddedNum && arr.find(c => c.localId === paddedNum || c.localId === numberPart))
+                    || arr[0];
+        const ctrl2 = new AbortController();
+        const timer2 = setTimeout(() => ctrl2.abort(), 5000);
+        const cardRes = await fetch(`https://api.tcgdex.net/v2/en/cards/${match.id}`, { signal: ctrl2.signal });
+        clearTimeout(timer2);
+        if (cardRes.ok) {
+          const cardData = await cardRes.json();
+          const tcgp = cardData?.pricing?.tcgplayer;
+          if (tcgp) {
+            // Pick market price from any available variant (normal/holofoil/reverseHolofoil).
+            // TCGdex returns per-variant objects with { marketPrice, lowPrice, ... }.
+            const variantKeys = ['normal', 'holofoil', 'reverseHolofoil', '1stEditionNormal', '1stEditionHolofoil'];
+            for (const k of variantKeys) {
+              const v = tcgp[k];
+              if (v && typeof v.marketPrice === 'number' && v.marketPrice > 0) {
+                console.log('[Lakkot] TCG match via TCGdex:', match.name, '→ $' + v.marketPrice);
+                return {
+                  market_price_usd: Math.round(v.marketPrice * 100) / 100,
+                  tcg_url: `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(match.name + ' ' + match.localId)}`,
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[Lakkot] TCGdex fallback failed:', e.message);
+  }
+
   return NULL_PRICES;
 }
 
