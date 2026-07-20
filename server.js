@@ -917,6 +917,33 @@ function isApparelOrMerch(lowerText) {
   return APPAREL_MERCH_KEYWORDS.some(kw => lowerText.includes(kw));
 }
 
+// Sports stickers / non-TCG collectibles that share "cartes" or "collection"
+// vocabulary with the TCG world. A scan whose TOP Lens match happens to be a
+// generic auction-house catalog title ("COLLECTION DE RARES CARTES MAGIC &
+// POKEMON") routes to the TCG pipeline on the pokemon keyword, but the real
+// product — visible in matches #2+ — is a Panini Foot sticker.
+// Reference scan 2683da03 (Zidane Foot '95 sticker returned NO_DATA).
+const NON_TCG_COLLECTIBLE_KEYWORDS = [
+  'panini', 'vignette', 'sticker', 'stickers',
+  'album panini', 'foot 9', 'foot 20',   // Panini football album years
+  'coupe du monde', 'euro 20', 'coupe d\'europe',
+];
+// Returns true when ≥3 of the top 15 Lens match titles contain a
+// non-TCG-collectible keyword — signal that the actual product is a sports
+// sticker or similar, not a TCG card, even if the top single match tripped
+// isTCGCard on a stray "pokemon" / "magic" word.
+function lensConsensusIsSportsSticker(lensMatches) {
+  if (!Array.isArray(lensMatches) || lensMatches.length === 0) return false;
+  let hits = 0;
+  for (const m of lensMatches.slice(0, 15)) {
+    const title = (typeof m === 'string' ? m : (m?.title || '')).toLowerCase();
+    if (!title) continue;
+    if (NON_TCG_COLLECTIBLE_KEYWORDS.some(kw => title.includes(kw))) hits++;
+    if (hits >= 3) return true;
+  }
+  return false;
+}
+
 function isTCGCard(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
@@ -5456,8 +5483,14 @@ app.post('/scan', async (req, res) => {
             .trim()
         : null;
 
-      // Check if Lens identified a card
-      if (cleanLensName && isTCGCard(cleanLensName)) {
+      // Check if Lens identified a card. Second gate: if the top Lens
+      // match trips isTCGCard on a stray "pokemon"/"magic" word but the
+      // OTHER top matches all describe a Panini sticker or similar non-
+      // TCG collectible, veto the TCG route so the scan reaches Gemini
+      // Vision. Reference: scan 2683da03 (Zidane Foot '95 sticker).
+      const lensLooksLikeSportsSticker = lensConsensusIsSportsSticker(lensResult?.visualMatches || []);
+      if (lensLooksLikeSportsSticker) console.log('[Lakkot] lens consensus = sports sticker → veto TCG routing');
+      if (cleanLensName && isTCGCard(cleanLensName) && !lensLooksLikeSportsSticker) {
         // Strip grading keywords from Lens product name — Lens often finds graded listings
         // but the card on stream is typically raw
         const cleanedName = cleanLensName
