@@ -3729,12 +3729,21 @@ app.post('/scan/cardmarket', async (req, res) => {
       return res.json({ cardmarket: null });
     }
 
+    // TCGdex image field is a base URL without extension. Append /low.png
+    // for the thumbnail (~200px, ~10-20 KB). Used by the Cardmarket box
+    // UI so the user can visually verify the price matches THEIR card.
+    // Null if TCGdex didn't attach an image (rare on modern sets, common
+    // on very old / obscure promos).
+    const imageBase = cardData?.image || null;
+    const imageUrl = imageBase ? `${imageBase}/low.png` : null;
+
     return res.json({
       cardmarket: {
         trend: referencePrice,
         avg: cm.avg,
         low: cm.low,
         avg30: avg30,
+        image_url: imageUrl,
         // Cardmarket's /Cards/{idProduct} short URL is unreliable. Use the
         // advanced singles search — we add the localId from TCGdex (which carries
         // any leading zero) plus the set's TCGdex slug (e.g. "sv2a", "sv03.5") so
