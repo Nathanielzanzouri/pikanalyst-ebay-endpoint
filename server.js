@@ -1700,6 +1700,62 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
   };
 }
 
+// Debug endpoint — trace the full TCGPlayer lookup for a given card.
+// Usage: GET /debug/tcg-lookup?name=Gengar&number=284&set=me2pt5
+// Returns exactly what pokemontcg.io and TCGdex returned + final decision.
+// Zero auth required (read-only, doesn't touch scan_logs). Safe to leave in
+// prod — pure diagnostic.
+app.get('/debug/tcg-lookup', async (req, res) => {
+  const { name, number, set } = req.query;
+  if (!name || !number) return res.status(400).json({ error: 'name and number required' });
+  const debug = { input: { name, number, set: set || null } };
+  const card = { card_name: name, card_number: number, set_name: set || '', condition: 'Near Mint' };
+
+  // Step 1 — pokemontcg.io direct (mimics the primary path)
+  try {
+    const rawNum = number.split('/')[0].trim();
+    const numberPart = rawNum.replace(/\D/g, '').replace(/^0+(\d)/, '$1');
+    const q = set
+      ? `name:"${name}" number:"${numberPart}" set.id:"${set}"`
+      : `name:"${name}" number:"${numberPart}"`;
+    debug.pokemontcg_query = q;
+    const r = await fetch(`https://api.pokemontcg.io/v2/cards?q=${encodeURIComponent(q)}&select=id,name,number,set,tcgplayer&pageSize=5`);
+    const data = await r.json();
+    debug.pokemontcg_results = (data.data || []).map(c => ({
+      id: c.id, name: c.name, number: c.number,
+      has_prices: !!(c.tcgplayer?.prices),
+      price_sample: c.tcgplayer?.prices ? Object.entries(c.tcgplayer.prices).map(([k, v]) => ({ variant: k, market: v?.market })) : null,
+    }));
+  } catch (e) { debug.pokemontcg_error = e.message; }
+
+  // Step 2 — Full fetchPokemonTCG (with TCGdex fallback)
+  try {
+    const result = await fetchPokemonTCG(card);
+    debug.final = result;
+  } catch (e) { debug.final_error = e.message; }
+
+  // Step 3 — Direct TCGdex probe for comparison
+  try {
+    const searchName = encodeURIComponent(name.split(/\s+/)[0]);
+    const searchRes = await fetch(`https://api.tcgdex.net/v2/en/cards?name=${searchName}`);
+    const arr = await searchRes.json();
+    const padded = String(number.split('/')[0]).padStart(3, '0');
+    const match = arr.find(c => c.localId === padded) || arr[0];
+    if (match) {
+      const detailRes = await fetch(`https://api.tcgdex.net/v2/en/cards/${match.id}`);
+      const detail = await detailRes.json();
+      debug.tcgdex_direct = {
+        id: match.id, name: match.name, localId: match.localId,
+        pricing_tcgplayer: detail?.pricing?.tcgplayer || null,
+      };
+    } else {
+      debug.tcgdex_direct = { result_count: arr.length, no_match: true };
+    }
+  } catch (e) { debug.tcgdex_direct_error = e.message; }
+
+  res.json(debug);
+});
+
 // ─── TCGPlayer price lookup (EN cards only) ──────────────────────────────────
 async function fetchPokemonTCG(card) {
   const NULL_PRICES = { market_price_usd: null };
