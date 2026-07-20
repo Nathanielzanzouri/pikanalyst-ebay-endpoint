@@ -2163,6 +2163,9 @@ async function fetchEbayFinding(card, language = 'WORLD', dateRange = 30) {
     };
   }).filter(l => l.price != null);
 
+  // NOTE: values below are EUR despite the *_usd suffix. The name is legacy
+  // (pre-toEur SerpAPI epoch) and kept verbatim for extension compatibility.
+  // See TODO in the SerpApi return path.
   return {
     market_price_usd: Math.round(avg * 100) / 100,
     price_low_usd:    Math.round(Math.min(...cleanPrices) * 100) / 100,
@@ -2452,6 +2455,9 @@ function buildBrowseShapeFromSerp(serpResult, card, language, dateRange) {
   const lowConfThreshold = parseInt(process.env.LOW_CONFIDENCE_THRESHOLD, 10) || 3;
   const markets = [serpResult.domain];
 
+  // NOTE: values below are EUR despite the *_usd suffix. The name is legacy
+  // (pre-toEur SerpAPI epoch) and kept verbatim for extension compatibility.
+  // Rename to *_eur will require a coordinated extension release.
   return {
     market_price_usd: Math.round(median * 100) / 100,
     price_low_usd:    Math.round(prices[Math.floor(prices.length * 0.10)] * 100) / 100,
@@ -3867,12 +3873,21 @@ app.post('/scan/cardmarket', async (req, res) => {
     // resistant to that, so prefer it when it's meaningfully higher than trend.
     const trend = cm.trend ?? null;
     const avg30 = cm['avg30'] ?? null;
+    const avg7 = cm['avg7'] ?? null;
     const referencePrice = (avg30 != null && (trend == null || avg30 > trend * 2))
       ? avg30
       : trend;
     if (referencePrice == null || referencePrice <= 0) {
       return res.json({ cardmarket: null });
     }
+
+    // 30-day trend percentage: how much the current trend deviates from the
+    // 30-day average. Positive = rising, negative = falling. Rounded to 1
+    // decimal — the front is not allowed to compute this to keep parity
+    // between the web app and the future extension release.
+    const trend30dPct = (trend != null && avg30 != null && avg30 > 0)
+      ? Math.round(((trend - avg30) / avg30) * 1000) / 10
+      : null;
 
     // TCGdex image field is a base URL without extension. Append /low.png
     // for the thumbnail (~200px, ~10-20 KB). Used by the Cardmarket box
@@ -3888,6 +3903,8 @@ app.post('/scan/cardmarket', async (req, res) => {
         avg: cm.avg,
         low: cm.low,
         avg30: avg30,
+        avg_7d: avg7,               // additive — 7-day average from TCGdex
+        trend_30d_pct: trend30dPct, // additive — computed backend-side, 1 decimal
         image_url: imageUrl,
         // Cardmarket's /Cards/{idProduct} short URL is unreliable. Use the
         // advanced singles search — we add the localId from TCGdex (which carries
@@ -5472,6 +5489,10 @@ app.post('/scan', async (req, res) => {
 
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-en-vote', productName: `${vote.nameEN} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
+          const _srcEn = [];
+          if (mp != null && mp > 0) _srcEn.push('ebay_sold');
+          if (tcgPrice != null && tcgPrice > 0) _srcEn.push('tcgplayer');
+
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -5481,6 +5502,8 @@ app.post('/scan', async (req, res) => {
             ebay_sales_count: result.ebay_sales_count ?? 0,
             tcg_market_price: tcgPrice,
             tcg_url: tcgUrl,
+            tcg_currency_original: (tcgPrice != null && tcgPrice > 0) ? 'USD' : null,
+            sources_available: _srcEn,
             identified_by: 'lens-en-vote',
             pokemon_votes: vote.votes,
             quota,
@@ -5546,6 +5569,8 @@ app.post('/scan', async (req, res) => {
           const langMismatch = vote.isPromo ? 'EN promo — JP version not found' : null;
           if (langMismatch) console.log(`[Lakkot] JP lang mismatch: ${vote.number} is a promo code, not a JP set number`);
 
+          const _srcJp = (mp != null && mp > 0) ? ['ebay_sold'] : [];
+
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -5553,6 +5578,7 @@ app.post('/scan', async (req, res) => {
             card_name_fr: vote.nameFR,
             set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
+            sources_available: _srcJp,
             identified_by: 'lens-jp-vote',
             lang_mismatch: langMismatch,
             pokemon_votes: vote.votes,
@@ -5616,6 +5642,8 @@ app.post('/scan', async (req, res) => {
           }).catch(() => {});
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card-fr-vote', productName: `${vote.nameFR} ${vote.number || ''}`, lensProductName: productName, ebayQuery: result.ebay_search || voteQuery, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles, lensSelected: vote.selectedTitle, ebayResults: ebayTopResults, langToggle: language, promoEnabled, multiSetEnabled, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
 
+          const _srcFr = (mp != null && mp > 0) ? ['ebay_sold'] : [];
+
           return res.json({
             type: 'CARD_RESULT',
             ...result,
@@ -5623,6 +5651,7 @@ app.post('/scan', async (req, res) => {
             card_name_fr: vote.nameFR,
             set_name: vote.set ? `${vote.set.name} (${vote.set.series})` : result.set_name || '',
             ebay_sales_count: result.ebay_sales_count ?? 0,
+            sources_available: _srcFr,
             identified_by: 'lens-fr-vote',
             pokemon_votes: vote.votes,
             quota,
@@ -5688,7 +5717,8 @@ app.post('/scan', async (req, res) => {
           listings:     result._serpListings || [],
         }).catch(() => {});
         const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'lens-card', productName: result.card_name, lensProductName: productName, ebayQuery: result.ebay_search, resultType: mp ? 'CARD_RESULT' : 'NO_DATA', marketPrice: mp, askingPrice: sellerPrice, verdict: v, ebaySalesCount: result.ebay_sales_count ?? 0, lensMatches: lensMatchTitles2, lensSelected: productName, ebayResults: ebayTopResults2, langToggle: language, productCategory: 'Pokemon', variant: _gf.variant, gradingCompany: _gf.gradingCompany, grade: _gf.grade, matchType: _gf.matchType });
-        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, identified_by: 'lens', quota, scanLogId: logId });
+        const _srcLens = (mp != null && mp > 0) ? ['ebay_sold'] : [];
+        return res.json({ type: 'CARD_RESULT', ...result, ebay_sales_count: result.ebay_sales_count ?? 0, sources_available: _srcLens, identified_by: 'lens', quota, scanLogId: logId });
       }
 
       // Route 3: Non-card → Google Shopping for retail/resale pricing.
@@ -6131,6 +6161,15 @@ app.post('/scan', async (req, res) => {
     }
     // scanLogIdOut lets the extension fire reportRenderTiming → client_total_ms
     // for manual-lookup scans (incl. picker tile-taps), same as image scans.
+    if (result && typeof result === 'object') {
+      const _mpOut = result.market_price_usd ?? result.ebay_market_price ?? null;
+      const _tcgOut = result.tcg_market_price ?? null;
+      const _src = [];
+      if (_mpOut != null && _mpOut > 0) _src.push('ebay_sold');
+      if (_tcgOut != null && _tcgOut > 0) _src.push('tcgplayer');
+      result.sources_available = _src;
+      result.tcg_currency_original = (_tcgOut != null && _tcgOut > 0) ? 'USD' : null;
+    }
     return res.json({ ...result, scanLogId: scanLogIdOut, quota });
   } catch (err) {
     console.error('[Yamo] /scan error:', err.message);
