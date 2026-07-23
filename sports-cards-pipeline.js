@@ -413,10 +413,25 @@ async function analyzeSportsCardSales(vision, opts = {}) {
   }
   vision = enriched;
 
-  const cascade = buildQueryCascade(vision);
+  let cascade = buildQueryCascade(vision);
   if (cascade.length === 0) {
-    console.warn('[Lakkot sports] no query buildable — vision missing player + (year OR set) even after fallback');
-    return null;
+    // Last-resort fallback: use Gemini's own query_ebay / shopping_query
+    // when structured extraction fails. These fields are filled on every
+    // sports scan we've observed and typically already respect the hobby
+    // convention (e.g. "2023 Panini Prizm Victor Wembanyama Rookie Card").
+    // Better to run a slightly less precise query than to skip eBay sold
+    // entirely and drop back to the v2 active-listings path. Reference
+    // scan a659546f / b57b11bd — pivots stayed empty even after backfill.
+    const rescueQ = (vision.query_ebay || vision.shopping_query || '').trim();
+    if (rescueQ && rescueQ.length >= 8) {
+      console.warn(
+        `[Lakkot sports] structured cascade empty — using rescue query: "${rescueQ}"`,
+      );
+      cascade = [{ q: rescueQ, level: 3 }];  // level 3 = rescue tier
+    } else {
+      console.warn('[Lakkot sports] no query buildable — vision missing player + (year OR set) even after fallback');
+      return null;
+    }
   }
 
   console.log(
@@ -474,9 +489,13 @@ async function analyzeSportsCardSales(vision, opts = {}) {
   // Scope semantics for the front:
   //   Q1 → parallel + (grade if graded)  → exact_parallel_(graded|raw)
   //   Q2 → set + (grade if graded)       → set_level_(graded|raw)
+  //   Q3 → gemini rescue query           → gemini_rescue_(graded|raw)
+  //        (indicates lower precision — front may show a caveat)
   const scope = (usedLevel === 1)
     ? (vision.card_graded ? 'exact_parallel_graded' : 'exact_parallel_raw')
-    : (vision.card_graded ? 'set_level_graded'     : 'set_level_raw');
+  : (usedLevel === 3)
+    ? (vision.card_graded ? 'gemini_rescue_graded'  : 'gemini_rescue_raw')
+    : (vision.card_graded ? 'set_level_graded'      : 'set_level_raw');
 
   // Recent-sales sample for the UI. Chronological desc if we have timestamps.
   const recent = [...validSales].sort((a, b) => {
