@@ -5496,8 +5496,20 @@ app.post('/scan', async (req, res) => {
         console.log('[Lakkot/onepiece] vote returned no card_number — falling through to default lens-card path');
       }
 
+      // Sports-card consensus veto — must run BEFORE the Pokemon votes
+      // below. Otherwise a scan whose Lens matches clearly describe an
+      // NBA / soccer / NFL card slips into the Pokemon vote (which picks
+      // a parallel colour like "Silver" as a Pokemon name) before it
+      // ever reaches Gemini Vision + the sports pipeline. Reference:
+      // scan 4f569e9e (Wembanyama Prizm → product_name = "Silver" →
+      // ebay_query = "Silver pokemon card").
+      const _lensLooksLikeSportsCardPreVote = lensConsensusIsSportsCard(lensResult?.visualMatches || []);
+      if (_lensLooksLikeSportsCardPreVote) {
+        console.log('[Lakkot] lens consensus = sports card → skip Pokemon votes, route to Gemini Vision');
+      }
+
       // === EN toggle: vote-based Pokemon identification ===
-      if (language === 'EN' && lensResult?.visualMatches) {
+      if (!_lensLooksLikeSportsCardPreVote && language === 'EN' && lensResult?.visualMatches) {
         const vote = extractPokemonFromMatches(lensResult.visualMatches, 'EN', { promoMode: promoEnabled });
         if (vote) {
           const setKw = detectSetContextKeyword(lensResult.visualMatches);
@@ -5606,7 +5618,7 @@ app.post('/scan', async (req, res) => {
       }
 
       // === JP toggle: vote-based Pokemon identification ===
-      if (language === 'JP' && lensResult?.visualMatches) {
+      if (!_lensLooksLikeSportsCardPreVote && language === 'JP' && lensResult?.visualMatches) {
         const vote = extractPokemonFromMatches(lensResult.visualMatches, 'JP', { promoMode: promoEnabled });
         if (vote) {
           const setKw = detectSetContextKeyword(lensResult.visualMatches);
@@ -5686,7 +5698,7 @@ app.post('/scan', async (req, res) => {
       }
 
       // === FR toggle: vote-based Pokemon identification ===
-      if (language === 'FR' && lensResult?.visualMatches) {
+      if (!_lensLooksLikeSportsCardPreVote && language === 'FR' && lensResult?.visualMatches) {
         const vote = extractPokemonFromMatches(lensResult.visualMatches, 'FR', { promoMode: promoEnabled });
         if (vote) {
           // Use French name for eBay query — French cards are listed with FR names on eBay France
