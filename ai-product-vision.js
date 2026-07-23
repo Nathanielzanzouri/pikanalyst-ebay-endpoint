@@ -119,6 +119,32 @@ const BASE_PROMPT = [
   "  sous coque de grading (PCGS, NGC, coque plastique avec code de grade lisible).",
   "  NE TENTE JAMAIS d'évaluer TB/SUP/FDC depuis l'image d'une pièce brute — ",
   "  c'est le rôle des ventes eBay filtrées par mots-clés d'état, pas le tien.",
+  "",
+  "Règles SPÉCIFIQUES sports_card :",
+  "- Les titres d'annonces (contexte Lens plus bas) suivent la convention hobby",
+  "  {année} {marque} {set} {joueur} #{numéro} {parallèle} {grade}. Utilise-les",
+  "  en priorité pour identifier le set exact et le parallèle, MAIS vérifie la",
+  "  cohérence avec l'image : si les titres disent 'Silver Prizm' et que la carte",
+  "  visible est dorée, fie-toi à l'image et baisse id_confidence.",
+  "- parallel : \"\" si tu ne peux pas trancher avec confiance. Une base",
+  "  correctement étiquetée vaut MIEUX qu'un parallèle inventé. Les valeurs",
+  "  usuelles : Silver, Blue, Red, Green, Gold, Hyper, Mojo, Fast Break,",
+  "  Concourse, Camo, Cracked Ice, etc.",
+  "- serial_numbered : uniquement si le \"/XX\" est LISIBLE sur l'image (ex",
+  "  \"45/99\"). Ne devine JAMAIS depuis le nom du parallèle — un Blue Prizm",
+  "  n'implique pas /199 automatiquement.",
+  "- is_rookie : true seulement si un logo RC est visible OU si tu es sûr",
+  "  que le set/année est la rookie du joueur.",
+  "- is_auto / is_patch : true seulement si visibles à l'image (signature",
+  "  encre, découpe patch memorabilia). Pas d'inférence depuis le set.",
+  "- card_graded : true UNIQUEMENT si la carte est visiblement sous coque",
+  "  (PSA, BGS, SGC, CGC, TAG, GetGraded avec étiquette et note lisibles).",
+  "  Sinon false — le grade sera déduit des ventes eBay filtrées.",
+  "- card_brand : Panini, Topps, Upper Deck, Futera, etc. Vide si non lisible.",
+  "- card_set : Prizm, Select, Mosaic, Optic, Chrome, Donruss, etc.",
+  "  Précision essentielle — c'est le champ le plus discriminant en query.",
+  "- sport : basketball, soccer (football européen), american_football (NFL),",
+  "  baseball, hockey, f1, mma, other.",
 ].join('\n');
 
 // Prepend the Lens titles as a "seller context" block so Gemini can vote
@@ -224,6 +250,26 @@ const RESPONSE_SCHEMA = {
     coin_fineness:         { type: 'NUMBER' },
     coin_graded:           { type: 'BOOLEAN' },
     coin_grade_visible:    { type: 'STRING' },
+    // Sports-card-specific fields — only meaningful when category ===
+    // "sports_card". Same convention as coin_* : Gemini fills them for
+    // every scan (schema stays stable) but downstream code only reads
+    // them when the category matches. All strings default to "" so
+    // absent → treated as "not applicable".
+    sport:                 { type: 'STRING' },
+    player:                { type: 'STRING' },
+    card_year:             { type: 'STRING' },
+    card_brand:            { type: 'STRING' },
+    card_set:              { type: 'STRING' },
+    card_number:           { type: 'STRING' },
+    parallel:              { type: 'STRING' },
+    serial_numbered:       { type: 'STRING' },
+    is_rookie:             { type: 'BOOLEAN' },
+    is_auto:               { type: 'BOOLEAN' },
+    is_patch:              { type: 'BOOLEAN' },
+    card_graded:           { type: 'BOOLEAN' },
+    grading_company:       { type: 'STRING' },
+    card_grade:            { type: 'STRING' },
+    id_confidence:         { type: 'NUMBER' },
   },
   required: [
     'category', 'brand', 'product_name', 'variant', 'display_title',
@@ -233,6 +279,10 @@ const RESPONSE_SCHEMA = {
     'coin_year_readable', 'coin_mintmark', 'coin_mintmark_readable',
     'coin_metal', 'coin_weight_grams', 'coin_fineness',
     'coin_graded', 'coin_grade_visible',
+    'sport', 'player', 'card_year', 'card_brand', 'card_set',
+    'card_number', 'parallel', 'serial_numbered',
+    'is_rookie', 'is_auto', 'is_patch',
+    'card_graded', 'grading_company', 'card_grade', 'id_confidence',
   ],
 };
 
@@ -311,6 +361,23 @@ function validate(obj) {
     coin_fineness:          nOrNull(obj.coin_fineness),
     coin_graded:            b(obj.coin_graded),
     coin_grade_visible:     s(obj.coin_grade_visible),
+    // Sports card fields — populated by Gemini only for category === "sports_card".
+    // Empty strings / false / null for any other category.
+    sport:                  s(obj.sport).toLowerCase(),
+    player:                 s(obj.player),
+    card_year:              s(obj.card_year),
+    card_brand:             s(obj.card_brand),
+    card_set:               s(obj.card_set),
+    card_number:            s(obj.card_number),
+    parallel:               s(obj.parallel),
+    serial_numbered:        s(obj.serial_numbered),
+    is_rookie:              b(obj.is_rookie),
+    is_auto:                b(obj.is_auto),
+    is_patch:               b(obj.is_patch),
+    card_graded:            b(obj.card_graded),
+    grading_company:        s(obj.grading_company).toUpperCase(),   // "PSA"|"BGS"|... normalised
+    card_grade:             s(obj.card_grade),
+    id_confidence:          conf(obj.id_confidence),
     _model: MODEL,
     _source: 'gemini_vision',
   };
