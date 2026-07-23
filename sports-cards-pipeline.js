@@ -68,11 +68,19 @@ const PLAYER_GENERIC = new Set([
   'hockey', 'wemby', 'the', 'and', 'de', 'du', 'des', 'la', 'le', 'les',
 ]);
 
-function enrichVisionFromText(vision) {
+function enrichVisionFromText(vision, lensTitles) {
   const enriched = { ...vision };
-  const bag = [vision.product_name, vision.variant, vision.shopping_query,
-               vision.query_ebay, vision.display_title, vision.brand]
-              .filter(Boolean).join(' ');
+  // Two-tier bag: Gemini's own fields (higher trust) first, Lens titles
+  // (fallback only) second. When a match is unambiguous both bags produce
+  // the same answer. When they diverge — e.g. Lens title #2 for scan
+  // a659546f mentions both "Prizm" AND "Mosaic" but the card is Prizm —
+  // Gemini's product_name wins because it only mentions Prizm.
+  const primaryBag = [vision.product_name, vision.variant, vision.shopping_query,
+                       vision.query_ebay, vision.display_title, vision.brand]
+                      .filter(Boolean).join(' ');
+  const lensBag = Array.isArray(lensTitles) ? lensTitles.slice(0, 15).join(' ') : '';
+  const bag = [primaryBag, lensBag].filter(Boolean).join(' ');
+  const lowPrimary = primaryBag.toLowerCase();
   const lowBag = bag.toLowerCase();
 
   // card_year — YYYY or YYYY-YY. Prefer 4-digit form matched with a
@@ -84,21 +92,35 @@ function enrichVisionFromText(vision) {
                         (yearSolo  ? yearSolo[1] : '');
   }
 
-  // card_brand — pick the first known brand present.
+  // card_brand — prefer primary bag (Gemini's own fields). Fall back to
+  // Lens bag only if primary has no known brand.
   if (!enriched.card_brand) {
     for (const b of KNOWN_BRANDS) {
-      if (lowBag.includes(b)) { enriched.card_brand = b.charAt(0).toUpperCase() + b.slice(1); break; }
+      if (lowPrimary.includes(b)) { enriched.card_brand = b.charAt(0).toUpperCase() + b.slice(1); break; }
+    }
+    if (!enriched.card_brand) {
+      for (const b of KNOWN_BRANDS) {
+        if (lowBag.includes(b)) { enriched.card_brand = b.charAt(0).toUpperCase() + b.slice(1); break; }
+      }
     }
   }
 
-  // card_set — pick the first known set present. Match longest first
-  // so "Topps Chrome" beats "Chrome" when both would qualify.
+  // card_set — same two-tier approach. Match longest-first inside each
+  // tier so "Topps Chrome" beats "Chrome" and "Panini Foot" beats "Foot".
   if (!enriched.card_set) {
     const sorted = [...KNOWN_SETS].sort((a, b) => b.length - a.length);
     for (const s of sorted) {
-      if (lowBag.includes(s)) {
+      if (lowPrimary.includes(s)) {
         enriched.card_set = s.replace(/\b\w/g, c => c.toUpperCase());
         break;
+      }
+    }
+    if (!enriched.card_set) {
+      for (const s of sorted) {
+        if (lowBag.includes(s)) {
+          enriched.card_set = s.replace(/\b\w/g, c => c.toUpperCase());
+          break;
+        }
       }
     }
   }
@@ -360,7 +382,7 @@ function computeStats(prices) {
 // ─── Orchestrator ────────────────────────────────────────────────────────
 // Returns { sports_card_data, listings, market_price_min, market_price_max,
 //           serpapi_calls_used } or null.
-async function analyzeSportsCardSales(vision) {
+async function analyzeSportsCardSales(vision, opts = {}) {
   if (!isSportsCardsPipelineEnabled()) return null;
   if (!vision || vision.category !== 'sports_card') return null;
 
@@ -377,10 +399,12 @@ async function analyzeSportsCardSales(vision) {
   );
 
   // Rescue pass: backfill empty pivots from product_name / variant /
-  // shopping_query. Gemini frequently fills these free-text fields
-  // correctly but leaves the dedicated pivot fields at "". Ref scan
-  // 23553af8 — id_confidence 0.98 but pivots empty.
-  const enriched = enrichVisionFromText(vision);
+  // shopping_query PLUS the raw Lens visual-match titles when provided.
+  // Gemini frequently fills these free-text fields correctly but leaves
+  // the dedicated pivot fields at "". Sometimes Gemini even omits the
+  // year entirely from every free-text field (scan a659546f), but the
+  // Lens titles carry it repeatedly ("2023" appeared 10+ times there).
+  const enriched = enrichVisionFromText(vision, opts.lensTitles || []);
   const diff = ['player', 'card_year', 'card_brand', 'card_set', 'card_number']
     .filter(k => vision[k] !== enriched[k])
     .map(k => `${k}: "${vision[k]||''}" → "${enriched[k]||''}"`);

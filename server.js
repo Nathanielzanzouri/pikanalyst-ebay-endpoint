@@ -5938,7 +5938,7 @@ app.post('/scan', async (req, res) => {
             // through to v2 listings + Gemini estimation band.
             if (enrich === null && vision.category === 'sports_card' && isSportsCardsPipelineEnabled()) {
               try {
-                const sportsRes = await analyzeSportsCardSales(vision);
+                const sportsRes = await analyzeSportsCardSales(vision, { lensTitles: lensTitlesForVision });
                 if (sportsRes) {
                   sportsSerpapiCalls = sportsRes.serpapi_calls_used || 0;
                   if (sportsRes.sports_card_data) {
