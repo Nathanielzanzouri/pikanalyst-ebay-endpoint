@@ -34,6 +34,126 @@ function isSportsCardsPipelineEnabled() {
   return String(process.env.USE_SPORTS_CARDS_PIPELINE || '').toLowerCase() === 'true';
 }
 
+// ─── Fallback field extraction ───────────────────────────────────────────
+// Gemini consistently identifies the card correctly at the level of
+// product_name / variant / shopping_query but leaves the dedicated
+// sports_* fields empty ("" default from the schema when unsure).
+// Instead of hoping the prompt convinces it, we regex-extract the
+// pivot fields from the free-text fields it DID fill. Only touches
+// fields that are currently empty — a value Gemini set explicitly
+// always wins. Reference: scan 23553af8 (id_confidence 0.98 but
+// pipeline returned "no query buildable").
+const KNOWN_SETS = [
+  'prizm', 'select', 'mosaic', 'optic', 'chrome', 'donruss', 'immaculate',
+  'contenders', 'national treasures', 'flawless', 'obsidian', 'origins',
+  'hoops', 'score', 'bowman', 'topps chrome', 'stadium club', 'sp authentic',
+  'young guns', 'upper deck', 'futera', 'match attax', 'megacracks',
+  'panini foot', 'panini world cup', 'playoff', 'skybox', 'pinnacle',
+];
+const KNOWN_BRANDS = [
+  'panini', 'topps', 'upper deck', 'bowman', 'futera', 'bandai', 'leaf',
+  'fleer', 'donruss', 'score', 'playoff', 'skybox', 'pinnacle',
+];
+// Parallel / color / grade tokens — end a "player name" sequence.
+const PLAYER_STOP_TOKENS = new Set([
+  'silver', 'gold', 'blue', 'red', 'green', 'yellow', 'orange', 'purple',
+  'pink', 'black', 'white', 'bronze', 'ruby', 'sapphire', 'emerald', 'diamond',
+  'refractor', 'auto', 'autograph', 'patch', 'holo', 'base', 'sparkle',
+  'wave', 'shimmer', 'hyper', 'mojo', 'lazer', 'ice', 'camo', 'concourse',
+  'psa', 'bgs', 'sgc', 'cgc', 'tag', 'ags', 'ace',
+]);
+const PLAYER_GENERIC = new Set([
+  'carte', 'card', 'cards', 'nba', 'nfl', 'mlb', 'nhl', 'ufc',
+  'rookie', 'rc', 'football', 'basketball', 'soccer', 'foot', 'baseball',
+  'hockey', 'wemby', 'the', 'and', 'de', 'du', 'des', 'la', 'le', 'les',
+]);
+
+function enrichVisionFromText(vision) {
+  const enriched = { ...vision };
+  const bag = [vision.product_name, vision.variant, vision.shopping_query,
+               vision.query_ebay, vision.display_title, vision.brand]
+              .filter(Boolean).join(' ');
+  const lowBag = bag.toLowerCase();
+
+  // card_year — YYYY or YYYY-YY. Prefer 4-digit form matched with a
+  // trailing "-YY" range so we don't grab a stray 2010 from a URL.
+  if (!enriched.card_year) {
+    const yearRange = bag.match(/\b(19|20)\d{2}\s*[-/]\s*\d{2}\b/);
+    const yearSolo  = bag.match(/\b((?:19|20)\d{2})\b/);
+    enriched.card_year = yearRange ? yearRange[0].replace(/\s+/g, '') :
+                        (yearSolo  ? yearSolo[1] : '');
+  }
+
+  // card_brand — pick the first known brand present.
+  if (!enriched.card_brand) {
+    for (const b of KNOWN_BRANDS) {
+      if (lowBag.includes(b)) { enriched.card_brand = b.charAt(0).toUpperCase() + b.slice(1); break; }
+    }
+  }
+
+  // card_set — pick the first known set present. Match longest first
+  // so "Topps Chrome" beats "Chrome" when both would qualify.
+  if (!enriched.card_set) {
+    const sorted = [...KNOWN_SETS].sort((a, b) => b.length - a.length);
+    for (const s of sorted) {
+      if (lowBag.includes(s)) {
+        enriched.card_set = s.replace(/\b\w/g, c => c.toUpperCase());
+        break;
+      }
+    }
+  }
+
+  // card_number — "#136", "N°136", "no 136", "number 136" style.
+  if (!enriched.card_number) {
+    const num = bag.match(/(?:#|n[°º]|no\.?|number)\s*(\d{1,4})\b/i);
+    if (num) enriched.card_number = num[1];
+  }
+
+  // player — extract the longest run of consecutive capitalized tokens
+  // that aren't brands, sets, colors, grades, years, or generic sport
+  // words. Handles all three seller-title orderings we've seen:
+  //   "Carte <PLAYER> Panini Prizm ..." (player before brand)
+  //   "Panini Prizm <YEAR> <PLAYER> Silver ..." (player between year+parallel)
+  //   "<YEAR> Fleer <PLAYER> Rookie #57" (player between brand+rookie)
+  if (!enriched.player) {
+    const rawSource = String(vision.product_name || vision.display_title || vision.shopping_query || '');
+    const tokens = rawSource.split(/\s+/);
+    const setTokens = new Set(KNOWN_SETS.flatMap(s => s.split(' ').map(t => t.toLowerCase())));
+    const brandTokens = new Set(KNOWN_BRANDS.flatMap(b => b.split(' ').map(t => t.toLowerCase())));
+
+    let best = [];
+    let current = [];
+    const flush = () => {
+      if (current.length > best.length && current.length >= 1 && current.length <= 4) {
+        best = current;
+      }
+      current = [];
+    };
+    for (const rawTok of tokens) {
+      const t = rawTok.replace(/[.,;:]+$/, '');
+      const l = t.toLowerCase();
+      const isCap = /^[A-ZÀ-Ýà-ÿ]/.test(t);
+      const isYear = /^\d{4}([-/]\d{2,4})?$/.test(t);
+      const isNoise = /^[#\d/\\|]/.test(t) || t.length <= 1;
+      const isBrand = brandTokens.has(l);
+      const isSet = setTokens.has(l);
+      const isStop = PLAYER_STOP_TOKENS.has(l);
+      const isGeneric = PLAYER_GENERIC.has(l);
+      const acceptable = isCap && !isYear && !isNoise && !isBrand
+                       && !isSet && !isStop && !isGeneric;
+      if (acceptable) {
+        current.push(t);
+      } else {
+        flush();
+      }
+    }
+    flush();
+    if (best.length > 0) enriched.player = best.join(' ');
+  }
+
+  return enriched;
+}
+
 // ─── Query cascade ───────────────────────────────────────────────────────
 // Q1: precise — year + set + player + parallel + grade suffix
 // Q2: broad — year + set + player + grade suffix (drops parallel)
@@ -244,9 +364,34 @@ async function analyzeSportsCardSales(vision) {
   if (!isSportsCardsPipelineEnabled()) return null;
   if (!vision || vision.category !== 'sports_card') return null;
 
+  // Log what Gemini actually returned in the pivot fields — the pipeline's
+  // early-exit rate is meaningless without knowing which fields were empty.
+  console.log(
+    '[Lakkot sports] gemini raw pivots:',
+    JSON.stringify({
+      player: vision.player, card_year: vision.card_year,
+      card_brand: vision.card_brand, card_set: vision.card_set,
+      card_number: vision.card_number, parallel: vision.parallel,
+      card_graded: vision.card_graded, id_confidence: vision.id_confidence,
+    }),
+  );
+
+  // Rescue pass: backfill empty pivots from product_name / variant /
+  // shopping_query. Gemini frequently fills these free-text fields
+  // correctly but leaves the dedicated pivot fields at "". Ref scan
+  // 23553af8 — id_confidence 0.98 but pivots empty.
+  const enriched = enrichVisionFromText(vision);
+  const diff = ['player', 'card_year', 'card_brand', 'card_set', 'card_number']
+    .filter(k => vision[k] !== enriched[k])
+    .map(k => `${k}: "${vision[k]||''}" → "${enriched[k]||''}"`);
+  if (diff.length > 0) {
+    console.log('[Lakkot sports] enrichVisionFromText backfilled:', diff.join(' | '));
+  }
+  vision = enriched;
+
   const cascade = buildQueryCascade(vision);
   if (cascade.length === 0) {
-    console.warn('[Lakkot sports] no query buildable — vision missing player + (year OR set)');
+    console.warn('[Lakkot sports] no query buildable — vision missing player + (year OR set) even after fallback');
     return null;
   }
 
