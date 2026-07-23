@@ -108,6 +108,7 @@ const { extractProductIdentity } = require('./ai-product-id');
 const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
 const { fetchListingsForVision, isListingsV2Enabled } = require('./ai-product-listings');
 const { analyzeCoinSales, isCoinsPipelineEnabled } = require('./coins-pipeline');
+const { analyzeSportsCardSales, isSportsCardsPipelineEnabled } = require('./sports-cards-pipeline');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
@@ -4912,7 +4913,7 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls }) {
+  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls, sportsQueryLevel, sportsSalesCount, sportsSerpapiCalls, sportsScope, sportsIdConfidence, sportsLensTitlesCount }) {
     try {
       // Upload original image to Supabase Storage
       let imageUrl = null;
@@ -5001,6 +5002,20 @@ app.post('/scan', async (req, res) => {
             coins_query_level:    coinsQueryLevel,
             coins_sales_count:    coinsSalesCount ?? null,
             coins_serpapi_calls:  coinsSerpapiCalls ?? null,
+          } : {}),
+          // Sports-cards-pipeline diagnostics. Same "nested-spread when set"
+          // pattern as coins so a scan predating the migration doesn't hit
+          // "column does not exist". The hybrid-validation signal is the
+          // pair (lens_titles_count, id_confidence): comparing rows where
+          // titles were rich vs empty tells us whether the Lens→Gemini
+          // hybrid architecture actually helps identification quality.
+          ...(sportsQueryLevel != null || sportsIdConfidence != null || sportsLensTitlesCount != null ? {
+            sports_query_level:      sportsQueryLevel ?? null,
+            sports_sales_count:      sportsSalesCount ?? null,
+            sports_serpapi_calls:    sportsSerpapiCalls ?? null,
+            sports_scope:            sportsScope ?? null,
+            sports_id_confidence:    sportsIdConfidence ?? null,
+            sports_lens_titles_count: sportsLensTitlesCount ?? null,
           } : {}),
         } : {}),
       }).select('id').single();
@@ -5817,6 +5832,8 @@ app.post('/scan', async (req, res) => {
             let enrich = null;
             let coinsData = null;
             let coinsSerpapiCalls = 0;
+            let sportsCardData = null;
+            let sportsSerpapiCalls = 0;
 
             // Specialised coins pipeline — eBay sold prices, condition
             // buckets, metal-value floor. Runs BEFORE the generic v2 listings
@@ -5845,6 +5862,34 @@ app.post('/scan', async (req, res) => {
                 }
               } catch (err) {
                 console.warn('[Lakkot coins] pipeline error, falling back to v2:', err.message);
+              }
+            }
+
+            // Specialised sports-cards pipeline — eBay sold segregated by
+            // grade, using Gemini's structured sports_* fields. Same
+            // isolation pattern as coins: flag-off or null return → falls
+            // through to v2 listings + Gemini estimation band.
+            if (enrich === null && vision.category === 'sports_card' && isSportsCardsPipelineEnabled()) {
+              try {
+                const sportsRes = await analyzeSportsCardSales(vision);
+                if (sportsRes) {
+                  sportsSerpapiCalls = sportsRes.serpapi_calls_used || 0;
+                  if (sportsRes.sports_card_data) {
+                    sportsCardData = sportsRes.sports_card_data;
+                    enrich = {
+                      listings:         sportsRes.listings || [],
+                      market_price_min: sportsRes.market_price_min,
+                      market_price_max: sportsRes.market_price_max,
+                      price_source:     'ebay_sold',
+                      listings_source:  'ebay_sold',
+                    };
+                    console.log(`[Lakkot sports] pipeline used (${sportsSerpapiCalls} SerpApi call(s)), sales=${sportsCardData.sales_count}, level=Q${sportsCardData.query_level}, scope=${sportsCardData.scope}`);
+                  } else {
+                    console.log(`[Lakkot sports] pipeline ran but insufficient sales (${sportsSerpapiCalls} SerpApi call(s)) — falling back to v2`);
+                  }
+                }
+              } catch (err) {
+                console.warn('[Lakkot sports] pipeline error, falling back to v2:', err.message);
               }
             }
 
@@ -5923,6 +5968,17 @@ app.post('/scan', async (req, res) => {
               coinsQueryLevel:   coinsData?.query_level ?? null,
               coinsSalesCount:   coinsData?.sales_count ?? null,
               coinsSerpapiCalls: coinsSerpapiCalls || null,
+              // Sports-cards pipeline diagnostics — nullable, only set for
+              // sports_card scans. sports_lens_titles_count + sports_id_confidence
+              // are the pair that validates the hybrid Lens+Gemini architecture:
+              // slice scans by these two to see whether rich Lens context
+              // actually raises identification confidence vs Gemini alone.
+              sportsQueryLevel:      sportsCardData?.query_level ?? null,
+              sportsSalesCount:      sportsCardData?.sales_count ?? null,
+              sportsSerpapiCalls:    sportsSerpapiCalls || null,
+              sportsScope:           sportsCardData?.scope ?? null,
+              sportsIdConfidence:    (vision.category === 'sports_card') ? (typeof vision.id_confidence === 'number' ? vision.id_confidence : null) : null,
+              sportsLensTitlesCount: (vision.category === 'sports_card') ? (Array.isArray(lensTitlesForVision) ? lensTitlesForVision.length : 0) : null,
             });
             return res.json({
               type: 'ESTIMATION_RESULT',
@@ -5949,6 +6005,9 @@ app.post('/scan', async (req, res) => {
               // Frontend that doesn't know coins_data still renders the
               // v2 listings + market range above.
               coins_data:            coinsData || undefined,
+              // Sports-cards enrichment. Same pattern as coins_data — absent
+              // for non-sports scans, front falls back to v1 rendering.
+              sports_card_data:      sportsCardData || undefined,
               quota,
               scanLogId:             logId,
             });
