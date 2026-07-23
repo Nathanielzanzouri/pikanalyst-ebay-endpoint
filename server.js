@@ -916,9 +916,16 @@ const TCG_BRAND_KEYWORDS = [
   'one piece card', 'one piece tcg',
   'magic the gathering', 'mtg',
   'digimon card', 'dragon ball super card',
-  'psa', 'cgc', 'bgs', 'pca',
+  // Grading companies removed 2026-07-24: PSA / CGC / BGS grade sports
+  // cards as much as (more than) Pokemon, so their presence in Lens
+  // matches was routing sports scans to the Pokemon vote path. Real
+  // TCG scans are still caught by CARD_NUMBER_RE (xxx/xxx) and the
+  // brand + mechanic keywords remaining below. Ref scan 61bef62d
+  // (Wembanyama routed to Pokemon → product_name "Silver" → nonsense).
   'carddass', 'bandai',
-  'topps', 'wizards',
+  // 'topps' removed alongside PSA — Topps publishes NFL/MLB/NBA far
+  // more visibly than Pokemon. Kept 'wizards' (MtG only).
+  'wizards',
 ];
 const TCG_MECHANIC_KEYWORDS = [
   'holo', 'reverse holo', 'vstar', 'vmax', 'ex', 'gx',
@@ -989,6 +996,48 @@ function lensConsensusIsSportsSticker(lensMatches) {
     const title = (typeof m === 'string' ? m : (m?.title || '')).toLowerCase();
     if (!title) continue;
     if (NON_TCG_COLLECTIBLE_KEYWORDS.some(kw => title.includes(kw))) hits++;
+    if (hits >= 3) return true;
+  }
+  return false;
+}
+
+// Same shape as the sports-sticker veto, but for MODERN sports CARDS
+// (Panini Prizm NBA, Bowman NFL/MLB, Topps Chrome, Futera soccer, etc.).
+// Panini publishes both Pokemon and NBA, and PSA / BGS grade both markets,
+// so a Wembanyama Rookie scan trips isTCGCard on ambiguous brand tokens
+// without this veto. Reference: scan 61bef62d, Wembanyama routed to
+// Pokemon vote → product_name = "Silver" → eBay query "Silver pokemon
+// card" → nonsense median at 1.83€.
+const SPORTS_CARD_KEYWORDS = [
+  // Leagues + governing bodies (unambiguous — no Pokemon overlap)
+  'nba', 'nfl', 'mlb', 'nhl', 'ufc', 'wnba', 'ncaa',
+  'fifa', 'uefa', 'premier league', 'ligue 1', 'la liga', 'bundesliga',
+  'formula 1', 'formula one', 'f1 racing',
+  // Sets specific to sports (NOT used in Pokemon)
+  'prizm', 'panini prizm', 'mosaic', 'select', 'optic', 'donruss',
+  'contenders', 'immaculate', 'national treasures', 'flawless',
+  'bowman', 'topps chrome', 'topps update', 'stadium club',
+  'upper deck young guns', 'sp authentic',
+  'futera', 'match attax', 'megacracks', 'panini foot',
+  // Team indicators — presence of specific pro team names in ≥ 3 titles
+  // is strong signal. Kept minimal to avoid Pokemon overlap.
+  'lakers', 'warriors', 'celtics', 'spurs', 'bulls', 'heat',
+  'patriots', 'chiefs', 'cowboys',
+  'yankees', 'dodgers', 'red sox',
+  'real madrid', 'barcelona', 'psg', 'manchester united',
+  // Sport words in French / English (distinct from Pokemon vocabulary)
+  'basketball', 'basket-ball', 'football americain', 'baseball',
+  'hockey card', 'soccer card', 'foot card',
+  // Rookie designations specific to sports cards
+  'rookie card', 'rookie rc', 'young guns', 'rated rookie',
+];
+function lensConsensusIsSportsCard(lensMatches) {
+  if (!Array.isArray(lensMatches) || lensMatches.length === 0) return false;
+  let hits = 0;
+  for (const m of lensMatches.slice(0, 15)) {
+    const title = (typeof m === 'string' ? m : (m?.title || '')).toLowerCase();
+    if (!title) continue;
+    if (SPORTS_CARD_KEYWORDS.some(kw => title.includes(kw))) hits++;
     if (hits >= 3) return true;
   }
   return false;
@@ -5732,9 +5781,15 @@ app.post('/scan', async (req, res) => {
       // OTHER top matches all describe a Panini sticker or similar non-
       // TCG collectible, veto the TCG route so the scan reaches Gemini
       // Vision. Reference: scan 2683da03 (Zidane Foot '95 sticker).
+      // Third gate (added 2026-07-24): same principle for modern sports
+      // cards (NBA Panini Prizm, NFL Bowman, soccer Futera) — Panini +
+      // PSA presence in Lens matches wasn't enough to distinguish
+      // Wembanyama Prizm from a Pokemon card. Ref scan 61bef62d.
       const lensLooksLikeSportsSticker = lensConsensusIsSportsSticker(lensResult?.visualMatches || []);
+      const lensLooksLikeSportsCard    = lensConsensusIsSportsCard(lensResult?.visualMatches || []);
       if (lensLooksLikeSportsSticker) console.log('[Lakkot] lens consensus = sports sticker → veto TCG routing');
-      if (cleanLensName && isTCGCard(cleanLensName) && !lensLooksLikeSportsSticker) {
+      if (lensLooksLikeSportsCard)    console.log('[Lakkot] lens consensus = sports card → veto TCG routing');
+      if (cleanLensName && isTCGCard(cleanLensName) && !lensLooksLikeSportsSticker && !lensLooksLikeSportsCard) {
         // Strip grading keywords from Lens product name — Lens often finds graded listings
         // but the card on stream is typically raw
         const cleanedName = cleanLensName
