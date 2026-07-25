@@ -3907,26 +3907,46 @@ app.post('/scan/cardmarket', async (req, res) => {
     // Extract the card number (first part before /)
     const num = cardNumber ? cardNumber.split('/')[0].trim() : '';
 
-    // Search TCGdex by name (+ set name if available)
-    let searchUrl = `https://api.tcgdex.net/v2/${tcgdexLang}/cards?name=${encodeURIComponent(searchName)}`;
-    if (setName && language !== 'JP') searchUrl += `&set.name=${encodeURIComponent(setName)}`;
+    // Search TCGdex by name. `set.name` is an EXACT-match filter on TCGdex's
+    // own set label ("151"), so passing our noisy set string ("série 151",
+    // "151 - Collection") zeroes out the results and silently drops the
+    // Cardmarket box. The card number (localId) is what actually pins the
+    // card, so treat set.name as a tiebreaker, not a hard constraint: run the
+    // filtered search first, but if it returns nothing usable, retry by name
+    // only and let the localId match carry it.
+    const searchTcgdex = async (withSet) => {
+      let url = `https://api.tcgdex.net/v2/${tcgdexLang}/cards?name=${encodeURIComponent(searchName)}`;
+      if (withSet && setName && language !== 'JP') url += `&set.name=${encodeURIComponent(setName)}`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 5000);
+      try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        const d = await r.json();
+        return Array.isArray(d) ? d : [];
+      } catch (_) {
+        return [];
+      } finally {
+        clearTimeout(timer);
+      }
+    };
 
-    const ctrl1 = new AbortController();
-    const timer1 = setTimeout(() => ctrl1.abort(), 5000);
-    const searchRes = await fetch(searchUrl, { signal: ctrl1.signal });
-    clearTimeout(timer1);
-    const searchData = await searchRes.json();
+    const padNum = num ? num.padStart(3, '0') : '';
+    const byNum = (arr) => (num ? arr.find(c => c.localId === padNum || c.localId === num) : null);
 
-    if (!Array.isArray(searchData) || searchData.length === 0) {
+    // Attempt 1: name + set.name (when supplied). Attempt 2: name only.
+    const hadSetFilter = Boolean(setName && language !== 'JP');
+    let searchData = await searchTcgdex(true);
+    let match = byNum(searchData);
+    if (!match && hadSetFilter) {
+      // Filtered search missed (bad/mismatched set label) — retry name-only.
+      searchData = await searchTcgdex(false);
+      match = byNum(searchData);
+    }
+
+    if ((!Array.isArray(searchData) || searchData.length === 0) && !match) {
       return res.json({ cardmarket: null });
     }
 
-    // Find matching card by number
-    let match = null;
-    if (num) {
-      const padNum = num.padStart(3, '0');
-      match = searchData.find(c => c.localId === padNum || c.localId === num);
-    }
     // Fallback: first result if no number match
     if (!match) match = searchData[0];
 
