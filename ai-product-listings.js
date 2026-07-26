@@ -186,6 +186,24 @@ function extractBaseYear(str) {
   return m ? m[0] : null;
 }
 
+// Vote the card year from the LENS titles — Lens is the identity source of
+// truth (it visually matched the exact card), so its consensus year is more
+// reliable than Gemini's single guess. Returns the most frequent base year,
+// but only when at least two titles agree (else the noise wins). Naturally
+// ignores stray years from unrelated matches (a "2026 Hit Parade" box, a
+// "2021-22 Mosaic") because the real card's year dominates the vote.
+function consensusYearFromLens(lensTitles) {
+  if (!Array.isArray(lensTitles) || lensTitles.length === 0) return null;
+  const counts = {};
+  for (const t of lensTitles) {
+    const y = extractBaseYear(t);
+    if (y) counts[y] = (counts[y] || 0) + 1;
+  }
+  let best = null, bestN = 0;
+  for (const [y, n] of Object.entries(counts)) if (n > bestN) { best = y; bestN = n; }
+  return bestN >= 2 ? best : null;
+}
+
 // Sports-card YEAR gate. The single strongest discriminator between otherwise
 // similar cards is the year: a "2023-24 Panini Select FIFA Henry auto" scan was
 // returning "2017-18" and "2024-25" Henry autos too (they share brand + "Select"
@@ -271,7 +289,7 @@ async function fetchEbayBrowseListings({ query, marketplace, ebayToken }) {
 //
 // shoppingCaller: a bound function (query, country) => Promise<{ cards }>
 //   Passed in rather than required('./server') to avoid a circular import.
-async function fetchListingsForVision({ vision, country, ebayToken, shoppingCaller, lensCards }) {
+async function fetchListingsForVision({ vision, country, ebayToken, shoppingCaller, lensCards, lensTitles }) {
   if (!isListingsV2Enabled()) return null;
   if (!vision || !vision.category) return null;
 
@@ -286,13 +304,17 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   const modelTokens = extractDistinguishingTokens(vision);
   console.log(`[Lakkot listings] distinguishing tokens for filter:`, modelTokens.join(', '));
 
-  // Sports cards: enforce the YEAR. Gemini fills card_year; fall back to a year
-  // found in variant/product_name. Only applied for sports_card — for other
-  // categories a year is meaningless and would wrongly drop listings.
+  // Sports cards: enforce the YEAR. IDENTITY-FROM-LENS — vote the year from the
+  // Lens titles first (Lens = source of truth), and only fall back to Gemini's
+  // card_year / variant when Lens has no consensus. Only applied for
+  // sports_card; for other categories a year is meaningless.
+  const lensYear = vision.category === 'sports_card' ? consensusYearFromLens(lensTitles) : null;
   const cardYear = vision.category === 'sports_card'
-    ? extractBaseYear(vision.card_year || vision.variant || vision.product_name)
+    ? (lensYear || extractBaseYear(vision.card_year || vision.variant || vision.product_name))
     : null;
-  if (cardYear) console.log(`[Lakkot listings] sports-card year filter: require ${cardYear}`);
+  if (cardYear) {
+    console.log(`[Lakkot listings] sports-card year filter: require ${cardYear} (${lensYear ? 'lens-consensus' : 'gemini'})`);
+  }
 
   // Helper: apply the filters (brand + price + model + year), return top capAt.
   const CAP = 8;

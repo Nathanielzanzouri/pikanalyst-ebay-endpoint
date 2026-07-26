@@ -6059,6 +6059,10 @@ app.post('/scan', async (req, res) => {
                   // can reuse them as priority listings source without a
                   // second SerpApi Shopping call.
                   lensCards: lensResult?.cards || [],
+                  // Lens titles = the identity source of truth. For sports
+                  // cards the filter votes the card YEAR from these rather
+                  // than trusting Gemini's single field.
+                  lensTitles: lensTitlesForVision,
                 });
               } catch (err) {
                 console.warn('[Lakkot listings] enrichment failed:', err.message);
