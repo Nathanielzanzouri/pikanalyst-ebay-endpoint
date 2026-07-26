@@ -179,6 +179,25 @@ function passesModelFilter(title, distinguishingTokens) {
   return distinguishingTokens.some(tok => nt.includes(tok));
 }
 
+// First 4-digit year (19xx/20xx) in a string. For a sports card, Gemini gives
+// card_year as "2023" or a season "2023-24"; we anchor on the base year 2023.
+function extractBaseYear(str) {
+  const m = String(str || '').match(/\b(?:19|20)\d{2}\b/);
+  return m ? m[0] : null;
+}
+
+// Sports-card YEAR gate. The single strongest discriminator between otherwise
+// similar cards is the year: a "2023-24 Panini Select FIFA Henry auto" scan was
+// returning "2017-18" and "2024-25" Henry autos too (they share brand + "Select"
+// + "Signatures"), wrecking the median. Require the card's base year in the
+// title. A season listing "2023-2024"/"2023-24" contains "2023" and passes;
+// "2024-25"/"2017-18" do not. Listings with no year at all are dropped (we
+// cannot confirm they are the scanned card — precision over recall).
+function passesYearFilter(title, cardYear) {
+  if (!cardYear) return true; // no year identified → cannot gate, keep
+  return new RegExp('\\b' + cardYear + '\\b').test(String(title));
+}
+
 // ─── Google Shopping wrapper ─────────────────────────────────────────────
 // Takes the raw handleGoogleShopping return shape and maps it to our
 // listings shape. handleGoogleShopping already handles counterfeits and
@@ -267,15 +286,24 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   const modelTokens = extractDistinguishingTokens(vision);
   console.log(`[Lakkot listings] distinguishing tokens for filter:`, modelTokens.join(', '));
 
-  // Helper: apply the 3 filters (brand + price + model), return top capAt.
+  // Sports cards: enforce the YEAR. Gemini fills card_year; fall back to a year
+  // found in variant/product_name. Only applied for sports_card — for other
+  // categories a year is meaningless and would wrongly drop listings.
+  const cardYear = vision.category === 'sports_card'
+    ? extractBaseYear(vision.card_year || vision.variant || vision.product_name)
+    : null;
+  if (cardYear) console.log(`[Lakkot listings] sports-card year filter: require ${cardYear}`);
+
+  // Helper: apply the filters (brand + price + model + year), return top capAt.
   const CAP = 8;
   const filterAndRank = (items, capAt = CAP) => {
     const kept = [];
-    const rejected = { brand: 0, price: 0, model: 0 };
+    const rejected = { brand: 0, price: 0, model: 0, year: 0 };
     for (const item of items) {
       if (!passesBrandFilter(item.title, vision.brand)) { rejected.brand++; continue; }
       if (!passesPriceFilter(item.price, geminiMin, geminiMax)) { rejected.price++; continue; }
       if (!passesModelFilter(item.title, modelTokens)) { rejected.model++; continue; }
+      if (!passesYearFilter(item.title, cardYear)) { rejected.year++; continue; }
       kept.push(item);
       if (kept.length >= capAt) break;
     }
@@ -340,7 +368,7 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   }
   const filtered = filterAndRank(merged);
   let kept = filtered.kept;
-  console.log(`[Lakkot listings] source=${source} lens=${lensListings.length} fallback=${fallbackRaw.length} merged=${merged.length} kept=${kept.length} rejected(brand=${filtered.rejected.brand},price=${filtered.rejected.price},model=${filtered.rejected.model})`);
+  console.log(`[Lakkot listings] source=${source} lens=${lensListings.length} fallback=${fallbackRaw.length} merged=${merged.length} kept=${kept.length} rejected(brand=${filtered.rejected.brand},price=${filtered.rejected.price},model=${filtered.rejected.model},year=${filtered.rejected.year})`);
 
   // Retry once with a broader query if 0 kept AND we have a brand to keep
   // in the query (per spec: the retry MUST retain the brand — otherwise
