@@ -24,8 +24,13 @@ function isListingsV2Enabled() {
 // Kept as a lookup constant (spec: not hardcoded in logic). Anything not
 // listed defaults to google_shopping, which has broader coverage for
 // mass-produced items (bags, watches, toys, apparel).
+// NOTE: coins_money is intentionally NOT here — it defaults to google_shopping.
+// eBay is thin for modern/European commemorative coins (a 2026 Bulgaria 2€
+// returned 0 on eBay but 9-10 coin-shop listings on Shopping: Trésor du
+// Patrimoine, Arthur Maury, Philantologie...). Routing coins to eBay made a
+// web scan fall to a bogus Gemini estimate while the extension (Lens→Shopping
+// path) priced it correctly. Shopping + Lens cards is the identity-first path.
 const LISTINGS_SOURCE_BY_CATEGORY = {
-  coins_money:      'ebay',
   antiques_vintage: 'ebay',
   sports_card:      'ebay',
 };
