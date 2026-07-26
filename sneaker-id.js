@@ -113,6 +113,22 @@ function isResaleOrLuxury(source) {
   return RESALE_LUXURY_SOURCES.some((m) => s.includes(m));
 }
 
+// Google Shopping cards from handleGoogleShopping carry the merchant name in
+// `retailer` (raw SerpApi results the standalone tests used call it `source`).
+// Read either so the tri works on both shapes.
+function sourceOf(c) {
+  return (c && (c.source || c.retailer)) || '';
+}
+
+// A used/second-hand listing. Google Shopping flags these via
+// second_hand_condition:"pre-owned", surfaced on the card as isSecondHand.
+function isPreOwned(c) {
+  if (!c) return false;
+  if (c.isSecondHand === true) return true;
+  const cond = String(c.condition || c.second_hand_condition || '').toLowerCase();
+  return /pre.?owned|used|second.?hand|refurb|occasion|d.occasion/.test(cond);
+}
+
 // Pick the cleanest available reference title: first non-marketplace match
 // whose title contains the style code, falling back to any SKU-containing
 // match if no clean source is available.
@@ -311,11 +327,18 @@ function filterByShoeIdentity(cards, identity, opts = {}) {
   const wordsOf = (c) => new Set(normalizeText(c && c.title).split(' '));
 
   // Stage 1 — model gate.
-  const kept = list.filter((c) => {
+  const modelMatched = list.filter((c) => {
     const words = wordsOf(c);
     const matched = idTok.reduce((n, tok) => n + (words.has(tok) ? 1 : 0), 0);
     return matched / idTok.length >= minScore;
   });
+
+  // Condition gate — the cote is the NEW retail price, so drop pre-owned /
+  // second-hand listings (mostly eBay). Fall back to the full model set only
+  // if there are no new listings at all, so a resale-only shoe still prices.
+  const newOnly = opts.newOnly === false ? false : true;
+  const modelNew = newOnly ? modelMatched.filter((c) => !isPreOwned(c)) : modelMatched;
+  const kept = modelNew.length >= 1 ? modelNew : modelMatched;
 
   // Stage 2 — colorway gate.
   const colorGated = kept.filter((c) => {
@@ -349,7 +372,7 @@ function filterByShoeIdentity(cards, identity, opts = {}) {
   // Price over the display set's retail cluster when healthy, else the display
   // set (hyped/sold-out shoe → resale is the market).
   const retail = display.filter(
-    (c) => !isMarketplace(c && c.source) && !isResaleOrLuxury(c && c.source)
+    (c) => !isMarketplace(sourceOf(c)) && !isResaleOrLuxury(sourceOf(c))
   );
   const priced = retail.length >= minRetail ? retail : display;
   return { display, priced, kept, colorGated, retail, gated: true };
