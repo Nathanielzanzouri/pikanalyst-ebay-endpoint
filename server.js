@@ -2559,15 +2559,30 @@ function buildBrowseShapeFromSerp(serpResult, card, language, dateRange) {
 //
 // TTL is configurable via EBAY_DB_CACHE_TTL_DAYS env (default 7).
 // Disable entirely with EBAY_USE_DB_CACHE=false.
-async function tryDbCache(card, language, dateRange) {
+async function tryDbCache(card, language, dateRange, opts = {}) {
   if (process.env.EBAY_USE_DB_CACHE === 'false') return null;
+  // allowStale = serve the stored sold history as the source of truth even
+  // when it's beyond the freshness window. Used as a fallback after a live
+  // eBay-sold fetch returns nothing, so a real (if older) sale is preferred
+  // over an active Browse asking price. Self-healing: while live sold works,
+  // the fresh path (allowStale=false) hits first and upsertSoldHistory keeps
+  // the table current.
+  const allowStale = opts.allowStale === true;
   const cardName = card.card_name;
   const cardNumber = card.card_number;
   if (!cardName || !cardNumber) return null;
 
   const ttlDays = parseInt(process.env.EBAY_DB_CACHE_TTL_DAYS, 10) || 7;
   const minSamples = parseInt(process.env.LOW_CONFIDENCE_THRESHOLD, 10) || 3;
-  const cutoffSoldDate = new Date(Date.now() - dateRange * 86400000).toISOString();
+  // Fresh mode keeps the dateRange window (current-market median). Stale mode
+  // reaches back over the whole history — epoch 0 = no lower bound.
+  const cutoffSoldDate = allowStale
+    ? new Date(0).toISOString()
+    : new Date(Date.now() - dateRange * 86400000).toISOString();
+  // buildBrowseShapeFromSerp applies its OWN dateRange sold_date filter
+  // (dateRange < 365). Pass a wide window in stale mode so historical sales
+  // survive that second filter as well.
+  const buildRange = allowStale ? 3650 : dateRange;
 
   try {
     const { data: rows, error } = await supabase
@@ -2587,15 +2602,18 @@ async function tryDbCache(card, language, dateRange) {
 
     // Freshness gate: is our most recent capture within the TTL window?
     // If not, eBay has had time to record new sales we haven't seen yet —
-    // fall through to SerpApi to refresh.
-    const mostRecentCaptureMs = rows.reduce((max, r) => {
-      const ts = r.captured_at ? new Date(r.captured_at).getTime() : 0;
-      return ts > max ? ts : max;
-    }, 0);
-    const ageDays = (Date.now() - mostRecentCaptureMs) / 86400000;
-    if (ageDays > ttlDays) {
-      console.log(`[Lakkot] DB cache STALE (last capture ${ageDays.toFixed(1)}d > ${ttlDays}d) for ${cardName} ${cardNumber} → SerpApi`);
-      return null;
+    // fall through to SerpApi to refresh. Skipped in stale mode: we serve the
+    // old captures on purpose because live sold is unavailable to refresh them.
+    if (!allowStale) {
+      const mostRecentCaptureMs = rows.reduce((max, r) => {
+        const ts = r.captured_at ? new Date(r.captured_at).getTime() : 0;
+        return ts > max ? ts : max;
+      }, 0);
+      const ageDays = (Date.now() - mostRecentCaptureMs) / 86400000;
+      if (ageDays > ttlDays) {
+        console.log(`[Lakkot] DB cache STALE (last capture ${ageDays.toFixed(1)}d > ${ttlDays}d) for ${cardName} ${cardNumber} → SerpApi`);
+        return null;
+      }
     }
 
     // Build a serpResult-shaped object and run it through the same
@@ -2617,9 +2635,9 @@ async function tryDbCache(card, language, dateRange) {
       ebay_url:    null,
       total_found: rows.length,
     };
-    const built = buildBrowseShapeFromSerp(serpLike, card, language, dateRange);
+    const built = buildBrowseShapeFromSerp(serpLike, card, language, buildRange);
     if (built) {
-      console.log(`[Lakkot] DB cache HIT for ${cardName} ${cardNumber} (${rows.length} rows, fresh ${ageDays.toFixed(1)}d) — saved 1 SerpApi call`);
+      console.log(`[Lakkot] DB cache ${allowStale ? 'STALE-SERVE' : 'HIT'} for ${cardName} ${cardNumber} (${rows.length} rows) — served from ebay_sold_history`);
     }
     return built;
   } catch (e) {
@@ -2655,6 +2673,17 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
       }
     } catch (e) {
       console.warn('[Lakkot] SerpApi eBay failed:', e.message, '→ falling back to Browse');
+    }
+
+    // Live eBay-sold returned nothing (empty result or threw). Before we drop
+    // to Browse active listings, serve the stored sold history even if it's
+    // past the freshness window — a real past sale is a better cote than an
+    // asking price. This is what keeps historical sold data (e.g. the Mega
+    // Charizard result) live while eBay sold is unavailable.
+    const stale = await tryDbCache(card, language, dateRange, { allowStale: true });
+    if (stale) {
+      stale._ebaySource = 'db_cache_stale';
+      return stale;
     }
   }
 
