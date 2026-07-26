@@ -181,6 +181,40 @@ function normalizeCode(s) {
   return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+// Blog / editorial / interrogative phrases that leak into Lens titles for hyped
+// releases ("Date de sortie de la ...", "Que vaut la ... ?", "... ou pas ?").
+// When a query is built from such a title, Google Shopping returns almost
+// nothing — a real, in-stock shoe reads as NO_DATA. We strip these.
+const QUERY_NOISE_RE = /\b(date de sortie(?: de la| du| des)?|release dates?|que vaut(?: la| le| les)?|pourquoi|avis|reviews?|combien|prix de|first look|on ?foot|vaut le coup|ou pas|acheter|buy|shop now)\b/gi;
+
+// Build a clean Google Shopping query for a sneaker from its STRUCTURED
+// identity (brand + model + colorway + style code) rather than a raw,
+// possibly blog-flavoured title. Accepts Gemini identity ({brand,model,
+// variant,sku,query}) or the legacy vote ({brand,styleCode}). Falls back to a
+// noise-stripped identity.query only when we lack a model/sku signal.
+function cleanSneakerQuery(identity) {
+  if (!identity) return '';
+  const sku = identity.sku || identity.styleCode || '';
+  const assembled = [identity.brand, identity.model, identity.variant, sku]
+    .filter(Boolean).join(' ');
+  const base = (identity.model || sku) ? assembled : (identity.query || assembled || '');
+  return String(base)
+    .replace(QUERY_NOISE_RE, ' ')
+    .replace(/[?!."']/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+// Minimal high-recall retry query when the primary one comes back empty:
+// brand + style code (e.g. "Jordan JA1135-100"), else model + style code.
+function fallbackSneakerQuery(identity) {
+  if (!identity) return '';
+  const sku = identity.sku || identity.styleCode || '';
+  const q = [identity.brand, sku].filter(Boolean).join(' ')
+    || [identity.model, sku].filter(Boolean).join(' ');
+  return q.trim();
+}
+
 // Keep only Shopping results whose title contains the style code. Normalizing
 // strips dashes/spaces/case so "IB8873-666", "ib8873 666", "Ib8873666" all match.
 function filterBySku(cards, styleCode) {
@@ -390,5 +424,6 @@ function medianOf(cards) {
 module.exports = {
   findStyleCodes, extractStyleCode, extractBrand, buildIdentity,
   buildShoppingQuery, filterBySku, filterByShoeIdentity, medianOf,
-  isMarketplace, isResaleOrLuxury, extractCommonPhrase, normalizeText,
+  isMarketplace, isResaleOrLuxury, isPreOwned, extractCommonPhrase, normalizeText,
+  cleanSneakerQuery, fallbackSneakerQuery,
 };

@@ -103,7 +103,7 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
 }
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
-const { buildIdentity, buildShoppingQuery, filterByShoeIdentity, medianOf, extractCommonPhrase } = require('./sneaker-id');
+const { buildIdentity, buildShoppingQuery, filterByShoeIdentity, medianOf, extractCommonPhrase, cleanSneakerQuery, fallbackSneakerQuery } = require('./sneaker-id');
 const { extractProductIdentity } = require('./ai-product-id');
 const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
 const { fetchListingsForVision, isListingsV2Enabled } = require('./ai-product-listings');
@@ -3608,7 +3608,7 @@ async function handleGoogleShopping(productName, country) {
   // or kids sizes (distort adult-product medians). Everything else stays in
   // Google's order. The result median = median of what the user sees.
   const COUNTERFEIT_DOMAINS = ['aliexpress', 'temu', 'dhgate', 'wish'];
-  const KIDS_RE = /\b(kids|enfant|enfants|junior|juniors|toddler|infant|pre.?school|grade.?school|little kid|big kid|bébé|bebe|ps|td|gs)\b/i;
+  const KIDS_RE = /\b(kid|kids|kid['’]s|kids['’]|enfant|enfants|junior|juniors|toddler|infant|pre.?school|grade.?school|little kid|big kid|bébé|bebe|ps|td|gs)\b/i;
 
   const cards = raw
     .filter(item => item.extracted_price && item.extracted_price > 0 && item.thumbnail && item.product_link)
@@ -6175,13 +6175,34 @@ app.post('/scan', async (req, res) => {
         // the results (filterByShoeIdentity) — this replaced the old style-code
         // filter. For every other category the basket is still priced as-is.
         console.log('[Lakkot] Unified: AI identity →', JSON.stringify({ brand: aiIdentity.brand, model: aiIdentity.model, variant: aiIdentity.variant, sku: aiIdentity.sku, category: aiIdentity.category, conf: aiIdentity.confidence }));
+        const isSneaker = aiIdentity.category === 'sneaker';
+        // Sneakers: build the Shopping query from the STRUCTURED identity
+        // (brand+model+colorway+SKU) and strip blog/interrogative noise. A
+        // title-derived query like "Date de sortie de la Air Jordan 4 ..."
+        // starves Shopping and makes an in-stock shoe read as NO_DATA. Other
+        // categories keep Gemini's query verbatim.
+        let query = isSneaker ? (cleanSneakerQuery(aiIdentity) || aiIdentity.query) : aiIdentity.query;
+        loggedShoppingQuery = query;
         try {
-          const raw = await _timedShopping(timings, () => handleGoogleShopping(aiIdentity.query, country));
-          const basket = raw.cards || [];
+          let raw = await _timedShopping(timings, () => handleGoogleShopping(query, country));
+          let basket = raw.cards || [];
+          // Sneaker retry: an empty basket usually means a still-noisy query.
+          // Try one minimal high-recall query (brand + style code) before
+          // giving up. Keeps the common case at 2 SerpApi calls, 3 only here.
+          if (isSneaker && basket.length === 0) {
+            const retryQ = fallbackSneakerQuery(aiIdentity);
+            if (retryQ && retryQ !== query) {
+              console.log('[Lakkot] Unified: sneaker 0 results → retry query:', retryQ);
+              raw = await _timedShopping(timings, () => handleGoogleShopping(retryQ, country));
+              basket = raw.cards || [];
+              query = retryQ;
+              loggedShoppingQuery = retryQ;
+            }
+          }
           if (basket.length >= 1) {
             // Sneakers get the identity tri (tolerant gate + retail-cluster
             // median). Every other category keeps the raw-basket median.
-            const sneak = aiIdentity.category === 'sneaker' ? priceSneakerBasket(basket, aiIdentity) : null;
+            const sneak = isSneaker ? priceSneakerBasket(basket, aiIdentity) : null;
             if (sneak) {
               shoppingResult = { cards: sneak.cards, medianPrice: sneak.median, totalFound: sneak.cards.length };
               console.log(`[Lakkot] Unified: AI-path sneaker tri basket=${basket.length} kept=${sneak.keptCount} color=${sneak.colorCount} shown=${sneak.cards.length} retail=${sneak.retailCount} median=${sneak.median}`);
@@ -6190,7 +6211,7 @@ app.post('/scan', async (req, res) => {
               console.log('[Lakkot] Unified: AI-path basket', basket.length, 'median=' + shoppingResult.medianPrice);
             }
           } else {
-            console.log('[Lakkot] Unified: AI query returned 0 Shopping results');
+            console.log('[Lakkot] Unified: AI query returned 0 Shopping results (after retry)');
           }
         } catch (err) {
           console.error('[Lakkot] Unified: AI-path shopping error:', err.message);
@@ -6211,14 +6232,27 @@ app.post('/scan', async (req, res) => {
         // priced on its retail cluster, not a raw median.
         const legacyId = buildIdentity(lensResult?.visualMatches || []);
         const phrase = extractCommonPhrase(lensResult?.visualMatches || []);
-        const fallbackQuery = legacyId.confident
-          ? buildShoppingQuery(legacyId)
+        // Strip blog/interrogative noise so a title-derived sneaker query
+        // ("Date de sortie de la ...") does not starve Shopping.
+        let fallbackQuery = legacyId.confident
+          ? cleanSneakerQuery({ query: buildShoppingQuery(legacyId) })
           : (aiIdentity?.query || phrase || cleanLensName || productName);
         loggedShoppingQuery = fallbackQuery;
         if (fallbackQuery) {
           try {
-            const raw = await _timedShopping(timings, () => handleGoogleShopping(fallbackQuery, country));
-            const basket = raw.cards || [];
+            let raw = await _timedShopping(timings, () => handleGoogleShopping(fallbackQuery, country));
+            let basket = raw.cards || [];
+            // Retry once with a minimal brand + style-code query if empty.
+            if (legacyId.confident && basket.length === 0) {
+              const retryQ = fallbackSneakerQuery(legacyId);
+              if (retryQ && retryQ !== fallbackQuery) {
+                console.log('[Lakkot] Unified: fallback 0 results → retry query:', retryQ);
+                raw = await _timedShopping(timings, () => handleGoogleShopping(retryQ, country));
+                basket = raw.cards || [];
+                fallbackQuery = retryQ;
+                loggedShoppingQuery = retryQ;
+              }
+            }
             if (basket.length >= 1) {
               // Prefer Gemini's identity (has model+colorway); else synthesize
               // a minimal one from the style-code vote so the tri can still run.
