@@ -1141,12 +1141,15 @@ function removeOutliers(prices) {
 // Returns { cards, median, keptCount, retailCount } or null for an empty basket.
 function priceSneakerBasket(basket, identity) {
   if (!Array.isArray(basket) || basket.length === 0) return null;
-  const { priced, kept, retail, gated } = filterByShoeIdentity(basket, identity);
-  const displayCards = (gated && kept.length >= 1) ? kept : basket;
+  const { display, priced, kept, colorGated, retail, gated } = filterByShoeIdentity(basket, identity);
+  const displayCards = (gated && display.length >= 1) ? display : basket;
   const source = (priced && priced.length) ? priced : displayCards;
   const clean = removeOutliers(source.map((c) => c.price).filter((p) => p > 0)).sort((a, b) => a - b);
   const median = clean.length ? clean[Math.floor(clean.length / 2)] : null;
-  return { cards: displayCards, median, keptCount: kept.length, retailCount: retail.length };
+  return {
+    cards: displayCards, median,
+    keptCount: kept.length, colorCount: colorGated.length, retailCount: retail.length,
+  };
 }
 
 // Pokemon name synonyms (FR / EN / DE / JP romanized)
@@ -6181,7 +6184,7 @@ app.post('/scan', async (req, res) => {
             const sneak = aiIdentity.category === 'sneaker' ? priceSneakerBasket(basket, aiIdentity) : null;
             if (sneak) {
               shoppingResult = { cards: sneak.cards, medianPrice: sneak.median, totalFound: sneak.cards.length };
-              console.log(`[Lakkot] Unified: AI-path sneaker tri basket=${basket.length} kept=${sneak.keptCount} retail=${sneak.retailCount} median=${sneak.median}`);
+              console.log(`[Lakkot] Unified: AI-path sneaker tri basket=${basket.length} kept=${sneak.keptCount} color=${sneak.colorCount} shown=${sneak.cards.length} retail=${sneak.retailCount} median=${sneak.median}`);
             } else {
               shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
               console.log('[Lakkot] Unified: AI-path basket', basket.length, 'median=' + shoppingResult.medianPrice);
@@ -6226,7 +6229,7 @@ app.post('/scan', async (req, res) => {
               const sneak = triIdentity.category === 'sneaker' ? priceSneakerBasket(basket, triIdentity) : null;
               if (sneak) {
                 shoppingResult = { cards: sneak.cards, medianPrice: sneak.median, totalFound: sneak.cards.length };
-                console.log(`[Lakkot] Unified: fallback sneaker tri basket=${basket.length} kept=${sneak.keptCount} median=${sneak.median}`);
+                console.log(`[Lakkot] Unified: fallback sneaker tri basket=${basket.length} kept=${sneak.keptCount} color=${sneak.colorCount} shown=${sneak.cards.length} median=${sneak.median}`);
               } else {
                 shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
                 console.log('[Lakkot] Unified: fallback basket', basket.length, 'median=' + shoppingResult.medianPrice);

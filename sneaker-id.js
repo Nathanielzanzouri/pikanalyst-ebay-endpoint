@@ -254,48 +254,105 @@ function identityTokens(s, extraStop) {
   );
 }
 
-// Keep Shopping results that match the identified shoe, tolerantly. The gate is
-// a SCORE, not an all-tokens requirement: retailers title the same shoe as
-// "Nike Air Force 1", "Air Force 1 '07" (no brand), or "Nike Force 1" (no
-// "air") — an all-tokens gate drops those. We keep a listing when it carries a
-// strong majority of the brand+model tokens, which admits those variants while
-// still dropping a "Nike Dunk Low" lookalike (brand only → low score).
+// Generic color / filler words that are not distinctive enough to pin an exact
+// colorway on their own. When the identified colorway carries a DISTINCTIVE
+// token (e.g. "aquarius", "chicago", "bred") we gate display on it so the user
+// only sees their exact colorway; when the colorway is all-generic
+// ("white/black") we require a majority of those generic tokens instead.
+const GENERIC_COLOR_TOKENS = new Set([
+  'white', 'black', 'blue', 'red', 'grey', 'gray', 'green', 'pink', 'yellow',
+  'orange', 'purple', 'brown', 'tan', 'cream', 'silver', 'gold', 'navy',
+  'multi', 'metallic', 'volt',
+  'blanc', 'noir', 'bleu', 'rouge', 'vert', 'rose', 'gris', 'beige', 'ciel', 'jaune',
+]);
+
+// Two-stage tri for sneaker Shopping results, precision-first.
 //
-// Pricing note: colorway is NOT used to pick a subset — doing so biased the
-// median toward verbose resale/luxury titles (GOAT/Farfetch) and inflated it.
-// Instead we split retail vs resale/luxury and let the caller price the retail
-// cluster for general-release shoes, falling back to the full basket for hyped
-// shoes where retail is thin. Returns:
-//   kept    — identity-matched listings
-//   priced  — the subset to take the median over: retail cluster when it is
-//             healthy (>= minRetail), else all of kept (hyped/sold-out shoe)
-//   retail  — kept minus marketplaces + resale/luxury (diagnostic)
+// Stage 1 — MODEL gate (tolerant): keep listings carrying a strong majority of
+// the brand+model tokens. Score-based, not all-tokens: retailers title the same
+// shoe "Nike Air Force 1", "Air Force 1 '07" (no brand) or "Nike Force 1" (no
+// "air"); an all-tokens gate would drop those. Drops "Dunk Low" lookalikes.
+//
+// Stage 2 — COLORWAY gate (precision): from the model-matched set, keep only
+// the listings that also match the scanned colorway, so the user sees THEIR
+// exact model+colorway rather than every AF1 ("Hyper Royal", "Racer Blue", a
+// different SKU, ...). A distinctive colorway token (e.g. "aquarius") is
+// required outright; an all-generic colorway ("white/black") requires a
+// majority of its tokens. Falls back to the model-matched set when the colorway
+// match is empty, so we never show nothing.
+//
+// Display is ranked so the most-exact listing is first: exact SKU in title,
+// then higher colorway score, then lower price.
+//
+// Returns:
+//   display — ranked listings to SHOW the user (colorway-gated when possible)
+//   priced  — subset to take the median over (retail cluster of the display
+//             set when healthy, else the display set; resale/luxury dropped
+//             only when a retail cluster exists — hyped shoes price on resale)
+//   kept    — model-matched (diagnostic)  |  colorGated — colorway-matched
+//   retail  — priced minus marketplace/resale/luxury (diagnostic)
 //   gated   — false when there was no usable model signal (caller keeps basket)
 function filterByShoeIdentity(cards, identity, opts = {}) {
   const minScore = opts.minScore != null ? opts.minScore : 0.6;
-  const minRetail = opts.minRetail != null ? opts.minRetail : 5;
+  const minRetail = opts.minRetail != null ? opts.minRetail : 3;
   const list = Array.isArray(cards) ? cards : [];
   const brandTok = identityTokens(identity && identity.brand);
   const modelTok = identityTokens(identity && identity.model, MODEL_QUALIFIER_STOP);
   const idTok = [...new Set([...brandTok, ...modelTok])];
+  const colorTok = identityTokens(identity && identity.variant);
+  const distinctColor = colorTok.filter((t) => !GENERIC_COLOR_TOKENS.has(t));
+  const skuNorm = normalizeCode(identity && identity.sku);
 
   // No model signal → we cannot gate safely; hand the basket back untouched.
   if (modelTok.length === 0) {
-    return { kept: list, priced: list, retail: list, gated: false };
+    return { display: list, priced: list, kept: list, colorGated: list, retail: list, gated: false };
   }
 
+  const wordsOf = (c) => new Set(normalizeText(c && c.title).split(' '));
+
+  // Stage 1 — model gate.
   const kept = list.filter((c) => {
-    const words = new Set(normalizeText(c && c.title).split(' '));
+    const words = wordsOf(c);
     const matched = idTok.reduce((n, tok) => n + (words.has(tok) ? 1 : 0), 0);
     return matched / idTok.length >= minScore;
   });
-  const retail = kept.filter(
+
+  // Stage 2 — colorway gate.
+  const colorGated = kept.filter((c) => {
+    const words = wordsOf(c);
+    if (distinctColor.length) return distinctColor.every((t) => words.has(t));
+    if (colorTok.length) {
+      const hit = colorTok.reduce((n, t) => n + (words.has(t) ? 1 : 0), 0);
+      return hit >= Math.ceil(colorTok.length / 2);
+    }
+    return true; // no colorway info → cannot narrow further
+  });
+
+  // Prefer the colorway-matched set for display; fall back to model-matched
+  // only when colorway matching found nothing.
+  const display = colorGated.length >= 1 ? [...colorGated] : [...kept];
+
+  // Rank: exact SKU first, then colorway score, then cheapest.
+  const colorScore = (c) => {
+    const words = wordsOf(c);
+    return colorTok.reduce((n, t) => n + (words.has(t) ? 1 : 0), 0);
+  };
+  const hasSku = (c) => skuNorm && normalizeCode(c && c.title).includes(skuNorm);
+  display.sort((a, b) => {
+    const s = (hasSku(b) ? 1 : 0) - (hasSku(a) ? 1 : 0);
+    if (s) return s;
+    const cs = colorScore(b) - colorScore(a);
+    if (cs) return cs;
+    return (a.price || 0) - (b.price || 0);
+  });
+
+  // Price over the display set's retail cluster when healthy, else the display
+  // set (hyped/sold-out shoe → resale is the market).
+  const retail = display.filter(
     (c) => !isMarketplace(c && c.source) && !isResaleOrLuxury(c && c.source)
   );
-  // Healthy retail cluster → retail is the truth (general release). Thin retail
-  // → the shoe is likely hyped/sold-out and resale IS the market → price all.
-  const priced = retail.length >= minRetail ? retail : kept;
-  return { kept, priced, retail, gated: true };
+  const priced = retail.length >= minRetail ? retail : display;
+  return { display, priced, kept, colorGated, retail, gated: true };
 }
 
 function medianOf(cards) {
