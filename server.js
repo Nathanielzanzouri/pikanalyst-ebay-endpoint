@@ -5355,18 +5355,29 @@ app.post('/scan', async (req, res) => {
       let tcgCategory = (gradeResult && typeof gradeResult.tcg_category === 'string')
         ? gradeResult.tcg_category : null;
       if (tcgCategory !== 'OnePiece' && Array.isArray(lensResult?.visualMatches)) {
-        // Count OP signals across the top 10 Lens matches:
-        //   - 'one piece' / 'opcg' keyword in title
-        //   - OP card number format (OP##-###, ST##-###, EB##-###, P-###, H##, S###, PR##, HB##)
-        const OP_NUMBER_RE = /\b(OP|EB|ST|PRB)\s*\d{2}\s*-?\s*\d{3}\b|\bP\s*-\s*\d{1,3}\b|\b(H|S|PR|HB)\s*-?\s*\d{1,3}\b/i;
+        // Count OP signals across the top 10 Lens matches. Split STRONG vs WEAK:
+        //   STRONG — 'one piece'/'opcg' keyword, or a modern set code
+        //     (OP/EB/ST/PRB ##-###). These are distinctive to One Piece.
+        //   WEAK — vintage Carddass short codes (H/S/PR/HB + 1-3 digits) and
+        //     'P-###'. These collide with everyday product model tokens
+        //     ("H2", "S5", "S9" on vacuums / electronics), so they must NOT
+        //     trigger the override on their own — they only count when there is
+        //     already a strong signal. (QA: a JONR "H2" wet/dry vacuum was
+        //     force-routed to One Piece and returned NO_DATA because H2/S5/S9
+        //     read as vintage card numbers.)
+        const OP_STRONG_RE  = /\b(OP|EB|ST|PRB)\s*\d{2}\s*-?\s*\d{3}\b/i;
+        const OP_WEAK_RE    = /\bP\s*-\s*\d{1,3}\b|\b(H|S|PR|HB)\s*-?\s*\d{1,3}\b/i;
         const OP_KEYWORD_RE = /\b(one\s*piece|opcg|onepiece)\b/i;
-        let opSignals = 0;
+        let strongSignals = 0, weakSignals = 0;
         for (const m of lensResult.visualMatches.slice(0, 10)) {
           const t = (m && m.title) || '';
-          if (OP_KEYWORD_RE.test(t) || OP_NUMBER_RE.test(t)) opSignals++;
+          if (OP_KEYWORD_RE.test(t) || OP_STRONG_RE.test(t)) strongSignals++;
+          else if (OP_WEAK_RE.test(t)) weakSignals++;
         }
-        if (opSignals >= 3) {
-          console.log('[Lakkot/tcg-category] OVERRIDING gemini="' + tcgCategory + '" → "OnePiece" (lens signals:' + opSignals + ')');
+        // Weak vintage codes only count once corroborated by a strong signal.
+        const opSignals = strongSignals + (strongSignals >= 1 ? weakSignals : 0);
+        if (strongSignals >= 1 && opSignals >= 3) {
+          console.log('[Lakkot/tcg-category] OVERRIDING gemini="' + tcgCategory + '" → "OnePiece" (strong:' + strongSignals + ' weak:' + weakSignals + ')');
           tcgCategory = 'OnePiece';
         }
       }
