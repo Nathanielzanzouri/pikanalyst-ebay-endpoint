@@ -96,6 +96,23 @@ function isMarketplace(source) {
   return MARKETPLACE_SOURCES.some((m) => s.includes(m));
 }
 
+// Resale/consignment + luxury-boutique sources. For a GENERAL-RELEASE sneaker
+// these inflate the price wildly (a $115 Air Force 1 shows up at €283 on GOAT,
+// €2774 on a luxury reseller). We prefer retail for those. BUT for a hyped /
+// sold-out shoe, resale IS the market — so the tri only drops these when a
+// healthy retail cluster exists, and keeps them otherwise (see
+// filterByShoeIdentity's `priced` logic).
+const RESALE_LUXURY_SOURCES = [
+  'goat', 'stockx', 'flight club', 'flightclub', 'stadium goods', 'stadiumgoods',
+  'farfetch', 'ssense', 'shein', 'editorialist', 'grailed', 'vestiaire',
+  'poshmark', 'klekt', 'restocks',
+];
+
+function isResaleOrLuxury(source) {
+  const s = String(source || '').toLowerCase();
+  return RESALE_LUXURY_SOURCES.some((m) => s.includes(m));
+}
+
 // Pick the cleanest available reference title: first non-marketplace match
 // whose title contains the style code, falling back to any SKU-containing
 // match if no clean source is available.
@@ -207,6 +224,80 @@ function extractCommonPhrase(visualMatches, topN = 15, maxTokens = 6) {
     .join(' ');
 }
 
+// ─── Tolerant identity tri (replaces filterBySku on Shopping results) ─────────
+// filterBySku required the style code IN each result title, which retailers
+// (GOAT, DICK's, Finish Line, ...) never include — so it discarded good
+// listings and forced compensating extra Shopping calls. This tri instead
+// gates on brand + core model tokens (which retailers DO title) and scores the
+// colorway, so the right sneaker survives without a second/third call.
+
+// Lowercase, strip accents, collapse anything non-alphanumeric to single spaces.
+function normalizeText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Generic silhouette qualifiers dropped from the model gate: retailers omit or
+// vary them ("Air Force 1" vs "Air Force 1 Low '07"), so requiring them would
+// re-create the over-strict filter we are replacing.
+const MODEL_QUALIFIER_STOP = new Set([
+  'low', 'high', 'mid', '07', 'og', 'sp', 'se', 'gs', 'ps', 'td', 'lv8',
+  'prm', 'premium', 'next', 'nature',
+]);
+
+function identityTokens(s, extraStop) {
+  return normalizeText(s).split(' ').filter(
+    (t) => t && !(extraStop && extraStop.has(t)) && !/^(19|20)\d{2}$/.test(t)
+  );
+}
+
+// Keep Shopping results that match the identified shoe, tolerantly. The gate is
+// a SCORE, not an all-tokens requirement: retailers title the same shoe as
+// "Nike Air Force 1", "Air Force 1 '07" (no brand), or "Nike Force 1" (no
+// "air") — an all-tokens gate drops those. We keep a listing when it carries a
+// strong majority of the brand+model tokens, which admits those variants while
+// still dropping a "Nike Dunk Low" lookalike (brand only → low score).
+//
+// Pricing note: colorway is NOT used to pick a subset — doing so biased the
+// median toward verbose resale/luxury titles (GOAT/Farfetch) and inflated it.
+// Instead we split retail vs resale/luxury and let the caller price the retail
+// cluster for general-release shoes, falling back to the full basket for hyped
+// shoes where retail is thin. Returns:
+//   kept    — identity-matched listings
+//   priced  — the subset to take the median over: retail cluster when it is
+//             healthy (>= minRetail), else all of kept (hyped/sold-out shoe)
+//   retail  — kept minus marketplaces + resale/luxury (diagnostic)
+//   gated   — false when there was no usable model signal (caller keeps basket)
+function filterByShoeIdentity(cards, identity, opts = {}) {
+  const minScore = opts.minScore != null ? opts.minScore : 0.6;
+  const minRetail = opts.minRetail != null ? opts.minRetail : 5;
+  const list = Array.isArray(cards) ? cards : [];
+  const brandTok = identityTokens(identity && identity.brand);
+  const modelTok = identityTokens(identity && identity.model, MODEL_QUALIFIER_STOP);
+  const idTok = [...new Set([...brandTok, ...modelTok])];
+
+  // No model signal → we cannot gate safely; hand the basket back untouched.
+  if (modelTok.length === 0) {
+    return { kept: list, priced: list, retail: list, gated: false };
+  }
+
+  const kept = list.filter((c) => {
+    const words = new Set(normalizeText(c && c.title).split(' '));
+    const matched = idTok.reduce((n, tok) => n + (words.has(tok) ? 1 : 0), 0);
+    return matched / idTok.length >= minScore;
+  });
+  const retail = kept.filter(
+    (c) => !isMarketplace(c && c.source) && !isResaleOrLuxury(c && c.source)
+  );
+  // Healthy retail cluster → retail is the truth (general release). Thin retail
+  // → the shoe is likely hyped/sold-out and resale IS the market → price all.
+  const priced = retail.length >= minRetail ? retail : kept;
+  return { kept, priced, retail, gated: true };
+}
+
 function medianOf(cards) {
   const prices = (cards || [])
     .map((c) => (c && typeof c.price === 'number' ? c.price : null))
@@ -218,6 +309,6 @@ function medianOf(cards) {
 
 module.exports = {
   findStyleCodes, extractStyleCode, extractBrand, buildIdentity,
-  buildShoppingQuery, filterBySku, medianOf,
-  isMarketplace, extractCommonPhrase,
+  buildShoppingQuery, filterBySku, filterByShoeIdentity, medianOf,
+  isMarketplace, isResaleOrLuxury, extractCommonPhrase, normalizeText,
 };

@@ -103,7 +103,7 @@ function buildPokemonMultiSetPicker(visualMatches, vote, lang) {
 }
 const Stripe  = require('stripe');
 const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
-const { buildIdentity, buildShoppingQuery, filterBySku, medianOf, isMarketplace, extractCommonPhrase } = require('./sneaker-id');
+const { buildIdentity, buildShoppingQuery, filterByShoeIdentity, medianOf, extractCommonPhrase } = require('./sneaker-id');
 const { extractProductIdentity } = require('./ai-product-id');
 const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
 const { fetchListingsForVision, isListingsV2Enabled } = require('./ai-product-listings');
@@ -1129,6 +1129,24 @@ function removeOutliers(prices) {
   const clean = sorted.filter(p => p <= provisionalMedian * 2.5 && p >= provisionalMedian * 0.25);
   console.log(`[Pikanalyst] Outlier removal: ${prices.length} → ${clean.length} | provisional median: $${provisionalMedian.toFixed(2)}`);
   return clean.length > 0 ? clean : sorted;
+}
+
+// Price a sneaker Shopping basket the right way: a tolerant identity tri
+// (brand + core model tokens, colorway scored not gated) keeps the correct
+// shoe, then the median is taken over the RETAIL cluster when it is healthy
+// (general release) or the whole matched basket when retail is thin
+// (hyped/sold-out shoe, where resale IS the market), after outlier removal.
+// Replaces filterBySku, which required the style code in each title — retailers
+// omit it, so it discarded good listings and forced extra Shopping calls.
+// Returns { cards, median, keptCount, retailCount } or null for an empty basket.
+function priceSneakerBasket(basket, identity) {
+  if (!Array.isArray(basket) || basket.length === 0) return null;
+  const { priced, kept, retail, gated } = filterByShoeIdentity(basket, identity);
+  const displayCards = (gated && kept.length >= 1) ? kept : basket;
+  const source = (priced && priced.length) ? priced : displayCards;
+  const clean = removeOutliers(source.map((c) => c.price).filter((p) => p > 0)).sort((a, b) => a - b);
+  const median = clean.length ? clean[Math.floor(clean.length / 2)] : null;
+  return { cards: displayCards, median, keptCount: kept.length, retailCount: retail.length };
 }
 
 // Pokemon name synonyms (FR / EN / DE / JP romanized)
@@ -6149,17 +6167,25 @@ app.post('/scan', async (req, res) => {
       const aiIdentity = await extractProductIdentity(lensResult?.visualMatches || []);
       if (aiIdentity && aiIdentity.query) {
         loggedShoppingQuery = aiIdentity.query;
-        // brand/model/variant/sku/category are logged for diagnostics but we
-        // do NOT act on them downstream — by design, Gemini is used ONLY to
-        // build the Shopping query. Whatever Google returns for that query
-        // becomes the basket as-is. Keeps the AI's role tightly scoped.
+        // Gemini builds the Shopping query. For sneakers we ALSO use its
+        // structured identity (brand/model/variant/category) to run the tri on
+        // the results (filterByShoeIdentity) — this replaced the old style-code
+        // filter. For every other category the basket is still priced as-is.
         console.log('[Lakkot] Unified: AI identity →', JSON.stringify({ brand: aiIdentity.brand, model: aiIdentity.model, variant: aiIdentity.variant, sku: aiIdentity.sku, category: aiIdentity.category, conf: aiIdentity.confidence }));
         try {
           const raw = await _timedShopping(timings, () => handleGoogleShopping(aiIdentity.query, country));
           const basket = raw.cards || [];
           if (basket.length >= 1) {
-            shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
-            console.log('[Lakkot] Unified: AI-path basket', basket.length, 'median=' + shoppingResult.medianPrice);
+            // Sneakers get the identity tri (tolerant gate + retail-cluster
+            // median). Every other category keeps the raw-basket median.
+            const sneak = aiIdentity.category === 'sneaker' ? priceSneakerBasket(basket, aiIdentity) : null;
+            if (sneak) {
+              shoppingResult = { cards: sneak.cards, medianPrice: sneak.median, totalFound: sneak.cards.length };
+              console.log(`[Lakkot] Unified: AI-path sneaker tri basket=${basket.length} kept=${sneak.keptCount} retail=${sneak.retailCount} median=${sneak.median}`);
+            } else {
+              shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
+              console.log('[Lakkot] Unified: AI-path basket', basket.length, 'median=' + shoppingResult.medianPrice);
+            }
           } else {
             console.log('[Lakkot] Unified: AI query returned 0 Shopping results');
           }
@@ -6174,71 +6200,49 @@ app.post('/scan', async (req, res) => {
       // a good AI result with the noisier legacy query.
       const aiSucceeded = shoppingResult.cards.length > 0;
       if (!aiSucceeded) {
-      const identity = buildIdentity(lensResult?.visualMatches || []);
-      if (identity.confident) {
-        const skuQuery = buildShoppingQuery(identity);
-        loggedShoppingQuery = skuQuery;
-        console.log('[Lakkot] Unified: style-code ID', identity.styleCode, '(score', identity.score + ') → query:', skuQuery);
-        try {
-          const raw1 = await _timedShopping(timings, () => handleGoogleShopping(skuQuery, country));
-          let basket = filterBySku(raw1.cards, identity.styleCode);
-          // Fallback: if the precise query yielded too few SKU matches, retry with
-          // a broader "brand + sku" query and pool the unique results. This is the
-          // resilience layer against Google Lens / Shopping result variance.
-          if (basket.length < 2 && identity.brand && identity.styleCode) {
-            const fallbackQuery = `${identity.brand} ${identity.styleCode}`;
-            console.log('[Lakkot] Unified: thin basket — fallback query →', fallbackQuery);
-            const raw2 = await _timedShopping(timings, () => handleGoogleShopping(fallbackQuery, country));
-            const more = filterBySku(raw2.cards, identity.styleCode);
-            const seen = new Set(basket.map((c) => c.title));
-            for (const c of more) if (!seen.has(c.title)) { basket.push(c); seen.add(c.title); }
-            console.log('[Lakkot] Unified: pooled basket size', basket.length);
-          }
-          // Retailer augment: SKU-only filtering biases toward marketplaces
-          // (eBay sellers consistently put style codes in titles; major retailers
-          // don't). To surface Nike / Foot Locker / JD Sports / Zalando / etc.,
-          // run a second query built from the consensus product name (word vote
-          // across Lens match titles) and keep results from non-marketplace
-          // sources only. Adds source diversity to the SKU-precise basket.
-          const phrase = extractCommonPhrase(lensResult?.visualMatches || []);
-          if (phrase && identity.brand) {
-            const nameQuery = `${identity.brand} ${phrase}`;
-            console.log('[Lakkot] Unified: retailer-augment query →', nameQuery);
-            try {
-              const raw3 = await _timedShopping(timings, () => handleGoogleShopping(nameQuery, country));
-              const retailers = (raw3.cards || []).filter((c) => !isMarketplace(c.source));
-              const seenTitles = new Set(basket.map((c) => c.title));
-              let added = 0;
-              for (const c of retailers) {
-                if (!seenTitles.has(c.title)) { basket.push(c); seenTitles.add(c.title); added++; }
-              }
-              console.log('[Lakkot] Unified: retailer augment added', added, '→ basket now', basket.length);
-            } catch (err) {
-              console.error('[Lakkot] Unified: retailer-augment error:', err.message);
-            }
-          }
-          if (basket.length >= 1) {
-            shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
-            console.log('[Lakkot] Unified: final basket', basket.length, 'median=' + shoppingResult.medianPrice);
-          } else {
-            lowConfidence = true;
-            console.log('[Lakkot] Unified: 0 matches even after all fallbacks — honest no-data');
-          }
-        } catch (err) {
-          console.error('[Lakkot] Unified: SKU shopping error:', err.message);
-        }
-      } else {
-        const shoppingQuery = cleanLensName || productName;
-        loggedShoppingQuery = shoppingQuery;
-        if (shoppingQuery) {
+        // Single fallback — ONE Shopping call, no cascade. Reached when Gemini
+        // was unavailable or its query returned 0. For sneakers with a
+        // confident style code we build a style-code query; otherwise a loose
+        // consensus-name query. The identity tri is applied when we have a
+        // sneaker signal, exactly like the AI path — so a fallback sneaker is
+        // priced on its retail cluster, not a raw median.
+        const legacyId = buildIdentity(lensResult?.visualMatches || []);
+        const phrase = extractCommonPhrase(lensResult?.visualMatches || []);
+        const fallbackQuery = legacyId.confident
+          ? buildShoppingQuery(legacyId)
+          : (aiIdentity?.query || phrase || cleanLensName || productName);
+        loggedShoppingQuery = fallbackQuery;
+        if (fallbackQuery) {
           try {
-            shoppingResult = await _timedShopping(timings, () => handleGoogleShopping(shoppingQuery, country));
-            console.log('[Lakkot] Unified: Google Shopping (loose)', shoppingResult.cards.length, 'results, median=' + shoppingResult.medianPrice);
+            const raw = await _timedShopping(timings, () => handleGoogleShopping(fallbackQuery, country));
+            const basket = raw.cards || [];
+            if (basket.length >= 1) {
+              // Prefer Gemini's identity (has model+colorway); else synthesize
+              // a minimal one from the style-code vote so the tri can still run.
+              const triIdentity = aiIdentity || {
+                brand: legacyId.brand, model: phrase || null, variant: null,
+                category: legacyId.confident ? 'sneaker' : 'other',
+              };
+              const sneak = triIdentity.category === 'sneaker' ? priceSneakerBasket(basket, triIdentity) : null;
+              if (sneak) {
+                shoppingResult = { cards: sneak.cards, medianPrice: sneak.median, totalFound: sneak.cards.length };
+                console.log(`[Lakkot] Unified: fallback sneaker tri basket=${basket.length} kept=${sneak.keptCount} median=${sneak.median}`);
+              } else {
+                shoppingResult = { cards: basket, medianPrice: medianOf(basket), totalFound: basket.length };
+                console.log('[Lakkot] Unified: fallback basket', basket.length, 'median=' + shoppingResult.medianPrice);
+              }
+            } else {
+              // Confident sneaker but zero Shopping results → honest no-data
+              // (do not trust Lens-priced matches for a sneaker). Loose
+              // non-sneaker fallback leaves shoppingResult empty so the caller
+              // can still fall back to Lens cards, as before.
+              if (legacyId.confident) lowConfidence = true;
+              console.log('[Lakkot] Unified: 0 Shopping results on fallback');
+            }
           } catch (err) {
-            console.error('[Lakkot] Unified: Google Shopping error:', err.message);
+            console.error('[Lakkot] Unified: fallback shopping error:', err.message);
           }
         }
-      }
       }   // end if (!aiSucceeded) — close the AI-fallback gate
 
       // Prefer Shopping (more results, better median) over Lens visual matches.
