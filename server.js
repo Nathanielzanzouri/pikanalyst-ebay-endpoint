@@ -5969,17 +5969,19 @@ app.post('/scan', async (req, res) => {
             .filter(t => t.length > 0);
           const vision = await identifyProductVision(imageBase64, { lensTitles: lensTitlesForVision });
           if (vision && vision.category !== 'tcg_card' && vision.category !== 'sneakers') {
-            // LENS-FIRST IDENTITY (coins & sport cards). Gemini-vision keeps the
-            // CATEGORY bucket + price band (reliable "coin vs card" from the
-            // image), but the SPECIFIC product identity — which exact coin /
-            // which card year+set — is read from the LENS titles, not guessed
-            // from a blurry photo. We rebuild the search query with
-            // extractProductIdentity (Gemini over the Lens titles, same engine
-            // as sneakers). Example: a Panini Select FIFA Henry auto whose
-            // vision query was "Panini Select FIFA Thierry Henry Autograph"
-            // (no year) becomes "Thierry Henry 2023 Panini Select FIFA
-            // Signatures" — because the Lens titles carry the year + set.
-            if ((vision.category === 'coins_money' || vision.category === 'sports_card')
+            // LENS-FIRST IDENTITY — COINS ONLY. Gemini-vision keeps the category
+            // bucket + price band; the specific coin identity is read from the
+            // LENS titles (clean visual match for coins) via
+            // extractProductIdentity, and overrides the image-derived query.
+            //
+            // NOT for sport cards: Lens matches the SET DESIGN, not the card. An
+            // Obsidian black card looks the same across players, so Lens returns
+            // a dozen different players and the extractor picks the wrong one
+            // (a Towns scan came back "Jalen Brunson"). Gemini, reading the
+            // player name printed on the card, is the reliable identifier for
+            // sport cards — so we keep its query there and use Lens only to
+            // vote the YEAR for filtering (see ai-product-listings).
+            if (vision.category === 'coins_money'
                 && Array.isArray(lensResult?.visualMatches) && lensResult.visualMatches.length) {
               try {
                 const lensId = await extractProductIdentity(lensResult.visualMatches);
