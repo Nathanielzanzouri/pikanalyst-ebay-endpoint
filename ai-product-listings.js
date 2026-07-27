@@ -346,16 +346,15 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   const modelTokens = extractDistinguishingTokens(vision);
   console.log(`[Lakkot listings] distinguishing tokens for filter:`, modelTokens.join(', '));
 
-  // Sports cards: enforce the YEAR. IDENTITY-FROM-LENS — vote the year from the
-  // Lens titles first (Lens = source of truth), and only fall back to Gemini's
-  // card_year / variant when Lens has no consensus. Only applied for
-  // sports_card; for other categories a year is meaningless.
-  const lensYear = vision.category === 'sports_card' ? consensusYearFromLens(lensTitles) : null;
-  const cardYear = vision.category === 'sports_card'
-    ? (lensYear || extractBaseYear(vision.card_year || vision.variant || vision.product_name))
-    : null;
+  // Sports cards: enforce the YEAR, but ONLY when Lens gives a confident
+  // consensus (>= 2 titles agree). Lens is the identity source of truth; a lone
+  // Gemini card_year guess is unreliable (it can misread the year on a blurry
+  // card) and gating on it wrongly dropped EVERY listing — the Karl-Anthony
+  // Towns / Carmelo scans returned 0 that way. No consensus → don't gate on
+  // year (better a slightly mixed basket than nothing). Only for sports_card.
+  const cardYear = vision.category === 'sports_card' ? consensusYearFromLens(lensTitles) : null;
   if (cardYear) {
-    console.log(`[Lakkot listings] sports-card year filter: require ${cardYear} (${lensYear ? 'lens-consensus' : 'gemini'})`);
+    console.log(`[Lakkot listings] sports-card year filter: require ${cardYear} (lens-consensus)`);
   }
 
   // Helper: apply the filters (brand + price + model + year), return top capAt.
@@ -440,6 +439,24 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
         fallbackRaw = [...fallbackRaw, ...ebayCoins];
       } catch (err) {
         console.warn('[Lakkot listings] coins eBay fetch failed:', err.message);
+      }
+    }
+  }
+
+  // Sport cards: ALSO query Google Shopping and merge. eBay Browse alone can
+  // return 0 for niche parallels (a Panini Obsidian Gold Mirror), while both
+  // Shopping (40+) and eBay (60+) actually carry them. Primary source above is
+  // eBay Browse (source='ebay'); Shopping is added here.
+  if (vision.category === 'sports_card' && shoppingCaller) {
+    const spQuery = (vision.query_shopping || vision.query_ebay || primaryQuery || '').trim();
+    if (spQuery) {
+      try {
+        const spRes = await runWithTimeout(shoppingCaller(spQuery, searchCountry), 6000);
+        const spCards = mapShoppingCards(spRes?.cards || []);
+        console.log(`[Lakkot listings] sports: +${spCards.length} Shopping listings merged`);
+        fallbackRaw = [...fallbackRaw, ...spCards];
+      } catch (err) {
+        console.warn('[Lakkot listings] sports Shopping fetch failed:', err.message);
       }
     }
   }
