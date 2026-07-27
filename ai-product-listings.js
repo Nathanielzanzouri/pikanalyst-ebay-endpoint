@@ -118,6 +118,17 @@ function passesBrandFilter(title, brand) {
   return nt.includes(nb);
 }
 
+// Drop non-commerce "listings" that leak in via Lens visual_matches: Wikipedia
+// / Wikimedia pages, image files, catalog/reference pages. Their "price" is
+// bogus (a face value, an image dimension) and pollutes the median — a
+// Wikipedia entry showed a 2€ face value for a JO commemorative that sells at
+// ~18€. Matched on title AND source.
+const JUNK_RE = /\b(wikip|wikimedia|fichier:|file:|\.png|\.jpe?g|\.gif|\.svg|numista)\b/i;
+function passesJunkFilter(title, source) {
+  const hay = `${title || ''} ${source || ''}`;
+  return !JUNK_RE.test(hay);
+}
+
 function passesPriceFilter(priceEur, geminiMin, geminiMax) {
   if (!priceEur || priceEur <= 0) return false;
   // If Gemini couldn't estimate (both zero), we can't filter by bounds —
@@ -330,8 +341,9 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   const CAP = 8;
   const filterAndRank = (items, capAt = CAP) => {
     const kept = [];
-    const rejected = { brand: 0, price: 0, model: 0, year: 0 };
+    const rejected = { brand: 0, price: 0, model: 0, year: 0, junk: 0 };
     for (const item of items) {
+      if (!passesJunkFilter(item.title, item.source || item.seller)) { rejected.junk++; continue; }
       if (!passesBrandFilter(item.title, vision.brand)) { rejected.brand++; continue; }
       if (!passesPriceFilter(item.price, geminiMin, geminiMax)) { rejected.price++; continue; }
       if (!passesModelFilter(item.title, modelTokens)) { rejected.model++; continue; }
@@ -400,7 +412,7 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   }
   const filtered = filterAndRank(merged);
   let kept = filtered.kept;
-  console.log(`[Lakkot listings] source=${source} lens=${lensListings.length} fallback=${fallbackRaw.length} merged=${merged.length} kept=${kept.length} rejected(brand=${filtered.rejected.brand},price=${filtered.rejected.price},model=${filtered.rejected.model},year=${filtered.rejected.year})`);
+  console.log(`[Lakkot listings] source=${source} lens=${lensListings.length} fallback=${fallbackRaw.length} merged=${merged.length} kept=${kept.length} rejected(brand=${filtered.rejected.brand},price=${filtered.rejected.price},model=${filtered.rejected.model},year=${filtered.rejected.year},junk=${filtered.rejected.junk})`);
 
   // Retry once with a broader query if 0 kept AND we have a brand to keep
   // in the query (per spec: the retry MUST retain the brand — otherwise
