@@ -1563,12 +1563,15 @@ function extractPokemonFromMatches(visualMatches, targetLang = 'EN', options = {
         // bare "009" numbers that JP retro sets use instead of "9/82").
         const _beforeLen = nameWithNumber.length;
 
-        // Promo mode: first try the Japanese promo SKU pattern (e.g. "098/SV-P").
-        // If matched, that's the most specific form — use it verbatim and skip
-        // the other patterns. Without this, the X/Y regex below misses it (no
-        // digits after the slash) and we'd fall back to a generic "Promo 098"
-        // that fuzz-matches every promo numbered 098 across eras.
-        if (promoMode) {
+        // Japanese promo SKU pattern (e.g. "098/SV-P", "098/XY-P"). ALWAYS
+        // capture the era suffix — not just in promoMode — because the suffix
+        // is what distinguishes Mega Tokyo's Pikachu 098/XY-P from Detective
+        // Pikachu 098/SV-P and Regice 098/PCG-P (same number, different eras,
+        // wildly different prices). Without it the query "Pikachu 098" fuzz-
+        // matches all of them (QA: scan 242568b5 priced 432€ off a mixed
+        // basket). The regex requires the "-P" promo marker, so it never fires
+        // on a normal card, and the vote consensus still arbitrates conflicts.
+        {
           const jpPromoMatch = title.match(jpPromoRe);
           if (jpPromoMatch) {
             const jpPromoNum = `${jpPromoMatch[1].padStart(3, '0')}/${jpPromoMatch[2].toUpperCase()}-P`;
