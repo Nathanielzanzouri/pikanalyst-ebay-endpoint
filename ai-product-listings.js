@@ -300,6 +300,11 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
 
   const source = getListingsSource(vision.category);
   const marketplace = getEbayMarketplace(country);
+  // Coins: euro / world commemorative coins are thin on the US Shopping locale
+  // (a Bulgaria 2€ or a Mongolia Togrog barely shows) but well covered by the
+  // FR/EU numismatic shops (Trésor du Patrimoine, Arthur Maury, Numista...).
+  // Search FR for coins regardless of the request country.
+  const searchCountry = vision.category === 'coins_money' ? 'fr' : country;
   const geminiMin = Number(vision.estimated_price_min) || 0;
   const geminiMax = Number(vision.estimated_price_max) || 0;
   // Distinguishing tokens from product_name + variant. Any listing whose
@@ -375,7 +380,7 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
           console.warn('[Lakkot listings] no ebay token — skipping fallback');
         }
       } else {
-        const shoppingRes = await runWithTimeout(shoppingCaller(primaryQuery, country), 6000);
+        const shoppingRes = await runWithTimeout(shoppingCaller(primaryQuery, searchCountry), 6000);
         fallbackRaw = mapShoppingCards(shoppingRes?.cards || []);
       }
     } catch (err) {
@@ -430,7 +435,7 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
             6000
           );
         } else {
-          const shoppingRes = await runWithTimeout(shoppingCaller(broadQuery, country), 6000);
+          const shoppingRes = await runWithTimeout(shoppingCaller(broadQuery, searchCountry), 6000);
           retryRaw = mapShoppingCards(shoppingRes?.cards || []);
         }
         // Re-merge with Lens + primary fallback, dedupe by link so the
@@ -451,18 +456,23 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
     }
   }
 
-  // Compute market price range if we have enough data points.
+  // Compute market price range if we have enough data points. Most categories
+  // need >= 3 for a stable range, but COINS have thin coverage and a single
+  // real coin-shop listing is a better cote than a Gemini guess (a Mongolia
+  // Togrog had 1 real listing at 70€ but showed Gemini's 30€ band). For coins
+  // we price from whatever real listings we have (>= 1).
+  const minForListings = vision.category === 'coins_money' ? 1 : 3;
   let market_price_min = null;
   let market_price_max = null;
   let price_source = 'gemini';
-  if (kept.length >= 3) {
+  if (kept.length >= minForListings) {
     const prices = kept.map(x => x.price).filter(p => p > 0);
     market_price_min = Math.round(Math.min(...prices) * 100) / 100;
     market_price_max = Math.round(Math.max(...prices) * 100) / 100;
     price_source = 'listings';
   }
-  // 1-2 listings: display them but keep Gemini's band (too few points for
-  // a proper market range).
+  // Below the threshold: display the listings but keep Gemini's band (too few
+  // points for a proper market range).
 
   // Report the source that actually contributed the kept items. If they're
   // all from Lens → 'lens'; all from Shopping/eBay → source name; mix →
