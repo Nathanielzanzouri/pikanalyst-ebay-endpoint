@@ -97,6 +97,25 @@ function getEbayMarketplace(country) {
   return EBAY_MARKETPLACE_BY_COUNTRY[(country || '').toLowerCase()] || 'EBAY_FR';
 }
 
+// Route a coin to the marketplace + Shopping locale that actually stocks it,
+// from Gemini's coin_country. A US coin (Buffalo nickel) lives on ebay.com,
+// a euro / world coin on ebay.fr. Defaults to FR — our user base, and the EU
+// is the practical hub for euro + world coins (ebay.fr carried the Mongolia
+// Togrog). Only US/UK/DE get their own market; everything else → FR.
+function coinMarket(coinCountry) {
+  const c = String(coinCountry || '').toLowerCase();
+  if (/\b(usa|u\.?s\.?a?|united states|etats.?unis|états.?unis|amerique|amerik|american|americaine)\b/.test(c)) {
+    return { marketplace: 'EBAY_US', country: 'us' };
+  }
+  if (/\b(uk|united kingdom|royaume.?uni|grande.?bretagne|britain|british|angleterre|england)\b/.test(c)) {
+    return { marketplace: 'EBAY_GB', country: 'gb' };
+  }
+  if (/\b(germany|allemagne|deutschland|german|allemande)\b/.test(c)) {
+    return { marketplace: 'EBAY_DE', country: 'de' };
+  }
+  return { marketplace: 'EBAY_FR', country: 'fr' };
+}
+
 // ─── Normalization for the brand filter ──────────────────────────────────
 // "Paul & Joe" vs "Paul Marius" — a naïve `title.includes(brand)` matches
 // both, so a Paul Marius listing gets shown as proof for a Paul & Joe scan.
@@ -311,11 +330,13 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
 
   const source = getListingsSource(vision.category);
   const marketplace = getEbayMarketplace(country);
-  // Coins: euro / world commemorative coins are thin on the US Shopping locale
-  // (a Bulgaria 2€ or a Mongolia Togrog barely shows) but well covered by the
-  // FR/EU numismatic shops (Trésor du Patrimoine, Arthur Maury, Numista...).
-  // Search FR for coins regardless of the request country.
-  const searchCountry = vision.category === 'coins_money' ? 'fr' : country;
+  // Coins: search the marketplace that stocks them, from the coin's country
+  // (US coin → ebay.com/us, euro/world → ebay.fr/fr), not the request country
+  // (which is often us and starves European coins). Non-coins keep the request
+  // country.
+  const coinMkt = vision.category === 'coins_money' ? coinMarket(vision.coin_country) : null;
+  const searchCountry = coinMkt ? coinMkt.country : country;
+  if (coinMkt) console.log(`[Lakkot listings] coin market: ${coinMkt.marketplace} / ${coinMkt.country} (coin_country="${vision.coin_country || ''}")`);
   const geminiMin = Number(vision.estimated_price_min) || 0;
   const geminiMax = Number(vision.estimated_price_max) || 0;
   // Distinguishing tokens from product_name + variant. Any listing whose
@@ -412,10 +433,10 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
     if (coinQuery) {
       try {
         const ebayCoins = await runWithTimeout(
-          fetchEbayBrowseListings({ query: coinQuery, marketplace: 'EBAY_FR', ebayToken }),
+          fetchEbayBrowseListings({ query: coinQuery, marketplace: coinMkt.marketplace, ebayToken }),
           6000
         );
-        console.log(`[Lakkot listings] coins: +${ebayCoins.length} eBay.FR listings merged`);
+        console.log(`[Lakkot listings] coins: +${ebayCoins.length} ${coinMkt.marketplace} listings merged`);
         fallbackRaw = [...fallbackRaw, ...ebayCoins];
       } catch (err) {
         console.warn('[Lakkot listings] coins eBay fetch failed:', err.message);
