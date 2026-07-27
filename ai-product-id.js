@@ -17,7 +17,13 @@
 // caller passes our result straight through to Google Shopping; nothing else
 // downstream depends on the shape.
 
-const MODEL = process.env.GEMINI_PRODUCT_ID_MODEL || 'gemini-flash-lite-latest';
+// Use a model ID proven to work elsewhere in this service (identifyProductVision
+// runs gemini-2.5-flash). The previous default 'gemini-flash-lite-latest' was an
+// anomalous alias: extractProductIdentity returned null on every call, so the
+// Lens-first query override for coins/sport cards never fired and they silently
+// fell back to Gemini's image-derived query (a Towns "Gold Mirror" card was
+// queried as "Gold Patch"). Text-only title parsing → flash is plenty.
+const MODEL = process.env.GEMINI_PRODUCT_ID_MODEL || 'gemini-2.5-flash';
 const FETCH_TIMEOUT_MS = 6000;
 const TOP_N_TITLES = 15;            // matches what extractStyleCode uses
 
