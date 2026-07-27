@@ -401,6 +401,28 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
     }
   }
 
+  // Coins: ALSO query eBay Browse (FR marketplace) and merge. eBay has by far
+  // the best coin coverage — 60 listings for a Bulgaria 2€ / a 1/4€ Cécifoot vs
+  // 1 on Shopping — and it was the US marketplace, not eBay, that returned 0
+  // before. Shopping still contributes the coin-shop sellers (Trésor du
+  // Patrimoine, Arthur Maury). FR marketplace regardless of the request country
+  // (our users scan mostly euro / world coins sold on ebay.fr).
+  if (vision.category === 'coins_money' && ebayToken) {
+    const coinQuery = (vision.query_ebay || primaryQuery || '').trim();
+    if (coinQuery) {
+      try {
+        const ebayCoins = await runWithTimeout(
+          fetchEbayBrowseListings({ query: coinQuery, marketplace: 'EBAY_FR', ebayToken }),
+          6000
+        );
+        console.log(`[Lakkot listings] coins: +${ebayCoins.length} eBay.FR listings merged`);
+        fallbackRaw = [...fallbackRaw, ...ebayCoins];
+      } catch (err) {
+        console.warn('[Lakkot listings] coins eBay fetch failed:', err.message);
+      }
+    }
+  }
+
   // Merge Lens + fallback, dedupe by URL (or title as backup key).
   const seenLinks = new Set();
   const merged = [];
