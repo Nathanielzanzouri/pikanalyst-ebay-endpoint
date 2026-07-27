@@ -5966,6 +5966,30 @@ app.post('/scan', async (req, res) => {
             .filter(t => t.length > 0);
           const vision = await identifyProductVision(imageBase64, { lensTitles: lensTitlesForVision });
           if (vision && vision.category !== 'tcg_card' && vision.category !== 'sneakers') {
+            // LENS-FIRST IDENTITY (coins & sport cards). Gemini-vision keeps the
+            // CATEGORY bucket + price band (reliable "coin vs card" from the
+            // image), but the SPECIFIC product identity — which exact coin /
+            // which card year+set — is read from the LENS titles, not guessed
+            // from a blurry photo. We rebuild the search query with
+            // extractProductIdentity (Gemini over the Lens titles, same engine
+            // as sneakers). Example: a Panini Select FIFA Henry auto whose
+            // vision query was "Panini Select FIFA Thierry Henry Autograph"
+            // (no year) becomes "Thierry Henry 2023 Panini Select FIFA
+            // Signatures" — because the Lens titles carry the year + set.
+            if ((vision.category === 'coins_money' || vision.category === 'sports_card')
+                && Array.isArray(lensResult?.visualMatches) && lensResult.visualMatches.length) {
+              try {
+                const lensId = await extractProductIdentity(lensResult.visualMatches);
+                if (lensId && lensId.query) {
+                  console.log(`[Lakkot vision] LENS-first query (${vision.category}): "${vision.query_shopping || vision.query_ebay || '(none)'}" → "${lensId.query}"`);
+                  vision.query_shopping = lensId.query;
+                  vision.query_ebay = lensId.query;
+                  vision._lensIdentity = lensId;
+                }
+              } catch (err) {
+                console.warn('[Lakkot vision] Lens identity failed, keeping vision query:', err.message);
+              }
+            }
             console.log('[Lakkot vision] identity →', JSON.stringify({
               category: vision.category, brand: vision.brand, product_name: vision.product_name,
               variant: vision.variant, conf: vision.confidence, price_conf: vision.price_confidence,
