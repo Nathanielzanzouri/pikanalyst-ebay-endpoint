@@ -62,12 +62,17 @@ const CURRENCY_SYMBOL_TO_ISO = { '€': 'EUR', '$': 'USD', '£': 'GBP' };
 // null when the currency can't be converted (unknown symbol or toEur
 // declined) — the caller filters null out. All cards from handleGoogleLens
 // already have hasPrice === true, so `c.price` is always a positive number.
+// Pre-owned / resale marketplaces + condition words. A Lens card from Vestiaire
+// Collective / The RealReal / Farfetch Pre-Owned / Vinted / Leboncoin is a
+// second-hand listing; we infer condition so the client sees Neuf/Occasion.
+const RESALE_USED_RE = /\b(vestiaire|therealreal|the ?real ?real|fashionphile|rebag|collector ?square|joli ?closet|rebelle|vinted|leboncoin|videdressing|hardly ?ever|pre[- ]?owned|preowned|pre[- ]?loved|second[- ]?hand|seconde ?main|occasion|vintage|d.occasion|usé|used)\b/i;
 function mapLensCard(c) {
   if (!c || typeof c.price !== 'number' || c.price <= 0) return null;
   const iso = CURRENCY_SYMBOL_TO_ISO[c.currency] || null;
   if (!iso) return null;
   const priceEur = toEur(c.price, iso);
   if (priceEur == null) return null;
+  const hay = `${c.retailer || ''} ${c.domain || ''} ${c.title || ''}`;
   return {
     title:     c.title || '',
     price:     priceEur,
@@ -76,6 +81,7 @@ function mapLensCard(c) {
     image_url: c.imageUrl || null,
     link:      c.url || null,
     source:    'lens',
+    condition: RESALE_USED_RE.test(hay) ? 'used' : null, // null = unknown
   };
 }
 function mapLensCardsToListings(cards) {
@@ -268,6 +274,10 @@ function mapShoppingCards(cards) {
         image_url: c.imageUrl || null,
         link:      c.url || null,
         source:    'google_shopping',
+        // Neuf / Occasion — Google Shopping flags pre-owned via
+        // second_hand_condition (surfaced on the card as isSecondHand). Shown
+        // per listing so the client sees the condition behind each price.
+        condition: c.isSecondHand ? 'used' : 'new',
       };
     })
     .filter(Boolean);
@@ -304,6 +314,7 @@ async function fetchEbayBrowseListings({ query, marketplace, ebayToken }) {
     if (!priceStr || isNaN(priceNum) || priceNum <= 0) continue;
     const priceEur = toEur(priceNum, currency);
     if (priceEur == null) continue;              // unsupported currency
+    const ebCond = String(it.condition || '').toLowerCase();
     out.push({
       title:     it.title || '',
       price:     priceEur,
@@ -312,6 +323,7 @@ async function fetchEbayBrowseListings({ query, marketplace, ebayToken }) {
       image_url: it.image?.imageUrl || it.thumbnailImages?.[0]?.imageUrl || null,
       link:      it.itemWebUrl || null,
       source:    'ebay',
+      condition: ebCond ? (/new/.test(ebCond) ? 'new' : 'used') : null,
     });
   }
   return out;
@@ -550,7 +562,13 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   // real coin-shop listing is a better cote than a Gemini guess (a Mongolia
   // Togrog had 1 real listing at 70€ but showed Gemini's 30€ band). For coins
   // we price from whatever real listings we have (>= 1).
-  const minForListings = vision.category === 'coins_money' ? 1 : 3;
+  // Coins price from a single real listing; luxury bags/accessories &
+  // jewelry/watches from 2+ (a real resale RANGE from the comps we found beats
+  // Gemini's guess — the client wants "where it sells & for how much"); other
+  // categories keep 3 for a stable range.
+  const RESALE_RANGE_CATS = new Set(['bags_accessories', 'jewelry_watches', 'fashion_women', 'fashion_men']);
+  const minForListings = vision.category === 'coins_money' ? 1
+    : (RESALE_RANGE_CATS.has(vision.category) ? 2 : 3);
   let market_price_min = null;
   let market_price_max = null;
   let price_source = 'gemini';
