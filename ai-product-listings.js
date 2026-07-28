@@ -360,18 +360,35 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
   // Helper: apply the filters (brand + price + model + year), return top capAt.
   const CAP = 8;
   const filterAndRank = (items, capAt = CAP) => {
-    const kept = [];
-    const rejected = { brand: 0, price: 0, model: 0, year: 0, junk: 0 };
-    for (const item of items) {
-      if (!passesJunkFilter(item.title, item.source || item.seller)) { rejected.junk++; continue; }
-      if (!passesBrandFilter(item.title, vision.brand)) { rejected.brand++; continue; }
-      if (!passesPriceFilter(item.price, geminiMin, geminiMax)) { rejected.price++; continue; }
-      if (!passesModelFilter(item.title, modelTokens)) { rejected.model++; continue; }
-      if (!passesYearFilter(item.title, cardYear)) { rejected.year++; continue; }
-      kept.push(item);
-      if (kept.length >= capAt) break;
+    const run = (useModel) => {
+      const kept = [];
+      const rejected = { brand: 0, price: 0, model: 0, year: 0, junk: 0 };
+      for (const item of items) {
+        if (!passesJunkFilter(item.title, item.source || item.seller)) { rejected.junk++; continue; }
+        if (!passesBrandFilter(item.title, vision.brand)) { rejected.brand++; continue; }
+        if (!passesPriceFilter(item.price, geminiMin, geminiMax)) { rejected.price++; continue; }
+        if (useModel && !passesModelFilter(item.title, modelTokens)) { rejected.model++; continue; }
+        if (!passesYearFilter(item.title, cardYear)) { rejected.year++; continue; }
+        kept.push(item);
+        if (kept.length >= capAt) break;
+      }
+      return { kept, rejected };
+    };
+    const r = run(true);
+    // The model filter is NON-DESTRUCTIVE: when a specific distinguishing token
+    // (a bag model like "Kira", a card parallel) isn't repeated in the listing
+    // titles it wrongly drops everything — the SAME Chloé bag returned 1 result
+    // when Gemini said "cuir noir" but 0 when it said "Kira". Brand + the Lens
+    // visual match already anchor identity, so if the model gate empties the
+    // basket we relax it rather than return nothing.
+    if (r.kept.length === 0 && r.rejected.model > 0) {
+      const relaxed = run(false);
+      if (relaxed.kept.length > 0) {
+        console.log(`[Lakkot listings] model filter relaxed (was 0, tokens: ${modelTokens.join(',')}) → kept ${relaxed.kept.length}`);
+        return relaxed;
+      }
     }
-    return { kept, rejected };
+    return r;
   };
 
   // ── Lens source: use visualMatches already fetched upstream for luxury.
