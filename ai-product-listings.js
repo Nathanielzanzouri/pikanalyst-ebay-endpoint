@@ -264,7 +264,14 @@ function passesYearFilter(title, cardYear) {
 function mapShoppingCards(cards) {
   return (cards || [])
     .map(c => {
-      const priceEur = toEur(c.price, c.currency);
+      // handleGoogleShopping stores the currency as a SYMBOL ($ / € / £), but
+      // toEur expects an ISO code (USD/EUR/GBP). Convert first — otherwise
+      // EVERY USD ($) listing is dropped as "unsupported currency", which
+      // silently zeroed US-locale scans whose Lens cards carried no price (a
+      // Prada bag returned 0 while Shopping had 40 real listings). mapLensCard
+      // already did this conversion; mapShoppingCards did not.
+      const iso = CURRENCY_SYMBOL_TO_ISO[c.currency] || c.currency;
+      const priceEur = toEur(c.price, iso);
       if (priceEur == null) return null;         // unsupported currency → skip
       return {
         title:     c.title,
