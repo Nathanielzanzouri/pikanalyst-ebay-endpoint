@@ -3580,7 +3580,12 @@ const COUNTRY_HL = {
 
 async function handleGoogleShopping(productName, country) {
   const params = new URLSearchParams({
-    engine: 'google_shopping',
+    // google_shopping_light: same shopping_results shape + fields (price,
+    // source, thumbnail, product_link, second_hand_condition) but ~15-30%
+    // faster. A/B'd on sneaker/bag/Chanel queries — identical counts and
+    // medians, only minor ordering variance below the top results. Roll back
+    // to 'google_shopping' if a real-traffic edge case shows up.
+    engine: 'google_shopping_light',
     q: productName,
     api_key: process.env.SERPAPI_KEY,
     num: '40',
