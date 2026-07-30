@@ -5974,30 +5974,30 @@ app.post('/scan', async (req, res) => {
             .filter(t => t.length > 0);
           const vision = await identifyProductVision(imageBase64, { lensTitles: lensTitlesForVision });
           if (vision && vision.category !== 'tcg_card' && vision.category !== 'sneakers') {
-            // LENS-FIRST IDENTITY — COINS ONLY. Gemini-vision keeps the category
-            // bucket + price band; the specific coin identity is read from the
-            // LENS titles (clean visual match for coins) via
-            // extractProductIdentity, and overrides the image-derived query.
-            //
-            // NOT for sport cards: Lens matches the SET DESIGN, not the card. An
-            // Obsidian black card looks the same across players, so Lens returns
-            // a dozen different players and the extractor picks the wrong one
-            // (a Towns scan came back "Jalen Brunson"). Gemini, reading the
-            // player name printed on the card, is the reliable identifier for
-            // sport cards — so we keep its query there and use Lens only to
-            // vote the YEAR for filtering (see ai-product-listings).
-            if (vision.category === 'coins_money'
-                && Array.isArray(lensResult?.visualMatches) && lensResult.visualMatches.length) {
-              try {
-                const lensId = await extractProductIdentity(lensResult.visualMatches);
-                if (lensId && lensId.query) {
-                  console.log(`[Lakkot vision] LENS-first query (${vision.category}): "${vision.query_shopping || vision.query_ebay || '(none)'}" → "${lensId.query}"`);
-                  vision.query_shopping = lensId.query;
-                  vision.query_ebay = lensId.query;
-                  vision._lensIdentity = lensId;
-                }
-              } catch (err) {
-                console.warn('[Lakkot vision] Lens identity failed, keeping vision query:', err.message);
+            // COINS: build the search query from Gemini's STRUCTURED coin fields
+            // (denomination + country + year + type). The DENOMINATION (1€ vs 2€)
+            // is THE discriminator and Gemini reads it reliably off the coin —
+            // but a Lens/extractProductIdentity query drops it: Lens visually
+            // matches similar Monaco coins where 2€ dominates, and the product
+            // extractor thinks in brand/model/SKU, not denomination. Result: a
+            // "1 Euro Monaco 2023" scan queried "Monaco Euro coin" and returned
+            // 2€ coins. With the structured query the basket flips to the right
+            // denomination (25 vs 8 on live test). NOT for sport cards — there
+            // Gemini's player identity drives the query, Lens votes only the
+            // year for filtering (see ai-product-listings).
+            if (vision.category === 'coins_money') {
+              const coinQ = [vision.coin_denomination, vision.coin_country, vision.coin_year, vision.coin_type]
+                .map((v) => (v == null ? '' : String(v).trim()))
+                .filter(Boolean)
+                .join(' ')
+                .trim();
+              // Fall back to product_name / variant (they carry the denomination
+              // too) when the structured fields are sparse.
+              const q = coinQ || (vision.product_name || vision.variant || '').trim();
+              if (q) {
+                console.log(`[Lakkot vision] coin query (structured): "${vision.query_shopping || '(none)'}" → "${q}"`);
+                vision.query_shopping = q;
+                vision.query_ebay = q;
               }
             }
             console.log('[Lakkot vision] identity →', JSON.stringify({
