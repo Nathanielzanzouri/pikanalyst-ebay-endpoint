@@ -5957,13 +5957,15 @@ app.post('/scan', async (req, res) => {
       //
       // Any failure here (flag off, no key, timeout, invalid JSON, low
       // confidence, etc.) → falls through to the legacy path below.
-      // Scoped to web clients only during v2 rollout: the Chrome extension
-      // doesn't know how to render ESTIMATION_RESULT (needs a separate
-      // release once the web UX is validated). Sending it there today
-      // = blank screen for the user. Extension keeps the legacy Lens +
-      // Shopping path until we ship a matching update.
+      // The extension now ALSO uses this branch — it renders WEB_RESULT, not
+      // ESTIMATION_RESULT, so at the return we map the vision listings to a
+      // WEB_RESULT for client==='extension' (see below). Web-desktop/mobile
+      // keep ESTIMATION_RESULT unchanged. This gives the extension the full
+      // product treatment (category + fine identity + resale comps) instead of
+      // the generic legacy path.
       const isWebClient = client === 'web-desktop' || client === 'web-mobile';
-      if (isGeminiVisionEnabled() && isWebClient) {
+      const canUseVision = isWebClient || client === 'extension';
+      if (isGeminiVisionEnabled() && canUseVision) {
         try {
           // Feed Lens visual-match titles to Gemini as seller consensus
           // context so it can vote on ambiguous variants (Rolex 41 vs 36,
@@ -6166,6 +6168,38 @@ app.post('/scan', async (req, res) => {
               sportsIdConfidence:    (vision.category === 'sports_card') ? (typeof vision.id_confidence === 'number' ? vision.id_confidence : null) : null,
               sportsLensTitlesCount: (vision.category === 'sports_card') ? (Array.isArray(lensTitlesForVision) ? lensTitlesForVision.length : 0) : null,
             });
+            // EXTENSION: it renders WEB_RESULT (photo + seller + price per
+            // card), not ESTIMATION_RESULT. Map the vision listings to its card
+            // shape so it gets the full product treatment. Field names differ:
+            // vision uses seller/image_url/link/condition; the extension card
+            // expects retailer/imageUrl/url/isSecondHand. Web clients skip this
+            // and keep the ESTIMATION_RESULT below.
+            if (client === 'extension') {
+              const cards = listings.map((l) => ({
+                title:        l.title,
+                price:        l.price,
+                currency:     l.currency || streamCurrency || 'EUR',
+                retailer:     l.seller || l.source || null,
+                imageUrl:     l.image_url || null,
+                url:          l.link || null,
+                hasPrice:     typeof l.price === 'number' && l.price > 0,
+                isSecondHand: l.condition === 'used',
+              }));
+              return res.json({
+                type:         'WEB_RESULT',
+                productName:  vision.display_title || vision.product_name,
+                cards,
+                medianPrice:  logMarketPrice,
+                priceSource,
+                totalFound:   cards.length,
+                sourcesCount: cards.length,
+                pricesCount:  cards.filter((c) => c.hasPrice).length,
+                sellerPrice,
+                streamCurrency,
+                quota,
+                scanLogId:    logId,
+              });
+            }
             return res.json({
               type: 'ESTIMATION_RESULT',
               display_title:         vision.display_title || vision.product_name,
