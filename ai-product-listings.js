@@ -257,6 +257,64 @@ function passesYearFilter(title, cardYear) {
   return new RegExp('\\b' + cardYear + '\\b').test(String(title));
 }
 
+// Attribute tokens — material / size / finish. These describe the SAME product
+// differently across sellers (verni vs monogram, GM vs BB, nylon vs toile), so
+// they must NEVER be the token that excludes a listing from the consensus
+// filter below: doing so wrongly split a real "Zippy Cuir Verni" from a "Zippy
+// … monogram" (same wallet). Only true MODEL tokens (soufflot, macadam, alma,
+// caro) gate. Colours already live in GENERIC_TOKENS (stripped upstream).
+const ATTRIBUTE_TOKENS = new Set([
+  // materials / patterns
+  'cuir', 'leather', 'verni', 'vernis', 'patent', 'nylon', 'toile', 'canvas',
+  'monogram', 'damier', 'epi', 'caviar', 'agneau', 'veau', 'lambskin',
+  'calfskin', 'daim', 'suede', 'denim', 'jean', 'tissu', 'saffiano', 'grave',
+  // sizes
+  'gm', 'pm', 'mm', 'bb', 'mini', 'large', 'medium', 'small', 'moyen',
+  'moyenne', 'petit', 'grand', 'grande', 'maxi', 'jumbo',
+  // finish
+  'matelasse', 'quilted', 'plaque', 'vintage',
+  // colours (redundant with GENERIC_TOKENS, kept explicit for safety)
+  'marron', 'beige', 'bordeaux', 'multicolore', 'amarante', 'prune',
+  'gold', 'or', 'silver', 'argent', 'brown',
+]);
+
+// CONSENSUS MODEL FILTER — remove intruders (a different model that leaked in
+// on shared brand/material) from BOTH the displayed list and the price.
+// Mechanism: a MODEL token shared by the majority (>=60%) of the basket becomes
+// mandatory; any listing missing it is a different product (a "Speedy" among
+// "Soufflot", a "Triomphe" bucket among "Macadam"). Material/size tokens never
+// gate (synonyms across sellers). Guarded: if excluding would drop the basket
+// below minKeep, exclude NOTHING — a wrong/rare model token must never empty
+// the results (the Chloé "Kira" 0-results regression).
+function consensusModelFilter(items, modelTokens, minKeep) {
+  const gateTokens = (modelTokens || []).filter(t => !ATTRIBUTE_TOKENS.has(t));
+  if (!gateTokens.length || !items.length) return { survivors: items, excluded: [] };
+  const norm = items.map(it => normalize(it.title || ''));
+  const n = items.length;
+  const required = gateTokens.filter(tok =>
+    norm.filter(nt => nt.includes(tok)).length / n >= 0.6);
+  if (!required.length) return { survivors: items, excluded: [] };
+  const survivors = [], excluded = [];
+  items.forEach((it, i) => {
+    const missing = required.filter(tok => !norm[i].includes(tok));
+    if (missing.length === 0) survivors.push(it);
+    else excluded.push({ ...it, _missing: missing });
+  });
+  if (survivors.length < minKeep) return { survivors: items, excluded: [] };
+  return { survivors, excluded };
+}
+
+// Median of a numeric list — robust point estimate for the market price. Beats
+// a (min+max)/2 midpoint, which a single atypical listing (a 3174€ Speedy in a
+// Soufflot basket) drags up by ~1000€. Ignores non-positive prices.
+function median(arr) {
+  const s = (arr || []).filter(p => typeof p === 'number' && p > 0).sort((a, b) => a - b);
+  if (!s.length) return null;
+  const m = Math.floor(s.length / 2);
+  const val = s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  return Math.round(val * 100) / 100;
+}
+
 // ─── Google Shopping wrapper ─────────────────────────────────────────────
 // Takes the raw handleGoogleShopping return shape and maps it to our
 // listings shape. handleGoogleShopping already handles counterfeits and
@@ -389,7 +447,8 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
         if (useModel && !passesModelFilter(item.title, modelTokens)) { rejected.model++; continue; }
         if (!passesYearFilter(item.title, cardYear)) { rejected.year++; continue; }
         kept.push(item);
-        if (kept.length >= capAt) break;
+        // No early break: keep ALL passing items so the scoring pass below can
+        // pick the best-matching ones, not just the first `capAt` in feed order.
       }
       return { kept, rejected };
     };
@@ -564,29 +623,53 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
     }
   }
 
-  // Compute market price range if we have enough data points. Most categories
-  // need >= 3 for a stable range, but COINS have thin coverage and a single
-  // real coin-shop listing is a better cote than a Gemini guess (a Mongolia
-  // Togrog had 1 real listing at 70€ but showed Gemini's 30€ band). For coins
-  // we price from whatever real listings we have (>= 1).
+  // Rank by IDENTITY MATCH (display ordering): score each listing by how many
+  // distinguishing tokens it carries so the best matches show first.
+  if (modelTokens.length && kept.length) {
+    const scoreOf = (it) => {
+      const nt = normalize(it.title || '');
+      return modelTokens.reduce((n, tok) => n + (nt.includes(tok) ? 1 : 0), 0);
+    };
+    kept = kept.map((it) => ({ ...it, _score: scoreOf(it) }))
+               .sort((a, b) => (b._score - a._score) || ((a.price || 0) - (b.price || 0)));
+  }
+
   // Coins price from a single real listing; luxury bags/accessories &
-  // jewelry/watches from 2+ (a real resale RANGE from the comps we found beats
-  // Gemini's guess — the client wants "where it sells & for how much"); other
+  // jewelry/watches from 2+ (a real resale RANGE beats Gemini's guess); other
   // categories keep 3 for a stable range.
   const RESALE_RANGE_CATS = new Set(['bags_accessories', 'jewelry_watches', 'fashion_women', 'fashion_men']);
   const minForListings = vision.category === 'coins_money' ? 1
     : (RESALE_RANGE_CATS.has(vision.category) ? 2 : 3);
+
+  // CONSENSUS MODEL FILTER: drop intruders (a different model sharing brand +
+  // material — a Speedy in a Soufflot basket) from BOTH the shown list and the
+  // price. Guarded to never fall below minForListings.
+  const { survivors, excluded } = consensusModelFilter(kept, modelTokens, minForListings);
+  if (excluded.length) {
+    console.log(`[Lakkot listings] consensus filter excluded ${excluded.length} intruder(s): ` +
+      excluded.map(e => `${e.price}€(missing ${e._missing.join(',')})`).join(' | '));
+  }
+  kept = survivors;
+
+  // Price from the consensus-filtered set, using the MEDIAN (robust to a single
+  // atypical listing). Keep min/max for the displayed resale range.
   let market_price_min = null;
   let market_price_max = null;
+  let market_price_median = null;
   let price_source = 'gemini';
-  if (kept.length >= minForListings) {
-    const prices = kept.map(x => x.price).filter(p => p > 0);
-    market_price_min = Math.round(Math.min(...prices) * 100) / 100;
-    market_price_max = Math.round(Math.max(...prices) * 100) / 100;
+  const poolPrices = kept.map((x) => x.price).filter((p) => p > 0);
+  if (poolPrices.length >= minForListings) {
+    market_price_min = Math.round(Math.min(...poolPrices) * 100) / 100;
+    market_price_max = Math.round(Math.max(...poolPrices) * 100) / 100;
+    market_price_median = median(poolPrices);
     price_source = 'listings';
   }
   // Below the threshold: display the listings but keep Gemini's band (too few
   // points for a proper market range).
+
+  // Display: top matches only (after pricing, so the median saw the full pool).
+  const CAP_DISPLAY = 8;
+  kept = kept.slice(0, CAP_DISPLAY);
 
   // Report the source that actually contributed the kept items. If they're
   // all from Lens → 'lens'; all from Shopping/eBay → source name; mix →
@@ -604,6 +687,7 @@ async function fetchListingsForVision({ vision, country, ebayToken, shoppingCall
     listings: kept,
     market_price_min,
     market_price_max,
+    market_price_median,
     price_source,
     listings_source,
   };
@@ -618,5 +702,7 @@ module.exports = {
   passesPriceFilter,
   passesModelFilter,
   extractDistinguishingTokens,
+  consensusModelFilter,   // exported for unit tests
+  median,
   LISTINGS_SOURCE_BY_CATEGORY,
 };

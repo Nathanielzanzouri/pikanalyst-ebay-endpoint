@@ -6108,14 +6108,19 @@ app.post('/scan', async (req, res) => {
             const listings = enrich?.listings || [];
             const marketPriceMin = enrich?.market_price_min ?? null;
             const marketPriceMax = enrich?.market_price_max ?? null;
+            const marketPriceMedian = enrich?.market_price_median ?? null;
             const priceSource = enrich?.price_source || 'gemini';
             const listingsSource = enrich?.listings_source || 'none';
-            // marketPrice for logScan: use the listings-derived midpoint
-            // when we have one (better signal than Gemini's guess), else
-            // fall back to Gemini's band midpoint.
-            const logMarketPrice = (marketPriceMin != null && marketPriceMax != null)
-              ? (marketPriceMin + marketPriceMax) / 2
-              : (vision.estimated_price_min + vision.estimated_price_max) / 2;
+            // marketPrice for logScan: prefer the listings-derived MEDIAN (robust
+            // to a single atypical listing — a (min+max)/2 midpoint let one 3174€
+            // Speedy inflate a Soufflot cote to 1877€). Fall back to the range
+            // midpoint (coins/sports paths that don't compute a median), then to
+            // Gemini's band midpoint.
+            const logMarketPrice = (marketPriceMedian != null)
+              ? marketPriceMedian
+              : (marketPriceMin != null && marketPriceMax != null)
+                ? (marketPriceMin + marketPriceMax) / 2
+                : (vision.estimated_price_min + vision.estimated_price_max) / 2;
 
             const logId = await logScan({
               userEmail:      scanUser?.email,
@@ -6220,6 +6225,7 @@ app.post('/scan', async (req, res) => {
               listings,
               market_price_min:      marketPriceMin,
               market_price_max:      marketPriceMax,
+              market_price_median:   marketPriceMedian,
               price_source:          priceSource,
               // Coins-specific enrichment. Absent for non-coin scans.
               // Frontend that doesn't know coins_data still renders the
