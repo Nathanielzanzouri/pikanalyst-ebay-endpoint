@@ -2704,16 +2704,29 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
       cached._ebaySource = 'db_cache';
       return cached;
     }
-    try {
-      const query = card.ebay_search || buildSearchQuery(card);
-      const serp  = await serpApiSold({ query, language });
-      const built = buildBrowseShapeFromSerp(serp, card, language, dateRange);
-      if (built) {
-        built._ebaySource = 'serpapi';
-        return built;
+    // The SerpApi eBay-sold engine has been unavailable in production since
+    // ~mid-2026 ("sold price temporarily off"). Calling it anyway made every
+    // cache-MISS card pay serpApiSold's full 15s AbortSignal timeout before
+    // falling through to Browse — that dead call was THE dominant card-scan
+    // latency (first-time cards ~16-20s; repeats were fast only because the
+    // db_cache above short-circuits it). Skip it by default; flip
+    // EBAY_SKIP_SERPAPI_SOLD=false in Render (30s, no deploy) to re-enable if
+    // the engine comes back. Mirrors EBAY_SKIP_FINDING below. The stale-cache
+    // serve + Browse fallback below are unchanged, so results are identical —
+    // only the wasted 15s wait is removed.
+    const skipSerpApiSold = process.env.EBAY_SKIP_SERPAPI_SOLD !== 'false';
+    if (!skipSerpApiSold) {
+      try {
+        const query = card.ebay_search || buildSearchQuery(card);
+        const serp  = await serpApiSold({ query, language });
+        const built = buildBrowseShapeFromSerp(serp, card, language, dateRange);
+        if (built) {
+          built._ebaySource = 'serpapi';
+          return built;
+        }
+      } catch (e) {
+        console.warn('[Lakkot] SerpApi eBay failed:', e.message, '→ falling back to Browse');
       }
-    } catch (e) {
-      console.warn('[Lakkot] SerpApi eBay failed:', e.message, '→ falling back to Browse');
     }
 
     // Live eBay-sold returned nothing (empty result or threw). Before we drop
