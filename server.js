@@ -2292,14 +2292,19 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
 
   const MARKETS = getMarketsForLanguage(language).map(id => ({ id, site: BROWSE_SITE_MAP[id] ?? 'www.ebay.com' }));
 
-  for (const query of queries) {
+  // Process ONE query variant against all markets → result object, or null if
+  // it yields nothing usable. Extracted from the old sequential loop so the
+  // broad fallback variants can run in PARALLEL (see orchestration below)
+  // instead of one-after-another — that sequential chain was the ~9s tail on
+  // new/hard cards. Which query "wins" is unchanged (priority order preserved).
+  const processQuery = async (query) => {
     const settled = await Promise.allSettled(
       MARKETS.map(async (market) => {
         const dateFilter = dateRange && dateRange < 90
           ? `,itemEndDate:[${new Date(Date.now() - dateRange * 86400000).toISOString()}..]`
           : '';
         if (dateFilter) console.log(`[Lakkot] Browse date filter: last ${dateRange} days`);
-        const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true${dateFilter}&sort=endDateDesc&limit=200&fieldgroups=EXTENDED`;
+        const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&filter=soldItems:true${dateFilter}&sort=endDateDesc&limit=60&fieldgroups=EXTENDED`;
         console.log(`[Pikanalyst] Browse API URL [${market.id}]:`, url);
         const res = await fetch(url, {
           headers: {
@@ -2429,7 +2434,7 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
 
     if (rawPrices.length === 0) {
       console.log('[Pikanalyst] Browse 0 clean results for query:', query);
-      continue;
+      return null;
     }
 
     const prices = removeOutliers(rawPrices).sort((a, b) => a - b);
@@ -2479,7 +2484,19 @@ async function fetchEbayBrowse(card, token, language = 'WORLD', dateRange = 30) 
       ebay_url:         `https://${primarySite}/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
       listings,
     };
+  };
+
+  // Tier 1: the best query alone — the common case, most cards match here, so
+  // cost is identical to the old early-exit loop. Tier 2: only if it's empty,
+  // run the remaining (broader) variants in PARALLEL and take the first that
+  // yields, in the SAME priority order the sequential loop used. Same winning
+  // query, same result — just no longer paying for each variant one-at-a-time.
+  let out = await processQuery(queries[0]);
+  if (!out && queries.length > 1) {
+    const rest = await Promise.all(queries.slice(1).map((q) => processQuery(q)));
+    out = rest.find((r) => r != null) || null;
   }
+  if (out) return out;
 
   throw new Error('Browse: 0 results for all queries and markets');
 }
