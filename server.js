@@ -404,11 +404,11 @@ const supabase = createClient(
 // Plan limits (updated 2026-06-16 with new pricing tiers from Lovable):
 //   free  → 20 scans lifetime (via free_scans_used, never resets)
 //   pro   → 100 scans / month (via monthly_scans_used, resets at billing cycle)
-//   power → 250 scans / month (via monthly_scans_used)
+//   power → 300 scans / month (via monthly_scans_used)
 // + topup_balance (never expires) for pro/power overflow
 // Used for display purposes (/me, /auth/google response). The actual
 // quota enforcement is in the consume_scan Supabase RPC.
-const PLAN_LIMITS = { free: 20, pro: 100, power: 250 };
+const PLAN_LIMITS = { free: 20, pro: 100, power: 300 };
 
 // Get current month as YYYY-MM string
 function currentMonth() { return new Date().toISOString().slice(0, 7); }
@@ -3251,8 +3251,8 @@ app.post('/auth/email', async (req, res) => {
 // LIVE price IDs (not secret — safe in source). These must match the live
 // STRIPE_SECRET_KEY this server runs with, or checkout fails with "No such price".
 const STRIPE_PRICE_IDS = {
-  pro:   'price_1TiwnQGZw1nrPqC9zoaTUDm3', // Lakkot Pro — €14.99/mo / 100 scans (live)
-  power: 'price_1TiwqGGZw1nrPqC9rhH63Kn1', // Lakkot Power — €29.99/mo / 250 scans (live)
+  pro:   'price_1UCR2KGZw1nrPqC9U8n1cUFd', // Lakkot Pro — €9.99/mo / 100 scans (live)
+  power: 'price_1UCR2rGZw1nrPqC9ffKY0ZhS', // Lakkot Power — €19.99/mo / 300 scans (live)
   topup: 'price_1TiwruGZw1nrPqC9Ly0Bm7ao', // Lakkot Top-up — €6.99 one-time / +20 scans (live)
 };
 
@@ -3429,7 +3429,7 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (re
     } else if (email) {
       // Subscription upgrade: change plan and set new limit
       const plan = session.metadata?.plan || 'pro';
-      const newLimit = PLAN_LIMITS[plan] || 200;
+      const newLimit = PLAN_LIMITS[plan] || 100;
       const { error } = await supabase
         .from('users')
         .update({ plan, scan_limit_override: newLimit, stripe_customer_id: customerId })
