@@ -23,6 +23,21 @@ que le vendeur/acheteur voie le gain potentiel d'une gradation.
 - **Hors scope v1 :** One Piece, autres graders (CGC/BGS…), scan de slabs gradés,
   cache des prix gradés.
 
+### Feature premium (futur) — gate dès maintenant
+Cette feature deviendra **premium** (réservée aux plans payants) plus tard, mais elle
+est lancée **gratuite pour tous** en phase de test. Implication design : construire un
+**gate dès la v1**, ouvert à tous pour l'instant, pour pouvoir la restreindre plus tard
+**sans refactor**.
+- **Backend :** un flag/contrôle unique dans `/scan/graded-prices` (ex.
+  `GRADED_PRICES_PREMIUM_ONLY`, défaut `false` = gratuit). Quand passé à `true`,
+  l'endpoint vérifie le plan de l'utilisateur (`users.plan`, déjà disponible) et renvoie
+  `403 { error: 'upgrade_required' }` pour les free.
+- **Front :** afficher les 2 lignes pour tous en test ; le jour du passage premium, le
+  front lit le 403 et affiche un CTA d'upgrade à la place des prix (pattern paywall déjà
+  existant dans l'extension).
+- Ne PAS coder "gratuit pour toujours" en dur : le point de décision plan doit exister
+  dès la v1, simplement neutralisé par le flag.
+
 ## 3. Mécanisme (le cœur)
 
 On réutilise l'identité de carte trouvée par le scan raw et on relance eBay 2 fois
