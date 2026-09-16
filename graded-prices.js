@@ -35,4 +35,37 @@ function formatGradedResult(browseResult, minCount = 2) {
   return { median, count, currency: 'EUR' };
 }
 
-module.exports = { buildGradedCard, formatGradedResult };
+// v1 grades. Add CGC/BGS or other grades here later without touching callers.
+const GRADES = [
+  { key: 'psa10', company: 'PSA', grade: '10' },
+  { key: 'psa9',  company: 'PSA', grade: '9'  },
+];
+
+// Fetch the median for each grade in parallel. Dependencies are INJECTED
+// (getToken, browse) so this is unit-testable without network and so the
+// module never imports server.js (no circular dependency). browse is expected
+// to be the real fetchEbayBrowse(card, token, language) — which does NOT touch
+// the sold-history cache, so the raw cote is never polluted (spec §5).
+async function fetchGradedPrices({
+  cardName, cardNumber, language = 'WORLD',
+  getToken, browse, minCount = 2, grades = GRADES,
+}) {
+  let token = null;
+  try { token = await getToken(); }
+  catch (_) { token = null; }
+
+  const entries = await Promise.all(grades.map(async (g) => {
+    if (!token) return [g.key, { median: null, count: 0, currency: 'EUR' }];
+    try {
+      const card = buildGradedCard(cardName, cardNumber, g.company, g.grade);
+      const result = await browse(card, token, language);
+      return [g.key, formatGradedResult(result, minCount)];
+    } catch (_) {
+      // fetchEbayBrowse throws on 0 results — that's a valid "no data" outcome.
+      return [g.key, { median: null, count: 0, currency: 'EUR' }];
+    }
+  }));
+  return Object.fromEntries(entries);
+}
+
+module.exports = { GRADES, buildGradedCard, formatGradedResult, fetchGradedPrices };
