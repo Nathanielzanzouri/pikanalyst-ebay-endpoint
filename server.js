@@ -107,6 +107,7 @@ const { buildIdentity, buildShoppingQuery, filterByShoeIdentity, medianOf, extra
 const { extractProductIdentity } = require('./ai-product-id');
 const { identifyProductVision, isEnabled: isGeminiVisionEnabled } = require('./ai-product-vision');
 const { fetchListingsForVision, isListingsV2Enabled } = require('./ai-product-listings');
+const { fetchGradedPrices } = require('./graded-prices');
 const { analyzeCoinSales, isCoinsPipelineEnabled } = require('./coins-pipeline');
 const { analyzeSportsCardSales, isSportsCardsPipelineEnabled } = require('./sports-cards-pipeline');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
@@ -4144,6 +4145,39 @@ function computeTrendLabel(chartData) {
   if (pctChange <= -0.10) return 'falling';
   return 'stable';
 }
+
+// ─── /scan/graded-prices — PSA 10 / PSA 9 comps for a raw card ────────────────
+// Follow-up call: the front already showed the raw price; it now asks for the
+// same card's graded resale medians. Two strict eBay Browse queries in parallel
+// (PSA 10, PSA 9). No cache read/write (raw sold-history stays uncontaminated).
+// Premium gate is OFF by default — flip GRADED_PRICES_PREMIUM_ONLY=true on Render
+// to restrict to paid plans (30s, no deploy).
+app.post('/scan/graded-prices', async (req, res) => {
+  const { cardName, cardNumber, language, token } = req.body || {};
+  if (!cardName) return res.status(400).json({ error: 'missing_card' });
+
+  if (process.env.GRADED_PRICES_PREMIUM_ONLY === 'true') {
+    const user = token
+      ? (await supabase.from('users').select('plan').eq('token', token).single()).data
+      : null;
+    const paid = !!user && (user.plan === 'pro' || user.plan === 'power');
+    if (!paid) return res.status(403).json({ error: 'upgrade_required' });
+  }
+
+  try {
+    const prices = await fetchGradedPrices({
+      cardName,
+      cardNumber: cardNumber || '',
+      language: language || 'WORLD',
+      getToken: getEbayOAuthToken,
+      browse: fetchEbayBrowse,
+    });
+    return res.json(prices);   // { psa10: {...}, psa9: {...} }
+  } catch (err) {
+    console.error('[Lakkot] graded-prices error:', err.message);
+    return res.status(500).json({ error: 'graded_prices_failed' });
+  }
+});
 
 app.get('/card/history', async (req, res) => {
   const token       = (req.query.token || '').toString();
