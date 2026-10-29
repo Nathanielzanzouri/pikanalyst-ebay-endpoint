@@ -4418,10 +4418,15 @@ app.post('/scan/shortcut', async (req, res) => {
   if (t === 'LIMIT_REACHED') return reply('Lakkot', 'Quota de scans atteint — passe à un plan supérieur sur lakkot.com.', { type: t });
   if (t === 'UNSUPPORTED') return reply('Lakkot', scan.message || 'Produit non supporté pour l\'instant.', { type: t });
 
-  let name = null, price = null;
+  let name = null, price = null, priceNote = '';
   if (t === 'CARD_RESULT') {
-    name = scan.card_name;
+    const tags = [];
+    if (scan.grading_company && scan.grade) tags.push(`${scan.grading_company} ${scan.grade}`);
+    if (scan.card_language && scan.card_language !== 'en') tags.push(scan.card_language.toUpperCase());
+    name = [scan.card_name, ...tags].filter(Boolean).join(' · ') || null;
     price = formatShortcutPrice(scan.market_price_usd ?? scan.ebay_market_price, 'USD');
+    if (scan.graded_via === 'raw_fallback') priceNote = ' (prix carte raw)';
+    if (scan.ebay_sales_count) priceNote += ` · ${scan.ebay_sales_count} ventes`;
   } else if (t === 'ESTIMATION_RESULT') {
     name = scan.display_title || scan.product_name;
     const mid = scan.market_price_median
@@ -4434,7 +4439,7 @@ app.post('/scan/shortcut', async (req, res) => {
   }
 
   if (!name && !price) return reply('Lakkot', 'Produit non reconnu — cadre mieux l\'objet et réessaie.', { type: t || null });
-  return reply(name || 'Lakkot', price ? `Prix marché : ${price}` : 'Pas assez de ventes pour estimer un prix.', { type: t, scanLogId: scan.scanLogId ?? null });
+  return reply(name || 'Lakkot', price ? `Prix marché : ${price}${priceNote}` : 'Pas assez de ventes pour estimer un prix.', { type: t, scanLogId: scan.scanLogId ?? null });
 });
 
 // ─── /scan/gemini — experimental Gemini 3 Flash card path ────────────────────
