@@ -4375,6 +4375,68 @@ app.post('/scan/timing', async (req, res) => {
   }
 });
 
+// ─── /scan/shortcut — iPhone Shortcuts entry point ───────────────────────────
+// Same pipeline as /scan (type=unified), but returns a ready-to-display
+// { title, body } so the Shortcut is just: screenshot → base64 → POST →
+// Show Notification. Formatting lives here so we can change what the
+// notification says without users reinstalling the Shortcut.
+// Proxies to our own /scan over loopback rather than refactoring the
+// ~1500-line unified handler. Always 200 so the Shortcut never errors out.
+const SHORTCUT_CURRENCY_SYMBOLS = { EUR: '€', USD: '$', GBP: '£', '€': '€', '$': '$', '£': '£' };
+function formatShortcutPrice(amount, currency) {
+  if (amount == null || !isFinite(Number(amount))) return null;
+  const sym = SHORTCUT_CURRENCY_SYMBOLS[currency] || currency || '€';
+  const n = Number(amount);
+  const str = n >= 100 ? Math.round(n).toString() : n.toFixed(2);
+  return sym === '€' ? `${str} €` : `${sym}${str}`;
+}
+
+app.post('/scan/shortcut', async (req, res) => {
+  const { token, imageBase64, language = 'WORLD', streamCurrency = 'EUR' } = req.body || {};
+  const reply = (title, body, extra = {}) => res.json({ title, body, ...extra });
+
+  if (!token) return reply('Lakkot', 'Code manquant — réinstalle le raccourci et colle ton code Lakkot.');
+  if (!imageBase64) return reply('Lakkot', 'Pas d\'image reçue — vérifie l\'action Base64 Encode.');
+
+  const { data: user } = await supabase.from('users').select('id').eq('token', token).single();
+  if (!user) return reply('Lakkot', 'Code invalide — copie à nouveau ton code depuis l\'extension Lakkot.');
+
+  let scan;
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'unified', token, imageBase64, language, streamCurrency, client: 'ios-shortcut' }),
+    });
+    scan = await r.json();
+  } catch (err) {
+    console.error('[Lakkot shortcut] scan proxy error:', err.message);
+    return reply('Lakkot', 'Erreur pendant le scan — réessaie dans quelques secondes.');
+  }
+
+  const t = scan?.type;
+  if (t === 'LIMIT_REACHED') return reply('Lakkot', 'Quota de scans atteint — passe à un plan supérieur sur lakkot.com.', { type: t });
+  if (t === 'UNSUPPORTED') return reply('Lakkot', scan.message || 'Produit non supporté pour l\'instant.', { type: t });
+
+  let name = null, price = null;
+  if (t === 'CARD_RESULT') {
+    name = scan.card_name;
+    price = formatShortcutPrice(scan.market_price_usd ?? scan.ebay_market_price, 'USD');
+  } else if (t === 'ESTIMATION_RESULT') {
+    name = scan.display_title || scan.product_name;
+    const mid = scan.market_price_median
+      ?? (scan.market_price_min != null && scan.market_price_max != null ? (scan.market_price_min + scan.market_price_max) / 2 : null)
+      ?? (scan.estimated_price_min != null && scan.estimated_price_max != null ? (scan.estimated_price_min + scan.estimated_price_max) / 2 : null);
+    price = formatShortcutPrice(mid, scan.streamCurrency || streamCurrency);
+  } else {
+    name = scan?.productName;
+    price = formatShortcutPrice(scan?.medianPrice, scan?.streamCurrency || streamCurrency);
+  }
+
+  if (!name && !price) return reply('Lakkot', 'Produit non reconnu — cadre mieux l\'objet et réessaie.', { type: t || null });
+  return reply(name || 'Lakkot', price ? `Prix marché : ${price}` : 'Pas assez de ventes pour estimer un prix.', { type: t, scanLogId: scan.scanLogId ?? null });
+});
+
 // ─── /scan/gemini — experimental Gemini 3 Flash card path ────────────────────
 // Takes the image, calls Gemini with grounded web search, maps the strict-JSON
 // response into the existing CARD_RESULT shape so the current renderer handles
