@@ -4392,7 +4392,10 @@ function formatShortcutPrice(amount, currency) {
 }
 
 app.post('/scan/shortcut', async (req, res) => {
-  const { token, imageBase64, language = 'WORLD', streamCurrency = 'EUR' } = req.body || {};
+  const { imageBase64, language = 'WORLD', streamCurrency = 'EUR' } = req.body || {};
+  // Pasted codes often carry a trailing newline/space (Shortcuts Text action,
+  // Notes) — strip all whitespace so the users.token lookup still matches.
+  const token = String(req.body?.token ?? '').replace(/\s+/g, '');
   const reply = (title, body, extra = {}) => res.json({ title, body, ...extra });
 
   if (!token) return reply('Lakkot', 'Code manquant — réinstalle le raccourci et colle ton code Lakkot.');
