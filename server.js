@@ -129,6 +129,16 @@ let geminiLastError = null;
 // Captures the last logScan failure (any route) so we can diagnose silent
 // scan_log write failures without Render log access. Surfaced via /version.
 let lastLogScanError = null;
+// scan_logs rows are written AFTER the /scan response is sent (see the nested
+// logScan in the /scan handler): the row id is generated up front and returned
+// to the client immediately. Endpoints that then update that row by id
+// (feedback, timing, sold, wishlist) call awaitScanLog(id) first so a fast
+// follow-up request can never race the background insert.
+const _pendingScanLogs = new Map();
+function awaitScanLog(id) {
+  const p = id ? _pendingScanLogs.get(id) : null;
+  return p ? p.catch(() => {}) : Promise.resolve();
+}
 // Last Gemini API error so we can tell which call type/status caused api_error.
 let lastGeminiApiError = null;
 
@@ -2601,6 +2611,11 @@ function buildBrowseShapeFromSerp(serpResult, card, language, dateRange) {
 //
 // TTL is configurable via EBAY_DB_CACHE_TTL_DAYS env (default 7).
 // Disable entirely with EBAY_USE_DB_CACHE=false.
+// opts.shared — optional per-call memo object. fetchEbayAny passes the same
+// object to its fresh check and its stale fallback so the history table is
+// read ONCE: the stale query (all history, newest 120) is a superset of the
+// fresh one (same order + limit, plus a sold_date lower bound), so the fresh
+// rows are derived from it in memory.
 async function tryDbCache(card, language, dateRange, opts = {}) {
   if (process.env.EBAY_USE_DB_CACHE === 'false') return null;
   // allowStale = serve the stored sold history as the source of truth even
@@ -2627,15 +2642,27 @@ async function tryDbCache(card, language, dateRange, opts = {}) {
   const buildRange = allowStale ? 3650 : dateRange;
 
   try {
-    const { data: rows, error } = await supabase
+    const shared = opts.shared || null;
+    const runQuery = (cutoff) => supabase
       .from('ebay_sold_history')
       .select('title, price_eur, sold_date, image_url, item_url, seller_country, market_domain, captured_at')
       .eq('card_name', cardName)
       .eq('card_number', cardNumber)
       .eq('language', language || 'WORLD')
-      .gte('sold_date', cutoffSoldDate)
+      .gte('sold_date', cutoff)
       .order('sold_date', { ascending: false })
       .limit(120);
+    let rows, error;
+    if (shared) {
+      if (!shared.all) shared.all = runQuery(new Date(0).toISOString());
+      ({ data: rows, error } = await shared.all);
+      if (!error && rows && !allowStale) {
+        const cutoffMs = new Date(cutoffSoldDate).getTime();
+        rows = rows.filter(r => new Date(r.sold_date).getTime() >= cutoffMs);
+      }
+    } else {
+      ({ data: rows, error } = await runQuery(cutoffSoldDate));
+    }
     if (error) {
       console.warn('[Lakkot] DB cache query error:', error.message);
       return null;
@@ -2700,7 +2727,8 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
   if (source === 'serpapi') {
     // Tier 2 — check the ebay_sold_history table for a fresh-enough sample
     // before paying for a SerpApi call. See tryDbCache for the TTL logic.
-    const cached = await tryDbCache(card, language, dateRange);
+    const dbShared = {};
+    const cached = await tryDbCache(card, language, dateRange, { shared: dbShared });
     if (cached) {
       cached._ebaySource = 'db_cache';
       return cached;
@@ -2735,7 +2763,7 @@ async function fetchEbayAny(card, language = 'WORLD', dateRange = 30) {
     // past the freshness window — a real past sale is a better cote than an
     // asking price. This is what keeps historical sold data (e.g. the Mega
     // Charizard result) live while eBay sold is unavailable.
-    const stale = await tryDbCache(card, language, dateRange, { allowStale: true });
+    const stale = await tryDbCache(card, language, dateRange, { allowStale: true, shared: dbShared });
     if (stale) {
       stale._ebaySource = 'db_cache_stale';
       return stale;
@@ -3936,6 +3964,7 @@ app.post('/wishlist/add', async (req, res) => {
   if (!token) return res.status(401).json({ error: 'missing_token' });
   const { data: user } = await supabase.from('users').select('email').eq('token', token).single();
   if (!user) return res.status(401).json({ error: 'invalid_token' });
+  await awaitScanLog(scanLogId);
   try {
     const { data, error } = await supabase.from('wishlists').insert({
       user_email: user.email,
@@ -4292,6 +4321,7 @@ app.post('/scan/sold', async (req, res) => {
   if (price != null && (!Number.isFinite(price) || price < 0 || price > 999999)) {
     return res.status(400).json({ error: 'invalid soldPrice' });
   }
+  await awaitScanLog(scanLogId);
   const { error } = await supabase
     .from('scan_logs')
     .update({ sold_price: price })
@@ -4329,6 +4359,7 @@ app.post('/scan/feedback', async (req, res) => {
   if (!scanLogId || !['thumbs_up', 'thumbs_down'].includes(feedback)) {
     return res.status(400).json({ error: 'invalid_feedback' });
   }
+  await awaitScanLog(scanLogId);
   try {
     // Always update the core feedback fields — works regardless of whether the
     // feedback_reason column has been added to scan_logs yet.
@@ -4363,6 +4394,7 @@ app.post('/scan/timing', async (req, res) => {
   if (!scanLogId || typeof clientTotalMs !== 'number' || clientTotalMs < 0) {
     return res.status(400).json({ error: 'invalid_timing' });
   }
+  await awaitScanLog(scanLogId);
   try {
     const { error } = await supabase.from('scan_logs')
       .update({ client_total_ms: Math.round(clientTotalMs) })
@@ -5174,36 +5206,41 @@ app.post('/scan', async (req, res) => {
   }
 
   // ─── Scan logging helper ──────────────────────────────────────────────────
-  async function logScan({ userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls, sportsQueryLevel, sportsSalesCount, sportsSerpapiCalls, sportsScope, sportsIdConfidence, sportsLensTitlesCount }) {
+  // Non-blocking: returns the row id immediately and writes the row (plus the
+  // image uploads) in the background, so the user never waits on Supabase
+  // Storage before seeing a price. Call sites keep `await logScan(...)` —
+  // awaiting a plain string is a no-op. Timings are snapshotted NOW, at the
+  // moment the result is ready, not when the background insert lands.
+  function logScan(args) {
+    const id = crypto.randomUUID();
+    const timingSnap = _scanTimings
+      ? { ..._scanTimings, totalMs: Date.now() - _scanTimings.t0 }
+      : null;
+    const p = _writeScanLog(id, timingSnap, args).finally(() => _pendingScanLogs.delete(id));
+    _pendingScanLogs.set(id, p);
+    return id;
+  }
+  async function _writeScanLog(_logId, _scanTimings, { userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls, sportsQueryLevel, sportsSalesCount, sportsSerpapiCalls, sportsScope, sportsIdConfidence, sportsLensTitlesCount }) {
     try {
-      // Upload original image to Supabase Storage
-      let imageUrl = null;
-      if (imageBase64) {
-        const buf = Buffer.from(imageBase64, 'base64');
-        const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.jpg`;
+      // Upload original + cropped image to Supabase Storage, in parallel
+      const _upload = async (b64, suffix) => {
+        if (!b64) return null;
+        const buf = Buffer.from(b64, 'base64');
+        const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}${suffix}.jpg`;
         const { data: uploadData, error: uploadErr } = await supabase.storage
           .from('scan-images')
           .upload(fileName, buf, { contentType: 'image/jpeg', upsert: false });
-        if (!uploadErr && uploadData) {
-          const { data: urlData } = supabase.storage.from('scan-images').getPublicUrl(fileName);
-          imageUrl = urlData?.publicUrl ?? null;
-        }
-      }
-      // Upload cropped image if exists
-      let croppedImageUrl = null;
-      if (croppedImageBase64) {
-        const cropBuf = Buffer.from(croppedImageBase64, 'base64');
-        const cropFileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-crop.jpg`;
-        const { data: cropUpload, error: cropErr } = await supabase.storage
-          .from('scan-images')
-          .upload(cropFileName, cropBuf, { contentType: 'image/jpeg', upsert: false });
-        if (!cropErr && cropUpload) {
-          const { data: cropUrlData } = supabase.storage.from('scan-images').getPublicUrl(cropFileName);
-          croppedImageUrl = cropUrlData?.publicUrl ?? null;
-        }
-      }
+        if (uploadErr || !uploadData) return null;
+        const { data: urlData } = supabase.storage.from('scan-images').getPublicUrl(fileName);
+        return urlData?.publicUrl ?? null;
+      };
+      const [imageUrl, croppedImageUrl] = await Promise.all([
+        _upload(imageBase64, '').catch(() => null),
+        _upload(croppedImageBase64, '-crop').catch(() => null),
+      ]);
       // Insert log
       const { data: logData, error: insertErr } = await supabase.from('scan_logs').insert({
+        id: _logId,
         user_email: userEmail ?? null,
         user_name: userName ?? null,
         platform: platform ?? null,
@@ -5218,10 +5255,10 @@ app.post('/scan', async (req, res) => {
       country: country ?? null,
       promo_enabled: promoEnabled ?? null,
       multi_set_enabled: multiSetEnabled ?? null,
-      // Per-scan timing (unified scans only — read from the request-scoped
-      // _scanTimings closure variable). timing_total_ms is computed here so
-      // it captures everything up to the moment the row is written.
-      timing_total_ms:    _scanTimings ? Date.now() - _scanTimings.t0 : null,
+      // Per-scan timing (unified scans only). _scanTimings here is the
+      // snapshot taken by logScan() when the result was ready, so
+      // timing_total_ms = time until the response could be sent.
+      timing_total_ms:    _scanTimings ? _scanTimings.totalMs : null,
       timing_lens_ms:     _scanTimings ? (_scanTimings.lensMs     || null) : null,
       timing_grade_ms:    _scanTimings ? (_scanTimings.gradeMs    || null) : null,
       timing_ebay_ms:     _scanTimings ? (_scanTimings.ebayMs     || null) : null,
@@ -5284,7 +5321,7 @@ app.post('/scan', async (req, res) => {
         console.warn('[Lakkot] scan log insert error:', insertErr.message, '| details:', insertErr.details || '');
         lastLogScanError = (route || '?') + ' @ ' + new Date().toISOString() + ' insert: ' + insertErr.message + (insertErr.details ? ' | ' + insertErr.details : '');
       }
-      return logData?.id ?? null;
+      return insertErr ? null : (logData?.id ?? _logId);
     } catch (err) {
       console.warn('[Lakkot] scan log failed:', err.message);
       lastLogScanError = (route || '?') + ' @ ' + new Date().toISOString() + ': ' + err.message;
@@ -5302,19 +5339,30 @@ app.post('/scan', async (req, res) => {
     // block a paying user because of a transient backend issue.
     let quota = null;
     let scanUser = null;
+    // Resolves to the quota object. Started right after consume_scan and
+    // awaited AFTER Lens (which takes seconds), so the counters re-read
+    // never delays the scan itself.
+    let quotaPromise = null;
+    const _preludeT0 = Date.now();
     if (token) {
-      const { data: user } = await supabase
-        .from('users')
-        .select('id, email, name, plan, scan_limit_override')
-        .eq('token', token)
-        .single();
+      // User lookup and consume_scan run in parallel — the RPC only needs the
+      // token. Its result is ignored when the token matches no user (same as
+      // before, when the RPC wasn't called at all in that case).
+      const [{ data: user }, { data: rpcResult, error: rpcError }] = await Promise.all([
+        supabase
+          .from('users')
+          .select('id, email, name, plan, scan_limit_override')
+          .eq('token', token)
+          .single(),
+        supabase.rpc('consume_scan', { _token: token })
+          .then(r => r, e => ({ data: null, error: e })),
+      ]);
       scanUser = user;
       if (user) {
         // RPC expects _token (uuid), not p_user_id — verified via PGRST202
         // "Could not find the function public.consume_scan(p_user_id)".
         // The old param name caused silent fail-open: every scan bypassed
         // the counter, leaving pro users unlimited and free users past 20.
-        const { data: rpcResult, error: rpcError } = await supabase.rpc('consume_scan', { _token: token });
         if (rpcError) {
           console.warn('[Lakkot] consume_scan RPC error:', rpcError.message, '— fail-open (allowing scan)');
         } else if (rpcResult && (rpcResult.blocked === true || rpcResult.allowed === false)) {
@@ -5333,26 +5381,29 @@ app.post('/scan', async (req, res) => {
         // quota object that's always consistent regardless of what the RPC
         // returns. Extension (old code) reads quota.remaining + quota.limit
         // for display; need real numbers, not nulls.
-        const { data: updated } = await supabase
-          .from('users')
-          .select('plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override')
-          .eq('id', user.id)
-          .single();
-        const planLimit = (updated?.scan_limit_override) ?? (PLAN_LIMITS[updated?.plan] ?? PLAN_LIMITS.free);
-        const used = (updated?.plan === 'free')
-          ? (updated?.free_scans_used ?? 0)
-          : (updated?.monthly_scans_used ?? 0);
-        const topup = updated?.topup_balance ?? 0;
-        quota = {
-          count:          used,
-          limit:          planLimit,
-          remaining:      Math.max(0, planLimit - used) + topup,
-          plan_remaining: Math.max(0, planLimit - used),
-          topup_balance:  topup,
-          plan:           updated?.plan ?? user.plan,
-        };
+        quotaPromise = (async () => {
+          const { data: updated } = await supabase
+            .from('users')
+            .select('plan, free_scans_used, monthly_scans_used, topup_balance, scan_limit_override')
+            .eq('id', user.id)
+            .single();
+          const planLimit = (updated?.scan_limit_override) ?? (PLAN_LIMITS[updated?.plan] ?? PLAN_LIMITS.free);
+          const used = (updated?.plan === 'free')
+            ? (updated?.free_scans_used ?? 0)
+            : (updated?.monthly_scans_used ?? 0);
+          const topup = updated?.topup_balance ?? 0;
+          return {
+            count:          used,
+            limit:          planLimit,
+            remaining:      Math.max(0, planLimit - used) + topup,
+            plan_remaining: Math.max(0, planLimit - used),
+            topup_balance:  topup,
+            plan:           updated?.plan ?? user.plan,
+          };
+        })().catch(e => { console.warn('[Lakkot] quota re-read failed:', e.message); return null; });
       }
     }
+    console.log('[Lakkot/timing] prelude (auth+quota) ms:', Date.now() - _preludeT0);
 
     try {
       let { imageBase64, fullFrameBase64, streamTitle, sellerPrice, language = 'WORLD', streamCurrency = 'EUR', cropCenter = false, dateRange = 30, country = null, multiSetEnabled = false, promoEnabled = false, client = null } = params;
@@ -5389,6 +5440,7 @@ app.post('/scan', async (req, res) => {
       if (hasTitle) {
         const unsupportedReason = isBooster(rawTitle) ? 'sealed' : isMultiChoice(rawTitle) ? 'multi' : null;
         if (unsupportedReason) {
+          if (quotaPromise) quota = await quotaPromise;
           const messages = { sealed: 'Sealed product — pricing not supported yet', lot: 'Lot/bundle — pricing not supported yet', multi: 'Multi-choice listing — pricing not supported yet' };
           const logId = await logScan({ userEmail: scanUser?.email, userName: scanUser?.name, platform: client, domTitle: rawTitle, imageBase64: originalImageBase64, croppedImageBase64, route: 'title-unsupported', resultType: 'UNSUPPORTED', askingPrice: sellerPrice, productCategory: 'Other', variant: null, gradingCompany: null, grade: null, matchType: null });
           return res.json({ type: 'UNSUPPORTED', reason: unsupportedReason, message: messages[unsupportedReason], title: rawTitle, quota, scanLogId: logId });
@@ -5430,6 +5482,8 @@ app.post('/scan', async (req, res) => {
       ]);
       const lensResult = lensSettled.status === 'fulfilled' ? lensSettled.value : null;
       const gradeResult = gradeSettled.status === 'fulfilled' ? gradeSettled.value : { is_graded: false };
+      // Counters re-read started before Lens — long finished by now.
+      if (quotaPromise) quota = await quotaPromise;
 
       // Language is determined by Gemini detection only (the manual EN/FR/JP
       // picker was removed 2026-05-18). Three outcomes:
@@ -5773,27 +5827,27 @@ app.post('/scan', async (req, res) => {
           }
           // ── End multi-set picker ────────────────────────────────────────
 
+          // TCGPlayer price (EN cards only) — depends only on the vote, so it
+          // is started BEFORE the eBay call and runs alongside it instead of
+          // adding its full latency after it.
+          const tcgPromise = vote.number
+            ? (async () => {
+                // Always pass set ID when available — prevents wrong card with same number
+                const tcgSetId = vote.set ? vote.set.code : '';
+                const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: tcgSetId, condition: 'Near Mint' };
+                return await fetchPokemonTCG(tcgCard);
+              })().catch(e => { console.warn('[Lakkot] TCGPlayer failed:', e.message); return null; })
+            : Promise.resolve(null);
+
           // eBay sold price
           const result = await _timed(timings, 'ebayMs', () => handleAnalyze({ imageBase64, streamTitle: voteQuery, sellerPrice, mode: 'cards', manualCardOverride: voteQuery, language, dateRange, gradeFilter: detectedGrade }));
           const mp = result.market_price_usd ?? result.ebay_market_price ?? null;
           const v = computeVerdict(sellerPrice, mp);
 
-          // TCGPlayer price (EN cards only)
-          let tcgPrice = null;
-          let tcgUrl = null;
-          if (vote.number) {
-            try {
-              // Always pass set ID when available — prevents wrong card with same number
-              const tcgSetId = vote.set ? vote.set.code : '';
-              const tcgCard = { card_name: vote.nameEN, card_number: vote.number, set_name: tcgSetId, condition: 'Near Mint' };
-              const tcgData = await fetchPokemonTCG(tcgCard);
-              tcgPrice = tcgData?.market_price_usd ?? null;
-              tcgUrl = tcgData?.tcg_url ?? null;
-              if (tcgPrice) console.log(`[Lakkot] TCGPlayer price: $${tcgPrice}`);
-            } catch (e) {
-              console.warn('[Lakkot] TCGPlayer failed:', e.message);
-            }
-          }
+          const tcgData = await tcgPromise;
+          const tcgPrice = tcgData?.market_price_usd ?? null;
+          const tcgUrl = tcgData?.tcg_url ?? null;
+          if (tcgPrice) console.log(`[Lakkot] TCGPlayer price: $${tcgPrice}`);
 
           const lensMatchTitles = (lensResult.visualMatches || []).slice(0, 15).map(m => m.title || '');
           const ebayTopResults = trimListingsForLog(result.listings);
@@ -6532,6 +6586,7 @@ app.post('/scan', async (req, res) => {
       });
     } catch (err) {
       console.error('[Lakkot] Unified scan error:', err.message);
+      if (quotaPromise && !quota) quota = await quotaPromise;
       return res.json({ type: 'WEB_RESULT', productName: null, cards: [], medianPrice: null, sourcesCount: 0, pricesCount: 0, sellerPrice: null, streamCurrency: 'EUR', priceSource: 'lens', _error: err.message, quota });
     }
   }
