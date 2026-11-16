@@ -4473,6 +4473,11 @@ app.post('/scan/shortcut', async (req, res) => {
       ?? (scan.market_price_min != null && scan.market_price_max != null ? (scan.market_price_min + scan.market_price_max) / 2 : null)
       ?? (scan.estimated_price_min != null && scan.estimated_price_max != null ? (scan.estimated_price_min + scan.estimated_price_max) / 2 : null);
     price = formatShortcutPrice(mid, scan.streamCurrency || streamCurrency);
+    // Be explicit about what the number is: a median of real listings, or
+    // Gemini's own price band when no reliable listing was found.
+    const nListings = Array.isArray(scan.listings) ? scan.listings.length : 0;
+    const fromListings = scan.market_price_median != null || (scan.market_price_min != null && scan.market_price_max != null);
+    priceNote = fromListings ? (nListings ? ` · ${nListings} annonces` : '') : ' (estimation)';
   } else {
     name = scan?.productName;
     price = formatShortcutPrice(scan?.medianPrice, scan?.streamCurrency || streamCurrency);
@@ -4499,7 +4504,9 @@ app.post('/scan/shortcut', async (req, res) => {
         grade:            scan.grade ?? '-',
       }
     : {
-        productName: (t === 'ESTIMATION_RESULT' ? (scan.display_title || scan.product_name) : scan?.productName) || 'Produit non reconnu',
+        productName: (t === 'ESTIMATION_RESULT'
+          ? [(scan.display_title || scan.product_name), priceNote.trim()].filter(Boolean).join(' ')
+          : scan?.productName) || 'Produit non reconnu',
         medianPrice: _num(t === 'ESTIMATION_RESULT' ? _midEstimate : scan?.medianPrice) ?? '-',
       };
 
@@ -6280,7 +6287,13 @@ app.post('/scan', async (req, res) => {
       // product treatment (category + fine identity + resale comps) instead of
       // the generic legacy path.
       const isWebClient = client === 'web-desktop' || client === 'web-mobile';
-      const canUseVision = isWebClient || client === 'extension';
+      // iPhone Shortcut scans get the same full product treatment (Gemini
+      // looks at the image itself, so it works with no listing title on
+      // screen). They receive ESTIMATION_RESULT, which /scan/shortcut formats.
+      // Disable with SHORTCUT_VISION=false to send them back to the legacy
+      // Lens + Shopping path.
+      const isShortcutClient = client === 'ios-shortcut' && process.env.SHORTCUT_VISION !== 'false';
+      const canUseVision = isWebClient || client === 'extension' || isShortcutClient;
       if (isGeminiVisionEnabled() && canUseVision) {
         try {
           // Feed Lens visual-match titles to Gemini as seller consensus
