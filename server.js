@@ -4478,8 +4478,33 @@ app.post('/scan/shortcut', async (req, res) => {
     price = formatShortcutPrice(scan?.medianPrice, scan?.streamCurrency || streamCurrency);
   }
 
-  if (!name && !price) return reply('Lakkot', 'Produit non reconnu — cadre mieux l\'objet et réessaie.', { type: t || null });
-  return reply(name || 'Lakkot', price ? `Prix marché : ${price}${priceNote}` : 'Pas assez de ventes pour estimer un prix.', { type: t, scanLogId: scan.scanLogId ?? null });
+  // Compatibility: one published Shortcut posts here but still reads the raw
+  // /scan fields (type → card_name / market_price_usd / card_language /
+  // grading_company / grade / card_number, else productName / medianPrice)
+  // instead of { title, body }, which left its notification empty. Expose
+  // those fields too so both Shortcut versions display a result.
+  const _num = v => (v == null || !isFinite(Number(v))) ? null : Math.round(Number(v) * 100) / 100;
+  const _midEstimate = t === 'ESTIMATION_RESULT'
+    ? (scan.market_price_median
+        ?? (scan.market_price_min != null && scan.market_price_max != null ? (scan.market_price_min + scan.market_price_max) / 2 : null)
+        ?? (scan.estimated_price_min != null && scan.estimated_price_max != null ? (scan.estimated_price_min + scan.estimated_price_max) / 2 : null))
+    : null;
+  const legacy = t === 'CARD_RESULT'
+    ? {
+        card_name:        scan.card_name ?? '-',
+        card_number:      scan.card_number || '',
+        market_price_usd: _num(scan.market_price_usd ?? scan.ebay_market_price) ?? '-',
+        card_language:    scan.card_language ? String(scan.card_language).toUpperCase() : '-',
+        grading_company:  scan.grading_company ?? '-',
+        grade:            scan.grade ?? '-',
+      }
+    : {
+        productName: (t === 'ESTIMATION_RESULT' ? (scan.display_title || scan.product_name) : scan?.productName) || 'Produit non reconnu',
+        medianPrice: _num(t === 'ESTIMATION_RESULT' ? _midEstimate : scan?.medianPrice) ?? '-',
+      };
+
+  if (!name && !price) return reply('Lakkot', 'Produit non reconnu — cadre mieux l\'objet et réessaie.', { type: t || null, ...legacy });
+  return reply(name || 'Lakkot', price ? `Prix marché : ${price}${priceNote}` : 'Pas assez de ventes pour estimer un prix.', { type: t, scanLogId: scan.scanLogId ?? null, ...legacy });
 });
 
 // ─── /scan/gemini — experimental Gemini 3 Flash card path ────────────────────
