@@ -5539,10 +5539,21 @@ app.post('/scan', async (req, res) => {
           // the full screenshot. Disable with SHORTCUT_CROP_LENS=false.
           let lensImage = imageBase64;
           let lensUsedCrop = false;
-          if (_obsCropPromise && process.env.SHORTCUT_CROP_LENS !== 'false') {
+          const minPx = parseInt(process.env.SHORTCUT_CROP_MIN_PX, 10) || 300;
+          // A crop can never be larger than its source: when the screenshot
+          // itself is under minPx, don't make Lens wait for a crop it can't use.
+          let sourceTooSmall = false;
+          if (_obsCropPromise) {
+            try {
+              const m = await sharp(Buffer.from(imageBase64, 'base64')).metadata();
+              sourceTooSmall = Math.min(m.width || 0, m.height || 0) < minPx;
+            } catch (_) { /* unreadable → let the crop step decide */ }
+          }
+          if (_obsCropPromise && sourceTooSmall) {
+            lastCropLens = { at: new Date().toISOString(), usedCrop: false, crop: null, minPx, skipped: 'source_below_min' };
+          } else if (_obsCropPromise && process.env.SHORTCUT_CROP_LENS !== 'false') {
             const waitMs = parseInt(process.env.SHORTCUT_CROP_WAIT_MS, 10) || 2500;
             const crop = await Promise.race([_obsCropPromise, new Promise(r => setTimeout(() => r(null), waitMs))]);
-            const minPx = parseInt(process.env.SHORTCUT_CROP_MIN_PX, 10) || 300;
             if (cropIsUsableForLens(crop, minPx)) { lensImage = crop.base64; lensUsedCrop = true; }
             console.log('[Lakkot/crop-lens]', lensUsedCrop
               ? `using crop ${crop.rect.width}x${crop.rect.height}`
