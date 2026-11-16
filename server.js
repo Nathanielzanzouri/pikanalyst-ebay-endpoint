@@ -369,6 +369,9 @@ app.get('/version', (req, res) => {
     geminiLastError,
     lastLogScanError,
     lastGeminiApiError,
+    // Shortcut crop observation (see detectProductCrop): outcome of the most
+    // recent attempt, so a missing crop can be diagnosed without Render logs.
+    cropObserve: { enabled: process.env.SHORTCUT_CROP_OBSERVE !== 'false', attempts: cropObserveAttempts, last: lastCropObserve },
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -4731,7 +4734,11 @@ async function callGeminiGradeDetect(imageBase64) {
 // Resolves to the cropped image as base64, or null (no product found, Gemini
 // error, timeout). Never throws. The result is only stored in scan_logs for
 // review — it is not sent to Lens and does not change the scan result.
+let cropObserveAttempts = 0;
+let lastCropObserve = null;
 async function detectProductCrop(imageBase64) {
+  cropObserveAttempts++;
+  const _note = (outcome, detail) => { lastCropObserve = { at: new Date().toISOString(), outcome, ms: Date.now() - _s, detail: detail ?? null }; };
   const model = process.env.GEMINI_CROP_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const _s = Date.now();
@@ -4742,17 +4749,28 @@ async function detectProductCrop(imageBase64) {
       body: JSON.stringify(buildProductBoxRequest(imageBase64, 'image/jpeg')),
       signal: AbortSignal.timeout(8_000),
     });
-    if (!r.ok) { console.warn('[Lakkot/crop-observe] HTTP ' + r.status); return null; }
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      console.warn('[Lakkot/crop-observe] HTTP ' + r.status);
+      _note('http_' + r.status, t.slice(0, 300));
+      return null;
+    }
     const data = await r.json();
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const box = parseProductBox(parseGeminiResponse(rawText));
-    if (!box) { console.log('[Lakkot/crop-observe] no product box (' + (Date.now() - _s) + 'ms)'); return null; }
+    if (!box) {
+      console.log('[Lakkot/crop-observe] no product box (' + (Date.now() - _s) + 'ms)');
+      _note('no_box', rawText.slice(0, 300) || JSON.stringify(data).slice(0, 300));
+      return null;
+    }
     const crop = await cropToBox(imageBase64, box);
+    _note(crop ? 'cropped' : 'whole_image', crop ? { box, rect: crop.rect, source: crop.source } : { box });
     console.log('[Lakkot/crop-observe]', (Date.now() - _s) + 'ms', 'box:', JSON.stringify(box),
       crop ? `→ ${crop.rect.width}x${crop.rect.height} of ${crop.source.width}x${crop.source.height}` : '→ covers whole image, no crop stored');
     return crop ? crop.base64 : null;
   } catch (err) {
     console.warn('[Lakkot/crop-observe] failed:', err.message);
+    _note('threw', err.message);
     return null;
   }
 }
