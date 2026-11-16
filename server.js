@@ -112,7 +112,7 @@ const { analyzeCoinSales, isCoinsPipelineEnabled } = require('./coins-pipeline')
 const { analyzeSportsCardSales, isSportsCardsPipelineEnabled } = require('./sports-cards-pipeline');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
-const { buildProductBoxRequest, parseProductBox, cropToBox } = require('./product-crop');
+const { buildProductBoxRequest, parseProductBox, cropToBox, cropIsUsableForLens } = require('./product-crop');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
@@ -371,7 +371,8 @@ app.get('/version', (req, res) => {
     lastGeminiApiError,
     // Shortcut crop observation (see detectProductCrop): outcome of the most
     // recent attempt, so a missing crop can be diagnosed without Render logs.
-    cropObserve: { enabled: process.env.SHORTCUT_CROP_OBSERVE !== 'false', attempts: cropObserveAttempts, last: lastCropObserve },
+    cropObserve: { enabled: process.env.SHORTCUT_CROP_OBSERVE !== 'false', attempts: cropObserveAttempts, last: lastCropObserve,
+      lensEnabled: process.env.SHORTCUT_CROP_LENS !== 'false', lastLens: lastCropLens },
     cleanQueryStripping: true,
     fallbackQuery: true,
     retailerAugment: true,
@@ -4730,12 +4731,14 @@ async function callGeminiGradeDetect(imageBase64) {
   }
 }
 
-// Observation-mode product crop for iPhone Shortcut scans (see product-crop.js).
-// Resolves to the cropped image as base64, or null (no product found, Gemini
-// error, timeout). Never throws. The result is only stored in scan_logs for
-// review — it is not sent to Lens and does not change the scan result.
+// Product crop for iPhone Shortcut scans (see product-crop.js). Resolves to
+// { base64, rect, source } or null (no product found, Gemini error, timeout).
+// Never throws. The crop is always stored in scan_logs for review; the /scan
+// handler additionally sends it to Lens when it is large enough
+// (cropIsUsableForLens).
 let cropObserveAttempts = 0;
 let lastCropObserve = null;
+let lastCropLens = null;   // last Shortcut scan: was the crop sent to Lens?
 async function detectProductCrop(imageBase64) {
   cropObserveAttempts++;
   const _note = (outcome, detail) => { lastCropObserve = { at: new Date().toISOString(), outcome, ms: Date.now() - _s, detail: detail ?? null }; };
@@ -4767,7 +4770,7 @@ async function detectProductCrop(imageBase64) {
     _note(crop ? 'cropped' : 'whole_image', crop ? { box, rect: crop.rect, source: crop.source } : { box });
     console.log('[Lakkot/crop-observe]', (Date.now() - _s) + 'ms', 'box:', JSON.stringify(box),
       crop ? `→ ${crop.rect.width}x${crop.rect.height} of ${crop.source.width}x${crop.source.height}` : '→ covers whole image, no crop stored');
-    return crop ? crop.base64 : null;
+    return crop;   // { base64, rect, source } or null
   } catch (err) {
     console.warn('[Lakkot/crop-observe] failed:', err.message);
     _note('threw', err.message);
@@ -5242,9 +5245,9 @@ app.post('/scan', async (req, res) => {
   // nested logScan() below reads it via closure so we don't have to thread
   // it through ~10 logScan call sites. Null for non-unified scans.
   let _scanTimings = null;
-  // iPhone Shortcut scans only: promise of an observation-mode product crop
-  // (see detectProductCrop). Read by the background log writer, never awaited
-  // on the response path.
+  // iPhone Shortcut scans only: promise of the product crop (see
+  // detectProductCrop) → { base64, rect, source } | null. Read by the
+  // background log writer, and by the Lens step when the crop is used.
   let _obsCropPromise = null;
 
   // match_listings: vision matching — does not consume quota
@@ -5275,9 +5278,9 @@ app.post('/scan', async (req, res) => {
   }
   async function _writeScanLog(_logId, _scanTimings, { userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls, sportsQueryLevel, sportsSalesCount, sportsSerpapiCalls, sportsScope, sportsIdConfidence, sportsLensTitlesCount }) {
     try {
-      // Observation-mode crop (Shortcut scans): stored for review only. This
-      // runs in the background writer, after the response has been sent.
-      if (!croppedImageBase64 && imageBase64 && _obsCropPromise) croppedImageBase64 = await _obsCropPromise;
+      // Shortcut scans: store the product crop next to the original (whether
+      // or not it was large enough to be sent to Lens).
+      if (!croppedImageBase64 && imageBase64 && _obsCropPromise) croppedImageBase64 = (await _obsCropPromise)?.base64 ?? null;
       // Upload original + cropped image to Supabase Storage, in parallel
       const _upload = async (b64, suffix) => {
         if (!b64) return null;
@@ -5469,8 +5472,9 @@ app.post('/scan', async (req, res) => {
       const originalImageBase64 = fullFrameBase64 || imageBase64;
       // Shortcut screenshots are full-screen with no scan zone. Ask Gemini
       // where the product is and store that crop next to the original so the
-      // framing can be reviewed (admin "Avant / Après"). Lens still receives
-      // the full screenshot. Disable with SHORTCUT_CROP_OBSERVE=false.
+      // framing can be reviewed (admin "Avant / Après"). Disable with
+      // SHORTCUT_CROP_OBSERVE=false. Whether Lens receives this crop is decided
+      // in the Lens step below.
       if (client === 'ios-shortcut' && imageBase64 && !fullFrameBase64
           && process.env.GEMINI_API_KEY && process.env.SHORTCUT_CROP_OBSERVE !== 'false') {
         _obsCropPromise = detectProductCrop(imageBase64);
@@ -5529,10 +5533,34 @@ app.post('/scan', async (req, res) => {
       _scanTimings = timings;
       const [lensSettled, gradeSettled] = await Promise.allSettled([
         (async () => {
+          // Shortcut scans: send Lens the product crop instead of the full
+          // screenshot when Gemini found one that is large enough. Waits at
+          // most SHORTCUT_CROP_WAIT_MS for the crop, otherwise falls back to
+          // the full screenshot. Disable with SHORTCUT_CROP_LENS=false.
+          let lensImage = imageBase64;
+          let lensUsedCrop = false;
+          if (_obsCropPromise && process.env.SHORTCUT_CROP_LENS !== 'false') {
+            const waitMs = parseInt(process.env.SHORTCUT_CROP_WAIT_MS, 10) || 2500;
+            const crop = await Promise.race([_obsCropPromise, new Promise(r => setTimeout(() => r(null), waitMs))]);
+            const minPx = parseInt(process.env.SHORTCUT_CROP_MIN_PX, 10) || 300;
+            if (cropIsUsableForLens(crop, minPx)) { lensImage = crop.base64; lensUsedCrop = true; }
+            console.log('[Lakkot/crop-lens]', lensUsedCrop
+              ? `using crop ${crop.rect.width}x${crop.rect.height}`
+              : (crop ? `crop ${crop.rect.width}x${crop.rect.height} below ${minPx}px → full screenshot` : 'no crop in time → full screenshot'));
+            lastCropLens = { at: new Date().toISOString(), usedCrop: lensUsedCrop, crop: crop ? crop.rect : null, minPx };
+          }
           const _s = Date.now();
-          const r = await handleGoogleLens(imageBase64);
+          let r = await handleGoogleLens(lensImage);
+          timings.serpApiCalls += 1;
+          // A crop that Lens can't match must never cost the user a result:
+          // retry once on the full screenshot.
+          if (lensUsedCrop && !(r?.visualMatches?.length)) {
+            console.log('[Lakkot/crop-lens] no Lens match on crop → retrying with full screenshot');
+            r = await handleGoogleLens(imageBase64);
+            timings.serpApiCalls += 1;
+            if (lastCropLens) lastCropLens.retriedFull = true;
+          }
           timings.lensMs = Date.now() - _s;
-          timings.serpApiCalls += 1;          // Lens is always 1 SerpApi call
           return r;
         })(),
         gradingEnabled

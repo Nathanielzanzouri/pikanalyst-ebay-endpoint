@@ -4,9 +4,9 @@
 // like in the extension or the web app. This module asks Gemini where the
 // product for sale sits in the screenshot and cuts that region out.
 //
-// OBSERVATION ONLY for now: the crop is stored in scan_logs.cropped_image_url
-// so it can be reviewed in the admin "Avant / Après" tab. It is NOT sent to
-// Lens and does not influence the scan result.
+// The crop is always stored in scan_logs.cropped_image_url so it can be
+// reviewed in the admin "Avant / Après" tab. It is sent to Lens instead of the
+// full screenshot only when it is large enough (cropIsUsableForLens).
 const sharp = require('sharp');
 
 const PRODUCT_BOX_PROMPT = [
@@ -77,4 +77,12 @@ async function cropToBox(imageBase64, box) {
   return { base64: out.toString('base64'), rect, source: { width: meta.width, height: meta.height } };
 }
 
-module.exports = { PRODUCT_BOX_PROMPT, buildProductBoxRequest, parseProductBox, boxToPixels, cropToBox };
+// A crop is only worth sending to Lens when it carries enough pixels. A card
+// cut out of a 200px-wide screenshot is ~150px wide — Lens does no better on
+// that than on the full screenshot, so those stay observation-only.
+function cropIsUsableForLens(crop, minPx = 300) {
+  if (!crop || !crop.base64 || !crop.rect) return false;
+  return Math.min(crop.rect.width, crop.rect.height) >= minPx;
+}
+
+module.exports = { PRODUCT_BOX_PROMPT, buildProductBoxRequest, parseProductBox, boxToPixels, cropToBox, cropIsUsableForLens };

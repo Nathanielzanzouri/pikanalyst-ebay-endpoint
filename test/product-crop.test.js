@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const sharp = require('sharp');
-const { buildProductBoxRequest, parseProductBox, boxToPixels, cropToBox } = require('../product-crop');
+const { buildProductBoxRequest, parseProductBox, boxToPixels, cropToBox, cropIsUsableForLens } = require('../product-crop');
 
 test('buildProductBoxRequest: carries the image and asks for JSON', () => {
   const req = buildProductBoxRequest('AAAA', 'image/jpeg');
@@ -71,4 +71,15 @@ test('cropToBox: cuts the expected region out of a real image', async () => {
 test('cropToBox: full-screen box → null', async () => {
   const img = await sharp({ create: { width: 50, height: 50, channels: 3, background: '#fff' } }).jpeg().toBuffer();
   assert.strictEqual(await cropToBox(img.toString('base64'), { ymin: 0, xmin: 0, ymax: 1000, xmax: 1000 }), null);
+});
+
+test('cropIsUsableForLens: needs both sides at or above the minimum', () => {
+  const mk = (w, h) => ({ base64: 'AAAA', rect: { left: 0, top: 0, width: w, height: h } });
+  assert.strictEqual(cropIsUsableForLens(mk(148, 185)), false);      // crop from a 200px screenshot
+  assert.strictEqual(cropIsUsableForLens(mk(700, 920)), true);       // crop from a 1000px screenshot
+  assert.strictEqual(cropIsUsableForLens(mk(300, 300)), true);
+  assert.strictEqual(cropIsUsableForLens(mk(299, 900)), false);
+  assert.strictEqual(cropIsUsableForLens(mk(250, 250), 200), true);  // custom minimum
+  assert.strictEqual(cropIsUsableForLens(null), false);
+  assert.strictEqual(cropIsUsableForLens({ rect: { width: 900, height: 900 } }), false);   // no image data
 });
