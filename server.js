@@ -112,6 +112,7 @@ const { analyzeCoinSales, isCoinsPipelineEnabled } = require('./coins-pipeline')
 const { analyzeSportsCardSales, isSportsCardsPipelineEnabled } = require('./sports-cards-pipeline');
 const { extractOnePieceFromMatches, buildOnePieceQuery } = require('./one-piece-id');
 const { clusterListings } = require('./variant-clusters');
+const { buildProductBoxRequest, parseProductBox, cropToBox } = require('./product-crop');
 const { getOnePieceCardVariants, bucketListingsByVariant, formatCharacterForQuery } = require('./optcg-api');
 const { buildGeminiRequest, parseGeminiResponse, mapToCardResult,
   buildIdentityRequest, buildEbayPricePrompt, buildTcgplayerPricePrompt, buildPriceChartingPrompt, buildTextOnlyRequest,
@@ -4726,6 +4727,36 @@ async function callGeminiGradeDetect(imageBase64) {
   }
 }
 
+// Observation-mode product crop for iPhone Shortcut scans (see product-crop.js).
+// Resolves to the cropped image as base64, or null (no product found, Gemini
+// error, timeout). Never throws. The result is only stored in scan_logs for
+// review — it is not sent to Lens and does not change the scan result.
+async function detectProductCrop(imageBase64) {
+  const model = process.env.GEMINI_CROP_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const _s = Date.now();
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify(buildProductBoxRequest(imageBase64, 'image/jpeg')),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!r.ok) { console.warn('[Lakkot/crop-observe] HTTP ' + r.status); return null; }
+    const data = await r.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const box = parseProductBox(parseGeminiResponse(rawText));
+    if (!box) { console.log('[Lakkot/crop-observe] no product box (' + (Date.now() - _s) + 'ms)'); return null; }
+    const crop = await cropToBox(imageBase64, box);
+    console.log('[Lakkot/crop-observe]', (Date.now() - _s) + 'ms', 'box:', JSON.stringify(box),
+      crop ? `→ ${crop.rect.width}x${crop.rect.height} of ${crop.source.width}x${crop.source.height}` : '→ covers whole image, no crop stored');
+    return crop ? crop.base64 : null;
+  } catch (err) {
+    console.warn('[Lakkot/crop-observe] failed:', err.message);
+    return null;
+  }
+}
+
 async function callGeminiIdentity(imageBase64, timeoutMs) {
   // Identity model. We tried gemini-3.1-flash-lite + thinkingBudget=0 for
   // speed (~2-3s), but single-digit OCR errors on tight variants (e.g. 067 vs
@@ -5193,6 +5224,10 @@ app.post('/scan', async (req, res) => {
   // nested logScan() below reads it via closure so we don't have to thread
   // it through ~10 logScan call sites. Null for non-unified scans.
   let _scanTimings = null;
+  // iPhone Shortcut scans only: promise of an observation-mode product crop
+  // (see detectProductCrop). Read by the background log writer, never awaited
+  // on the response path.
+  let _obsCropPromise = null;
 
   // match_listings: vision matching — does not consume quota
   if (type === 'match_listings') {
@@ -5222,6 +5257,9 @@ app.post('/scan', async (req, res) => {
   }
   async function _writeScanLog(_logId, _scanTimings, { userEmail, userName, platform, domTitle, imageBase64, croppedImageBase64, route, productName, lensProductName, ebayQuery, shoppingQuery, resultType, marketPrice, askingPrice, verdict, sourcesCount, ebaySalesCount, lensMatches, lensSelected, ebayResults, langToggle, country, productCategory, variant, gradingCompany, grade, matchType, promoEnabled, multiSetEnabled, listingsCount, listingsSource, priceSource, listingsJson, coinsQueryLevel, coinsSalesCount, coinsSerpapiCalls, sportsQueryLevel, sportsSalesCount, sportsSerpapiCalls, sportsScope, sportsIdConfidence, sportsLensTitlesCount }) {
     try {
+      // Observation-mode crop (Shortcut scans): stored for review only. This
+      // runs in the background writer, after the response has been sent.
+      if (!croppedImageBase64 && imageBase64 && _obsCropPromise) croppedImageBase64 = await _obsCropPromise;
       // Upload original + cropped image to Supabase Storage, in parallel
       const _upload = async (b64, suffix) => {
         if (!b64) return null;
@@ -5411,6 +5449,14 @@ app.post('/scan', async (req, res) => {
       // imageBase64 = the zone-cropped image (what Lens/eBay sees)
       // fullFrameBase64 = the full stream frame (for QA)
       const originalImageBase64 = fullFrameBase64 || imageBase64;
+      // Shortcut screenshots are full-screen with no scan zone. Ask Gemini
+      // where the product is and store that crop next to the original so the
+      // framing can be reviewed (admin "Avant / Après"). Lens still receives
+      // the full screenshot. Disable with SHORTCUT_CROP_OBSERVE=false.
+      if (client === 'ios-shortcut' && imageBase64 && !fullFrameBase64
+          && process.env.GEMINI_API_KEY && process.env.SHORTCUT_CROP_OBSERVE !== 'false') {
+        _obsCropPromise = detectProductCrop(imageBase64);
+      }
       const rawTitle = (streamTitle ?? '').trim();
       const hasTitle = rawTitle.length > 3 && !isFakeTitle(rawTitle);
       // If zone crop was done client-side, imageBase64 is already cropped
